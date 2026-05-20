@@ -28,11 +28,14 @@ int main(int argc, char* argv[]) {
     const char* ply_path = NULL;
     const char* colmap_dir = NULL;
     const char* mesh_path = NULL;
+    const char* object_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--colmap") == 0 && i + 1 < argc) {
             colmap_dir = argv[++i];
         } else if (strcmp(argv[i], "--mesh") == 0 && i + 1 < argc) {
             mesh_path = argv[++i];
+        } else if (strcmp(argv[i], "--object") == 0 && i + 1 < argc) {
+            object_path = argv[++i];
         } else if (!ply_path) {
             ply_path = argv[i];
         }
@@ -118,6 +121,14 @@ int main(int argc, char* argv[]) {
     if (mesh_path) {
         if (mesh_load(mesh_path, &mesh)) {
             renderer_upload_mesh(&renderer, &mesh);
+        }
+    }
+
+    // Static scene object (no animation, identity transform)
+    Mesh object = {};
+    if (object_path) {
+        if (mesh_load(object_path, &object)) {
+            renderer_upload_object_mesh(&renderer, &object);
         }
     }
 
@@ -1035,6 +1046,7 @@ int main(int argc, char* argv[]) {
 
     if (scene_loaded) free_scene(&scene);
     if (mesh_path) mesh_free(&mesh);
+    if (object_path) mesh_free(&object);
     if (refviews_loaded) {
         refview_release_images(&refviews, device);
         refview_free(&refviews);

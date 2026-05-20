@@ -27,6 +27,19 @@ struct NodeRenderParams {
     float        half_size;   // AABB half-extent for the wireframe cubes
 };
 
+// Per-mesh GPU resources. The renderer owns one of these for the animated
+// `--mesh` slot and one for the static `--object` slot. The pipeline and
+// sampler are shared (same vertex format / shading).
+struct MeshGpu {
+    SDL_GPUBuffer*   vertex_buffer;
+    SDL_GPUBuffer*   index_buffer;
+    SDL_GPUTexture** textures;          // one GPU texture per material texture
+    uint32_t         texture_count;
+    SDL_GPUTexture*  default_texture;   // 1x1 white fallback for submeshes w/o texture
+    MeshSubmesh*     submeshes;         // per-submesh draw ranges + texture id
+    uint32_t         submesh_count;
+};
+
 struct Renderer {
     SDL_GPUDevice*          device;
     SDL_Window*             window;
@@ -39,16 +52,10 @@ struct Renderer {
     SDL_GPUBuffer*          gaussian_buffer;
     SDL_GPUBuffer*          cube_vertex_buffer;
     SDL_GPUBuffer*          cube_index_buffer;
-    // TODO: generalize to support multiple loaded meshes (array/list of mesh objects)
-    SDL_GPUBuffer*          mesh_vertex_buffer;
-    SDL_GPUBuffer*          mesh_index_buffer;
-    SDL_GPUTexture**        mesh_textures;          // one GPU texture per material texture
-    uint32_t                mesh_texture_count;
-    SDL_GPUTexture*         mesh_default_texture;   // 1x1 white fallback for submeshes w/o texture
+    MeshGpu                 mesh_gpu;               // primary animated mesh (--mesh)
+    MeshGpu                 object_gpu;             // static scene object (--object)
     SDL_GPUSampler*         mesh_sampler;
-    MeshSubmesh*            mesh_submeshes;         // per-submesh draw ranges + texture id
-    uint32_t                mesh_submesh_count;
-    MeshTransform           mesh_transform;         // translation/rotation/scale applied each frame
+    MeshTransform           mesh_transform;         // translation/rotation/scale applied each frame to mesh_gpu
     SDL_GPUBuffer*          index_buffer;
     SDL_GPUTexture*         depth_texture;
     uint32_t                depth_w, depth_h;
@@ -62,6 +69,9 @@ struct Renderer {
 bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window);
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene);
 bool renderer_upload_mesh(Renderer* r, const Mesh* mesh);
+// Upload a second, static mesh that is drawn alongside the primary mesh with
+// an identity model transform. Intended for scene props supplied via --object.
+bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
 // map_cam: if non-NULL, a second render pass is appended that draws mesh,
 // splats, and wireframe nodes from this camera on top of the FPS frame
 // (load_op=LOAD on color, clear depth). Used for the top-down map overlay.
