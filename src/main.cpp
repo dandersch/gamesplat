@@ -24,6 +24,157 @@ static bool file_exists(const char* path) {
     return true;
 }
 
+// Examine mode: while active, the --object mesh is lerped in front of the
+// camera for inspection (separate from the refview hotspot inspect mode).
+// State transitions:
+//   OFF      --left-click on object-->  LERP_IN
+//   LERP_IN  --t reaches 1.0------->    ACTIVE     (orbit controls live in commit 3)
+//   ACTIVE   --right-click-------->     LERP_OUT
+//   LERP_OUT --t reaches 1.0------->    OFF        (object_transform restored to `rest`)
+struct Examine {
+    enum State { OFF, LERP_IN, ACTIVE, LERP_OUT };
+    State         state;
+    float         t;
+    MeshTransform start;             // object_transform at the moment the current lerp began
+    MeshTransform target;            // pose the current lerp is heading to
+    MeshTransform rest;              // pose to restore when leaving examine
+    float         aabb_center_local[3];
+    float         aabb_radius;
+};
+static const float EXAMINE_LERP_DURATION = 0.4f;
+
+static bool examine_locks_input(const Examine& e) { return e.state != Examine::OFF; }
+
+static float smoothstep01(float t) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// Linear interp between two MeshTransforms with smoothstep easing on t.
+// Rotation uses naive per-axis Euler lerp (good enough for the small swings
+// we get going from rest -> camera-aligned pose over 0.4s).
+static void examine_lerp_transform(const MeshTransform& a, const MeshTransform& b,
+                                   float t, MeshTransform* out) {
+    float k = smoothstep01(t);
+    for (int i = 0; i < 3; ++i) {
+        out->translation[i]    = a.translation[i]    + (b.translation[i]    - a.translation[i]) * k;
+        out->rotation_euler[i] = a.rotation_euler[i] + (b.rotation_euler[i] - a.rotation_euler[i]) * k;
+    }
+    out->scale = a.scale + (b.scale - a.scale) * k;
+}
+
+// Compute the world-space pose that puts the mesh's AABB center at a fixed
+// distance in front of the camera with the object's local axes aligned to the
+// camera's right/up/forward basis. Distance is auto-derived so the AABB sphere
+// fits ~80% of the vertical viewport at the camera's current FOV.
+//
+// rest_scale is preserved from the object's resting transform.
+static void examine_compute_target(const Camera& cam,
+                                   const float aabb_center_local[3],
+                                   float aabb_radius,
+                                   const MeshTransform& rest,
+                                   MeshTransform* out) {
+    // Camera basis in world space (right-handed; matches
+    // camera_get_overlay_ray_basis). `cam_fwd` is the actual look direction
+    // and is used unmodified for placing the object in front of the camera.
+    float cam_fwd[3];
+    camera_get_forward(&cam, cam_fwd);
+    float world_up[3] = { 0.0f, 1.0f, 0.0f };
+    float right[3] = {
+        world_up[1]*cam_fwd[2] - world_up[2]*cam_fwd[1],
+        world_up[2]*cam_fwd[0] - world_up[0]*cam_fwd[2],
+        world_up[0]*cam_fwd[1] - world_up[1]*cam_fwd[0],
+    };
+    float rl = sqrtf(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+    if (rl > 1e-8f) { right[0]/=rl; right[1]/=rl; right[2]/=rl; }
+    float cam_up[3] = {
+        cam_fwd[1]*right[2] - cam_fwd[2]*right[1],
+        cam_fwd[2]*right[0] - cam_fwd[0]*right[2],
+        cam_fwd[0]*right[1] - cam_fwd[1]*right[0],
+    };
+
+    // Target rotation columns. We want:
+    //   - model local +Y -> world up   (right-side up)
+    //   - model local +Z -> -cam_fwd   (model's "front" faces the camera)
+    // For the basis to be a proper rotation (det = +1), the right column
+    // must also be negated relative to the camera right.
+    float right_col[3] = { -right[0], -right[1], -right[2] };
+    float up[3]        = {  cam_up[0],   cam_up[1],   cam_up[2]  };
+    float fwd[3]       = { -cam_fwd[0], -cam_fwd[1], -cam_fwd[2] };
+
+    // Distance: place the AABB sphere so its diameter spans 80% of the
+    // vertical viewport. Clamped to a sane minimum so tiny meshes don't sit
+    // on the near plane.
+    float effective_r = aabb_radius * rest.scale;
+    if (effective_r < 1e-4f) effective_r = 1e-4f;
+    float dist = effective_r / tanf(cam.fov_y * 0.5f) / 0.8f;
+    if (dist < effective_r * 1.5f) dist = effective_r * 1.5f;
+
+    // Decompose [right_col | up | fwd] into Z-Y-X intrinsic Euler (inverse of
+    // mat4_from_transform in renderer.cpp).
+    //   r20 = -sy
+    //   r21 =  sx*cy   r22 = cx*cy   -> x = atan2(r21, r22)
+    //   r00 =  cy*cz   r10 = cy*sz   -> z = atan2(r10, r00)
+    float r20 = right_col[2];   // column 0 = right_col, row 2
+    float r21 = up[2];          // column 1 = up,        row 2
+    float r22 = fwd[2];         // column 2 = fwd,       row 2
+    float r00 = right_col[0];
+    float r10 = right_col[1];
+    float sy  = -r20;
+    if (sy >  1.0f) sy =  1.0f;
+    if (sy < -1.0f) sy = -1.0f;
+    out->rotation_euler[1] = asinf(sy);
+    if (fabsf(sy) < 0.99995f) {
+        out->rotation_euler[0] = atan2f(r21, r22);
+        out->rotation_euler[2] = atan2f(r10, r00);
+    } else {
+        // Gimbal lock fallback: fold roll into yaw.
+        out->rotation_euler[0] = 0.0f;
+        out->rotation_euler[2] = atan2f(-right_col[1], up[1]);
+    }
+
+    out->scale = rest.scale;
+
+    // Translation: cam_pos + fwd*dist places the AABB *center* there, so we
+    // subtract the rotated+scaled local center offset from the target point.
+    // Local center in world = R * (center * scale) (no T yet).
+    float cs = rest.scale;
+    float cx = aabb_center_local[0] * cs;
+    float cy = aabb_center_local[1] * cs;
+    float cz = aabb_center_local[2] * cs;
+    float center_w[3] = {
+        right_col[0]*cx + up[0]*cy + fwd[0]*cz,
+        right_col[1]*cx + up[1]*cy + fwd[1]*cz,
+        right_col[2]*cx + up[2]*cy + fwd[2]*cz,
+    };
+    // Use the actual camera look direction (cam_fwd) for placement; the
+    // negated `fwd` is only used to orient the model's local axes.
+    out->translation[0] = cam.position[0] + cam_fwd[0]*dist - center_w[0];
+    out->translation[1] = cam.position[1] + cam_fwd[1]*dist - center_w[1];
+    out->translation[2] = cam.position[2] + cam_fwd[2]*dist - center_w[2];
+}
+
+// Advance the examine lerp and write the resulting object_transform.
+// Returns true if any state was touched (caller uses this to skip FPS input).
+static bool examine_tick(Examine* e, MeshTransform* object_transform, float dt) {
+    if (e->state == Examine::OFF || e->state == Examine::ACTIVE) return e->state != Examine::OFF;
+    e->t += dt / EXAMINE_LERP_DURATION;
+    if (e->t >= 1.0f) {
+        e->t = 1.0f;
+        examine_lerp_transform(e->start, e->target, 1.0f, object_transform);
+        if (e->state == Examine::LERP_IN) {
+            e->state = Examine::ACTIVE;
+        } else { // LERP_OUT
+            *object_transform = e->rest;
+            e->state = Examine::OFF;
+        }
+    } else {
+        examine_lerp_transform(e->start, e->target, e->t, object_transform);
+    }
+    return true;
+}
+
 // Slab-style ray vs axis-aligned box intersection. On hit, returns true and
 // writes the near intersection distance to *out_t (clamped to >= 0 so that
 // the camera being inside the box still counts as a hit at t = 0).
@@ -217,6 +368,9 @@ int main(int argc, char* argv[]) {
     // Map overlay interaction: left-drag pans, wheel zooms toward cursor.
     bool map_dragging = false;
 
+    // Object examine mode (--object). Disabled until the user clicks the mesh.
+    Examine examine = {};
+
     while (running) {
         uint64_t now = SDL_GetPerformanceCounter();
         float dt = (float)(now - last_time) / (float)freq;
@@ -250,6 +404,24 @@ int main(int argc, char* argv[]) {
                 break;
             }
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (ev.button.button == SDL_BUTTON_RIGHT && examine.state != Examine::OFF) {
+                    // While examining, right-click exits. Cancels any in-flight
+                    // lerp by retargeting from the current pose back to `rest`.
+                    if (examine.state == Examine::ACTIVE) {
+                        examine.start = renderer.object_transform;
+                        examine.target = examine.rest;
+                        examine.t = 0.0f;
+                        examine.state = Examine::LERP_OUT;
+                    } else if (examine.state == Examine::LERP_IN) {
+                        // Mid-entry: swap direction so the easing stays smooth.
+                        examine.start = renderer.object_transform;
+                        examine.target = examine.rest;
+                        examine.t = 0.0f;
+                        examine.state = Examine::LERP_OUT;
+                    }
+                    // Do NOT toggle cam.camera_mode or map overlay.
+                    break;
+                }
                 if (ev.button.button == SDL_BUTTON_RIGHT) {
                     if (refviews_loaded && refviews.in_inspect) {
                         // Exit inspect: lerp position back to where we clicked
@@ -298,16 +470,16 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 if (ev.button.button == SDL_BUTTON_LEFT && cam.camera_mode &&
-                    refviews_loaded && !refviews.lerping) {
+                    examine.state == Examine::OFF && !map_view_active) {
                     // Ray from screen center (crosshair) into scene
                     float forward[3];
                     camera_get_forward(&cam, forward);
 
                     // 1. Hotspot pick on the currently-overlaid view (if any).
-                    //    Hotspots take precedence over neighbor-node clicks.
+                    //    Hotspots take precedence over object/neighbor clicks.
                     int  hotspot_view  = -1;
                     int32_t hotspot_idx = -1;
-                    if (refviews.current_node >= 0) {
+                    if (refviews_loaded && !refviews.lerping && refviews.current_node >= 0) {
                         RefView* cv = &refviews.views[refviews.current_node];
                         if (cv->hotspot_count > 0) {
                             // Gate on overlay-visible distance (matches fade_dist=0.1 used below).
@@ -393,37 +565,54 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    // 2. Fallback: test against all neighbor AABBs, pick closest hit
-                    float best_t = 1e30f;
+                    // 2. Object pick (--object mesh, world-AABB) vs nearest
+                    //    neighbor-node pick. Closer hit wins; object > node by
+                    //    depth. Hotspot above already short-circuited if hit.
+                    float object_t = 1e30f;
+                    if (object_path) {
+                        float obj_model[16];
+                        mat4_from_transform(renderer.object_transform, obj_model);
+                        float obmin[3], obmax[3];
+                        mesh_aabb_world(object.aabb_min, object.aabb_max, obj_model, obmin, obmax);
+                        float t;
+                        if (ray_aabb(cam.position, forward, obmin, obmax, &t)) object_t = t;
+                    }
+
+                    float node_t = 1e30f;
                     int best_hit = -1;
-                    for (uint32_t ni = 0; ni < neighbor_count; ni++) {
-                        const float* center = &neighbor_positions[ni*3];
-                        float hs = node_half_size;
-                        // Slab method
-                        float tmin = -1e30f, tmax = 1e30f;
-                        for (int axis = 0; axis < 3; axis++) {
-                            float o = cam.position[axis];
-                            float d = forward[axis];
-                            float bmin = center[axis] - hs;
-                            float bmax = center[axis] + hs;
-                            if (fabsf(d) < 1e-8f) {
-                                if (o < bmin || o > bmax) { tmin = 1e30f; break; }
-                            } else {
-                                float t1 = (bmin - o) / d;
-                                float t2 = (bmax - o) / d;
-                                if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-                                if (t1 > tmin) tmin = t1;
-                                if (t2 < tmax) tmax = t2;
-                                if (tmin > tmax) { tmin = 1e30f; break; }
+                    if (refviews_loaded && !refviews.lerping) {
+                        for (uint32_t ni = 0; ni < neighbor_count; ni++) {
+                            const float* c = &neighbor_positions[ni*3];
+                            float hs = node_half_size;
+                            float bmin[3] = { c[0]-hs, c[1]-hs, c[2]-hs };
+                            float bmax[3] = { c[0]+hs, c[1]+hs, c[2]+hs };
+                            float t;
+                            if (ray_aabb(cam.position, forward, bmin, bmax, &t) && t < node_t) {
+                                node_t = t;
+                                best_hit = (int)ni;
                             }
-                        }
-                        if (tmin < best_t && tmax > 0.0f) {
-                            best_t = tmin;
-                            best_hit = (int)ni;
                         }
                     }
 
-                    if (best_hit >= 0) {
+                    if (object_t < 1e30f && object_t <= node_t) {
+                        // Start examine: capture rest pose, compute target,
+                        // begin LERP_IN. AABB radius = half-diagonal.
+                        sfx_play(&sfx_transition, 1.2f);
+                        examine.rest  = renderer.object_transform;
+                        examine.start = renderer.object_transform;
+                        examine.aabb_center_local[0] = (object.aabb_min[0] + object.aabb_max[0]) * 0.5f;
+                        examine.aabb_center_local[1] = (object.aabb_min[1] + object.aabb_max[1]) * 0.5f;
+                        examine.aabb_center_local[2] = (object.aabb_min[2] + object.aabb_max[2]) * 0.5f;
+                        float ex = object.aabb_max[0] - object.aabb_min[0];
+                        float ey = object.aabb_max[1] - object.aabb_min[1];
+                        float ez = object.aabb_max[2] - object.aabb_min[2];
+                        examine.aabb_radius = 0.5f * sqrtf(ex*ex + ey*ey + ez*ez);
+                        examine_compute_target(cam, examine.aabb_center_local,
+                                               examine.aabb_radius, examine.rest,
+                                               &examine.target);
+                        examine.t = 0.0f;
+                        examine.state = Examine::LERP_IN;
+                    } else if (best_hit >= 0) {
                         sfx_play(&sfx_transition, 1.2f);
                         uint32_t view_idx = neighbor_indices[best_hit];
                         RefView* tv = &refviews.views[view_idx];
@@ -597,8 +786,16 @@ int main(int argc, char* argv[]) {
         // Update reference view interpolation (locks camera input while active)
         bool camera_locked = refview_update(&refviews, &cam, dt);
 
+        // Drive the examine lerp; while examining, FPS controls are fully
+        // muted (no mouse look, no WASD) to keep the cam stationary for the
+        // eventual return-lerp.
+        bool examine_active = examine_locks_input(examine);
+        examine_tick(&examine, &renderer.object_transform, dt);
+
         // Update camera (allow mouse look during lerp, but block WASD movement)
-        if (camera_locked) {
+        if (examine_active) {
+            camera_update(&cam, keys, 0.0f, 0.0f, 0.0f);
+        } else if (camera_locked) {
             camera_update(&cam, keys, mouse_dx, mouse_dy, 0);
         } else if (cam.camera_mode || !ImGui::GetIO().WantCaptureKeyboard) {
             camera_update(&cam, keys, mouse_dx, mouse_dy, dt);
@@ -817,7 +1014,10 @@ int main(int argc, char* argv[]) {
 
         // Draw crosshair in camera mode (highlight when aiming at a node,
         // or show an upward arrow when aiming at a hotspot on the overlay).
-        if (cam.camera_mode) {
+        // Suppressed during examine: the object fills the view, so a hover
+        // icon would just signal "you can examine what you're already
+        // examining". The camera is also locked, so picks are meaningless.
+        if (cam.camera_mode && !examine_active) {
             bool crosshair_hover = false;
             bool hotspot_hover = false;
 
