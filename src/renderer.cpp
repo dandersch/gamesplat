@@ -38,6 +38,8 @@ bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window) {
     r->mesh_sampler = NULL;
     r->mesh_transform = {};
     r->mesh_transform.scale = 1.0f;
+    r->object_transform = {};
+    r->object_transform.scale = 1.0f;
     r->depth_texture = NULL;
     r->depth_w = 0;
     r->depth_h = 0;
@@ -917,9 +919,13 @@ static void draw_world(Renderer* r, SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass
         draw_mesh_slot(&r->mesh_gpu, mvp);
     }
 
-    // Static --object mesh (identity model transform).
+    // Static --object mesh (transformed by object_transform; identity by default).
     if (r->object_gpu.vertex_buffer) {
-        draw_mesh_slot(&r->object_gpu, vp);
+        float obj_model[16];
+        mat4_from_transform(r->object_transform, obj_model);
+        float obj_mvp[16];
+        mat4_mul(vp, obj_model, obj_mvp);
+        draw_mesh_slot(&r->object_gpu, obj_mvp);
     }
 
     // Splats

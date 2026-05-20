@@ -451,13 +451,66 @@ bool mesh_load(const char* path, Mesh* mesh) {
         ext[i] = c;
     }
 
+    bool ok = false;
     if (strcmp(ext, "obj") == 0) {
-        return mesh_load_obj(path, mesh);
+        ok = mesh_load_obj(path, mesh);
     } else if (strcmp(ext, "glb") == 0 || strcmp(ext, "gltf") == 0) {
-        return mesh_load_gltf(path, mesh);
+        ok = mesh_load_gltf(path, mesh);
     } else {
         fprintf(stderr, "Unrecognized mesh file extension: %s\n", path);
         return false;
+    }
+    if (!ok) return false;
+
+    // Compute local-space AABB by sweeping interleaved positions
+    // (stride 5 floats: vec3 pos + vec2 uv).
+    if (mesh->vertex_count > 0 && mesh->vertices) {
+        const float* v = mesh->vertices;
+        mesh->aabb_min[0] = mesh->aabb_max[0] = v[0];
+        mesh->aabb_min[1] = mesh->aabb_max[1] = v[1];
+        mesh->aabb_min[2] = mesh->aabb_max[2] = v[2];
+        for (uint32_t vi = 1; vi < mesh->vertex_count; ++vi) {
+            float x = v[vi*5 + 0], y = v[vi*5 + 1], z = v[vi*5 + 2];
+            if (x < mesh->aabb_min[0]) mesh->aabb_min[0] = x;
+            if (y < mesh->aabb_min[1]) mesh->aabb_min[1] = y;
+            if (z < mesh->aabb_min[2]) mesh->aabb_min[2] = z;
+            if (x > mesh->aabb_max[0]) mesh->aabb_max[0] = x;
+            if (y > mesh->aabb_max[1]) mesh->aabb_max[1] = y;
+            if (z > mesh->aabb_max[2]) mesh->aabb_max[2] = z;
+        }
+        fprintf(stderr, "Mesh AABB: min(%.3f, %.3f, %.3f) max(%.3f, %.3f, %.3f)\n",
+                mesh->aabb_min[0], mesh->aabb_min[1], mesh->aabb_min[2],
+                mesh->aabb_max[0], mesh->aabb_max[1], mesh->aabb_max[2]);
+    }
+    return true;
+}
+
+void mesh_aabb_world(const float local_min[3], const float local_max[3],
+                     const float model[16], float out_min[3], float out_max[3]) {
+    // Transform all 8 corners; column-major matrix multiply (m * v).
+    bool first = true;
+    for (int i = 0; i < 8; ++i) {
+        float c[3] = {
+            (i & 1) ? local_max[0] : local_min[0],
+            (i & 2) ? local_max[1] : local_min[1],
+            (i & 4) ? local_max[2] : local_min[2],
+        };
+        float wx = model[0]*c[0] + model[4]*c[1] + model[8] *c[2] + model[12];
+        float wy = model[1]*c[0] + model[5]*c[1] + model[9] *c[2] + model[13];
+        float wz = model[2]*c[0] + model[6]*c[1] + model[10]*c[2] + model[14];
+        if (first) {
+            out_min[0] = out_max[0] = wx;
+            out_min[1] = out_max[1] = wy;
+            out_min[2] = out_max[2] = wz;
+            first = false;
+        } else {
+            if (wx < out_min[0]) out_min[0] = wx;
+            if (wx > out_max[0]) out_max[0] = wx;
+            if (wy < out_min[1]) out_min[1] = wy;
+            if (wy > out_max[1]) out_max[1] = wy;
+            if (wz < out_min[2]) out_min[2] = wz;
+            if (wz > out_max[2]) out_max[2] = wz;
+        }
     }
 }
 

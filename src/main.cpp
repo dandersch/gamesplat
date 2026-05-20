@@ -24,6 +24,29 @@ static bool file_exists(const char* path) {
     return true;
 }
 
+// Slab-style ray vs axis-aligned box intersection. On hit, returns true and
+// writes the near intersection distance to *out_t (clamped to >= 0 so that
+// the camera being inside the box still counts as a hit at t = 0).
+static bool ray_aabb(const float origin[3], const float dir[3],
+                     const float bmin[3], const float bmax[3], float* out_t) {
+    float tmin = -1e30f, tmax = 1e30f;
+    for (int axis = 0; axis < 3; axis++) {
+        float o = origin[axis], d = dir[axis];
+        if (fabsf(d) < 1e-8f) {
+            if (o < bmin[axis] || o > bmax[axis]) return false;
+        } else {
+            float t1 = (bmin[axis] - o) / d, t2 = (bmax[axis] - o) / d;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+    }
+    if (tmax < 0.0f) return false;
+    *out_t = tmin > 0.0f ? tmin : 0.0f;
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     const char* ply_path = NULL;
     const char* colmap_dir = NULL;
@@ -824,28 +847,43 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            if (!hotspot_hover && refviews_loaded && !refviews.lerping && neighbor_count > 0) {
+            // Depth-based pick between object AABB and neighbor node boxes;
+            // hotspot already wins absolutely above. Closer of (object, node)
+            // wins; node hover paints the cyan circle, object hover paints the
+            // magnifying glass.
+            bool object_hover = false;
+            if (!hotspot_hover) {
                 float forward[3];
                 camera_get_forward(&cam, forward);
-                for (uint32_t ni = 0; ni < neighbor_count; ni++) {
-                    const float* c = &neighbor_positions[ni*3];
-                    float hs = node_half_size;
-                    float tmin = -1e30f, tmax = 1e30f;
-                    for (int axis = 0; axis < 3; axis++) {
-                        float o = cam.position[axis];
-                        float d = forward[axis];
-                        float bmin = c[axis] - hs, bmax = c[axis] + hs;
-                        if (fabsf(d) < 1e-8f) {
-                            if (o < bmin || o > bmax) { tmin = 1e30f; break; }
-                        } else {
-                            float t1 = (bmin - o) / d, t2 = (bmax - o) / d;
-                            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-                            if (t1 > tmin) tmin = t1;
-                            if (t2 < tmax) tmax = t2;
-                            if (tmin > tmax) { tmin = 1e30f; break; }
+
+                float object_t = 1e30f;
+                if (object_path) {
+                    float obj_model[16];
+                    mat4_from_transform(renderer.object_transform, obj_model);
+                    float obmin[3], obmax[3];
+                    mesh_aabb_world(object.aabb_min, object.aabb_max, obj_model, obmin, obmax);
+                    float t;
+                    if (ray_aabb(cam.position, forward, obmin, obmax, &t)) object_t = t;
+                }
+
+                float node_t = 1e30f;
+                if (refviews_loaded && !refviews.lerping && neighbor_count > 0) {
+                    for (uint32_t ni = 0; ni < neighbor_count; ni++) {
+                        const float* c = &neighbor_positions[ni*3];
+                        float hs = node_half_size;
+                        float bmin[3] = { c[0]-hs, c[1]-hs, c[2]-hs };
+                        float bmax[3] = { c[0]+hs, c[1]+hs, c[2]+hs };
+                        float t;
+                        if (ray_aabb(cam.position, forward, bmin, bmax, &t) && t < node_t) {
+                            node_t = t;
                         }
                     }
-                    if (tmax > 0.0f && tmin < 1e30f) { crosshair_hover = true; break; }
+                }
+
+                if (object_t < 1e30f && object_t <= node_t) {
+                    object_hover = true;
+                } else if (node_t < 1e30f) {
+                    crosshair_hover = true;
                 }
             }
 
@@ -873,6 +911,21 @@ int main(int argc, char* argv[]) {
                 dl->AddLine(lstem, lbase, outline_col, 1.5f);
                 dl->AddLine(rstem, rbase, outline_col, 1.5f);
                 dl->AddLine(lbase, rbase, outline_col, 1.5f);
+            } else if (object_hover) {
+                // Magnifying-glass icon: hollow ring + diagonal handle.
+                ImU32 col_fill    = IM_COL32(255, 230, 80, 240);
+                ImU32 col_outline = IM_COL32(0,   0,   0,   220);
+                ImVec2 ring_c(center.x - 2.0f, center.y - 2.0f);
+                float  ring_r = 6.0f;
+                dl->AddCircle(ring_c, ring_r,        col_fill,    24, 2.0f);
+                dl->AddCircle(ring_c, ring_r + 1.0f, col_outline, 24, 1.0f);
+                dl->AddCircle(ring_c, ring_r - 1.0f, col_outline, 24, 1.0f);
+                // Handle: from ring edge diagonally down-right.
+                float k = 0.7071f; // cos/sin 45
+                ImVec2 h0(ring_c.x + ring_r * k,        ring_c.y + ring_r * k);
+                ImVec2 h1(ring_c.x + (ring_r + 6.0f) * k, ring_c.y + (ring_r + 6.0f) * k);
+                dl->AddLine(h0, h1, col_outline, 3.5f);
+                dl->AddLine(h0, h1, col_fill,    2.0f);
             } else if (crosshair_hover) {
                 dl->AddCircleFilled(center, 5.0f, IM_COL32(0, 200, 255, 240));
                 dl->AddCircle(center, 8.0f, IM_COL32(0, 200, 255, 120), 0, 1.5f);

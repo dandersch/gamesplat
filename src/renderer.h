@@ -56,6 +56,7 @@ struct Renderer {
     MeshGpu                 object_gpu;             // static scene object (--object)
     SDL_GPUSampler*         mesh_sampler;
     MeshTransform           mesh_transform;         // translation/rotation/scale applied each frame to mesh_gpu
+    MeshTransform           object_transform;       // applied each frame to object_gpu (identity by default)
     SDL_GPUBuffer*          index_buffer;
     SDL_GPUTexture*         depth_texture;
     uint32_t                depth_w, depth_h;
