@@ -28,7 +28,7 @@ static bool file_exists(const char* path) {
 // camera for inspection (separate from the refview hotspot inspect mode).
 // State transitions:
 //   OFF      --left-click on object-->  LERP_IN
-//   LERP_IN  --t reaches 1.0------->    ACTIVE     (orbit controls live in commit 3)
+//   LERP_IN  --t reaches 1.0------->    ACTIVE     (orbit + zoom controls live)
 //   ACTIVE   --right-click-------->     LERP_OUT
 //   LERP_OUT --t reaches 1.0------->    OFF        (object_transform restored to `rest`)
 struct Examine {
@@ -40,8 +40,82 @@ struct Examine {
     MeshTransform rest;              // pose to restore when leaving examine
     float         aabb_center_local[3];
     float         aabb_radius;
+
+    // Orbit state, valid once we reach (or pass through) ACTIVE.
+    // Camera basis snapshot at examine-entry: drives the zoom axis and the
+    // pitch axis so they stay stable even though the FPS camera is locked.
+    float         cam_fwd_entry[3];
+    float         cam_right_entry[3];
+    float         dist_base;             // auto-fit distance computed at entry
+    float         base_rotation_euler[3];// target rotation at entry (R0); orbit composes on top
+    float         orbit_yaw;             // accumulated mouse-X drag (about world up)
+    float         orbit_pitch;           // accumulated mouse-Y drag (about cam_right_entry)
+    float         distance_scale;        // scroll-wheel zoom multiplier (1.0 = entry distance)
 };
 static const float EXAMINE_LERP_DURATION = 0.4f;
+static const float EXAMINE_ORBIT_SENSITIVITY = 0.005f;
+static const float EXAMINE_PITCH_LIMIT       = 1.50f;  // ~86 deg
+static const float EXAMINE_ZOOM_MIN          = 0.40f;
+static const float EXAMINE_ZOOM_MAX          = 3.00f;
+
+// 3x3 column-major rotation helpers. mat3_from_euler_zyx mirrors the layout
+// used by mat4_from_transform in renderer.cpp so decomposition round-trips.
+static void mat3_from_euler_zyx(const float e[3], float m[9]) {
+    float cx = cosf(e[0]), sx = sinf(e[0]);
+    float cy = cosf(e[1]), sy = sinf(e[1]);
+    float cz = cosf(e[2]), sz = sinf(e[2]);
+    // column 0
+    m[0] = cy * cz;
+    m[1] = cy * sz;
+    m[2] = -sy;
+    // column 1
+    m[3] = sx * sy * cz - cx * sz;
+    m[4] = sx * sy * sz + cx * cz;
+    m[5] = sx * cy;
+    // column 2
+    m[6] = cx * sy * cz + sx * sz;
+    m[7] = cx * sy * sz - sx * cz;
+    m[8] = cx * cy;
+}
+
+static void mat3_mul(const float a[9], const float b[9], float out[9]) {
+    for (int c = 0; c < 3; c++) {
+        for (int r = 0; r < 3; r++) {
+            out[c*3+r] = a[0*3+r]*b[c*3+0] + a[1*3+r]*b[c*3+1] + a[2*3+r]*b[c*3+2];
+        }
+    }
+}
+
+// Rodrigues: rotation by `theta` (rad) about unit axis `a`. Column-major.
+static void mat3_axis_angle(const float a[3], float theta, float m[9]) {
+    float c = cosf(theta), s = sinf(theta), C = 1.0f - c;
+    float x = a[0], y = a[1], z = a[2];
+    m[0] = c + x*x*C;
+    m[1] = y*x*C + z*s;
+    m[2] = z*x*C - y*s;
+    m[3] = x*y*C - z*s;
+    m[4] = c + y*y*C;
+    m[5] = z*y*C + x*s;
+    m[6] = x*z*C + y*s;
+    m[7] = y*z*C - x*s;
+    m[8] = c + z*z*C;
+}
+
+// Inverse of mat3_from_euler_zyx; uses the same gimbal-lock fallback as
+// examine_compute_target.
+static void mat3_decompose_zyx(const float m[9], float e[3]) {
+    float sy = -m[2]; // -r20
+    if (sy > 1.0f) sy = 1.0f;
+    if (sy < -1.0f) sy = -1.0f;
+    e[1] = asinf(sy);
+    if (fabsf(sy) < 0.99995f) {
+        e[0] = atan2f(m[5], m[8]);   // atan2(r21, r22)
+        e[2] = atan2f(m[1], m[0]);   // atan2(r10, r00)
+    } else {
+        e[0] = 0.0f;
+        e[2] = atan2f(-m[3], m[4]);  // atan2(-r01, r11)
+    }
+}
 
 static bool examine_locks_input(const Examine& e) { return e.state != Examine::OFF; }
 
@@ -596,6 +670,7 @@ int main(int argc, char* argv[]) {
 
                     if (object_t < 1e30f && object_t <= node_t) {
                         // Start examine: capture rest pose, compute target,
+                        // snapshot camera basis + distance for orbit/zoom,
                         // begin LERP_IN. AABB radius = half-diagonal.
                         sfx_play(&sfx_transition, 1.2f);
                         examine.rest  = renderer.object_transform;
@@ -610,6 +685,37 @@ int main(int argc, char* argv[]) {
                         examine_compute_target(cam, examine.aabb_center_local,
                                                examine.aabb_radius, examine.rest,
                                                &examine.target);
+
+                        // Snapshot camera basis at examine entry. Reused each
+                        // frame while ACTIVE so zoom + pitch axes stay stable.
+                        camera_get_forward(&cam, examine.cam_fwd_entry);
+                        float wu[3] = { 0.0f, 1.0f, 0.0f };
+                        examine.cam_right_entry[0] = wu[1]*examine.cam_fwd_entry[2] - wu[2]*examine.cam_fwd_entry[1];
+                        examine.cam_right_entry[1] = wu[2]*examine.cam_fwd_entry[0] - wu[0]*examine.cam_fwd_entry[2];
+                        examine.cam_right_entry[2] = wu[0]*examine.cam_fwd_entry[1] - wu[1]*examine.cam_fwd_entry[0];
+                        float rl = sqrtf(examine.cam_right_entry[0]*examine.cam_right_entry[0]
+                                       + examine.cam_right_entry[1]*examine.cam_right_entry[1]
+                                       + examine.cam_right_entry[2]*examine.cam_right_entry[2]);
+                        if (rl > 1e-8f) {
+                            examine.cam_right_entry[0] /= rl;
+                            examine.cam_right_entry[1] /= rl;
+                            examine.cam_right_entry[2] /= rl;
+                        }
+
+                        // Recompute dist with the same formula compute_target
+                        // used (kept in sync; if you change one, change both).
+                        float r = examine.aabb_radius * examine.rest.scale;
+                        if (r < 1e-4f) r = 1e-4f;
+                        examine.dist_base = r / tanf(cam.fov_y * 0.5f) / 0.8f;
+                        if (examine.dist_base < r * 1.5f) examine.dist_base = r * 1.5f;
+
+                        examine.base_rotation_euler[0] = examine.target.rotation_euler[0];
+                        examine.base_rotation_euler[1] = examine.target.rotation_euler[1];
+                        examine.base_rotation_euler[2] = examine.target.rotation_euler[2];
+                        examine.orbit_yaw      = 0.0f;
+                        examine.orbit_pitch    = 0.0f;
+                        examine.distance_scale = 1.0f;
+
                         examine.t = 0.0f;
                         examine.state = Examine::LERP_IN;
                     } else if (best_hit >= 0) {
@@ -674,6 +780,16 @@ int main(int argc, char* argv[]) {
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
                 if (!ImGui::GetIO().WantCaptureMouse) {
+                    if (examine.state != Examine::OFF) {
+                        // Zoom while examining: scale the AABB-fit distance.
+                        // Clamped so the object can't be shoved into the
+                        // camera or flown off to infinity.
+                        float factor = (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
+                        examine.distance_scale *= factor;
+                        if (examine.distance_scale < EXAMINE_ZOOM_MIN) examine.distance_scale = EXAMINE_ZOOM_MIN;
+                        if (examine.distance_scale > EXAMINE_ZOOM_MAX) examine.distance_scale = EXAMINE_ZOOM_MAX;
+                        break;
+                    }
                     if (map_view_active) {
                         // Zoom toward the cursor: scale ortho_size, then shift
                         // map_cam.position so the world point under the cursor
@@ -791,6 +907,50 @@ int main(int argc, char* argv[]) {
         // eventual return-lerp.
         bool examine_active = examine_locks_input(examine);
         examine_tick(&examine, &renderer.object_transform, dt);
+
+        // While ACTIVE, mouse drag orbits the object around its AABB center
+        // and the wheel zooms (handled in the wheel event). Composes a
+        // world-up yaw with a fixed-axis pitch on top of the entry rotation.
+        if (examine.state == Examine::ACTIVE) {
+            examine.orbit_yaw   -= mouse_dx * EXAMINE_ORBIT_SENSITIVITY;
+            examine.orbit_pitch += mouse_dy * EXAMINE_ORBIT_SENSITIVITY;
+            if (examine.orbit_pitch >  EXAMINE_PITCH_LIMIT) examine.orbit_pitch =  EXAMINE_PITCH_LIMIT;
+            if (examine.orbit_pitch < -EXAMINE_PITCH_LIMIT) examine.orbit_pitch = -EXAMINE_PITCH_LIMIT;
+
+            // R_orbit = R_yaw(world_up) * R_pitch(cam_right_entry).
+            float wu[3] = { 0.0f, 1.0f, 0.0f };
+            float Ry[9], Rp[9], R_orbit[9];
+            mat3_axis_angle(wu,                       examine.orbit_yaw,   Ry);
+            mat3_axis_angle(examine.cam_right_entry,  examine.orbit_pitch, Rp);
+            mat3_mul(Ry, Rp, R_orbit);
+
+            // Compose with the base rotation captured at examine entry.
+            float R_base[9], R_new[9];
+            mat3_from_euler_zyx(examine.base_rotation_euler, R_base);
+            mat3_mul(R_orbit, R_base, R_new);
+
+            // Write Euler back into object_transform.
+            mat3_decompose_zyx(R_new, renderer.object_transform.rotation_euler);
+
+            // Place the AABB center at the (zoom-adjusted) pivot along the
+            // entry forward, then back the translation off by the rotated
+            // local center so the pivot stays nailed there.
+            float s = renderer.object_transform.scale;
+            float cl[3] = {
+                examine.aabb_center_local[0] * s,
+                examine.aabb_center_local[1] * s,
+                examine.aabb_center_local[2] * s,
+            };
+            float cw[3] = {
+                R_new[0]*cl[0] + R_new[3]*cl[1] + R_new[6]*cl[2],
+                R_new[1]*cl[0] + R_new[4]*cl[1] + R_new[7]*cl[2],
+                R_new[2]*cl[0] + R_new[5]*cl[1] + R_new[8]*cl[2],
+            };
+            float dist = examine.dist_base * examine.distance_scale;
+            renderer.object_transform.translation[0] = cam.position[0] + examine.cam_fwd_entry[0]*dist - cw[0];
+            renderer.object_transform.translation[1] = cam.position[1] + examine.cam_fwd_entry[1]*dist - cw[1];
+            renderer.object_transform.translation[2] = cam.position[2] + examine.cam_fwd_entry[2]*dist - cw[2];
+        }
 
         // Update camera (allow mouse look during lerp, but block WASD movement)
         if (examine_active) {
