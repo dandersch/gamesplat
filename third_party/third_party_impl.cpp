@@ -32,4 +32,15 @@
     #define SOKOL_IMGUI_NO_SOKOL_APP
     #include "imgui.h"
     #include "sokol_imgui.h"
+
+    // Include the sokol-shdc generated shader headers so any breakage in the
+    // sokol-slang sources surfaces at compile time, not just when the renderer
+    // is ported over to consume them. The headers reference sg_* types so they
+    // must come after sokol_gfx.h above. Each defines static inline functions
+    // (wireframe_shader_desc(), etc.) and per-backend source byte arrays.
+    #include "../shaders/wireframe.glsl.h"
+    #include "../shaders/overlay.glsl.h"
+    #include "../shaders/darken.glsl.h"
+    #include "../shaders/mesh.glsl.h"
+    #include "../shaders/splat.glsl.h"
 #endif

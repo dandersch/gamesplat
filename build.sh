@@ -21,6 +21,17 @@ if [ -n "$GSPLAT_USE_SOKOL" ]; then
     LDFLAGS="$LDFLAGS -lGL -ldl -lpthread"
 fi
 
+echo "Generating sokol-shdc headers..."
+# Sokol-shdc transpiles annotated #version-450 GLSL into C headers containing
+# embedded per-backend shader sources plus a code-generated sg_shader_desc.
+# These headers are NOT consumed by the running binary yet (the SDL_GPU
+# renderer still loads the .spv files compiled below). They are produced and
+# included in libthirdparty.a under GSPLAT_USE_SOKOL so we can be sure they
+# compile, ready for the renderer port.
+for name in wireframe overlay darken mesh splat; do
+    ./sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
+done
+
 echo "Compiling shaders..."
 glslc -fshader-stage=vertex shaders/splat.vert.glsl -o shaders/splat.vert.spv
 glslc -fshader-stage=fragment shaders/splat.frag.glsl -o shaders/splat.frag.spv
