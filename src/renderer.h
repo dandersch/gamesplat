@@ -49,7 +49,13 @@ struct Renderer {
     SDL_GPUGraphicsPipeline* wireframe_pipeline;
     SDL_GPUGraphicsPipeline* mesh_pipeline;
     SDL_GPUSampler*         overlay_sampler;
-    SDL_GPUBuffer*          gaussian_buffer;
+    // Gaussian data is stored in an RGBA32F texture (16 texels per gaussian)
+    // instead of a storage buffer; this keeps the splat shader compatible with
+    // GLES3 / WebGL2 which has no SSBOs. Layout matches GpuGaussian byte-for-byte.
+    SDL_GPUTexture*         gaussian_texture;
+    SDL_GPUSampler*         gaussian_sampler;
+    uint32_t                gaussian_tex_w;
+    uint32_t                gaussian_tex_h;
     SDL_GPUBuffer*          cube_vertex_buffer;
     SDL_GPUBuffer*          cube_index_buffer;
     MeshGpu                 mesh_gpu;               // primary animated mesh (--mesh)

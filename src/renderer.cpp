@@ -24,7 +24,10 @@ static uint8_t* load_file(const char* path, size_t* out_size) {
 bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window) {
     r->device = device;
     r->window = window;
-    r->gaussian_buffer = NULL;
+    r->gaussian_texture = NULL;
+    r->gaussian_sampler = NULL;
+    r->gaussian_tex_w = 0;
+    r->gaussian_tex_h = 0;
     r->index_buffer = NULL;
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         r->transfer_bufs[i] = NULL;
@@ -59,7 +62,8 @@ bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window) {
     vert_info.entrypoint = "main";
     vert_info.format = SDL_GPU_SHADERFORMAT_SPIRV;
     vert_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    vert_info.num_storage_buffers = 2;
+    vert_info.num_samplers = 1;          // gaussian_tex (texelFetch source)
+    vert_info.num_storage_buffers = 0;   // sorted indices now a vertex attribute
     vert_info.num_uniform_buffers = 1;
 
     SDL_GPUShader* vert_shader = SDL_CreateGPUShader(device, &vert_info);
@@ -91,10 +95,27 @@ bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window) {
     color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
     color_target.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
 
+    // Splat pipeline takes a single per-instance vertex attribute: the sorted
+    // gaussian index (uint). gl_VertexIndex (0..5) supplies the quad corner.
+    SDL_GPUVertexBufferDescription splat_vb_desc = {};
+    splat_vb_desc.slot = 0;
+    splat_vb_desc.pitch = sizeof(uint32_t);
+    splat_vb_desc.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+
+    SDL_GPUVertexAttribute splat_attr = {};
+    splat_attr.location = 0;
+    splat_attr.buffer_slot = 0;
+    splat_attr.format = SDL_GPU_VERTEXELEMENTFORMAT_UINT;
+    splat_attr.offset = 0;
+
     SDL_GPUGraphicsPipelineCreateInfo pipeline_info = {};
     pipeline_info.vertex_shader = vert_shader;
     pipeline_info.fragment_shader = frag_shader;
     pipeline_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipeline_info.vertex_input_state.num_vertex_buffers = 1;
+    pipeline_info.vertex_input_state.vertex_buffer_descriptions = &splat_vb_desc;
+    pipeline_info.vertex_input_state.num_vertex_attributes = 1;
+    pipeline_info.vertex_input_state.vertex_attributes = &splat_attr;
     pipeline_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     pipeline_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     // Splats only test depth (against the mesh, so they don't poke through it
@@ -536,23 +557,51 @@ bool renderer_init(Renderer* r, SDL_GPUDevice* device, SDL_Window* window) {
     mesh_sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     r->mesh_sampler = SDL_CreateGPUSampler(device, &mesh_sampler_info);
 
+    // Gaussian sampler. texelFetch ignores filter/wrap state but SDL_GPU still
+    // requires a sampler when binding a sampled texture.
+    SDL_GPUSamplerCreateInfo gs_info = {};
+    gs_info.min_filter = SDL_GPU_FILTER_NEAREST;
+    gs_info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    gs_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    gs_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    gs_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    gs_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    r->gaussian_sampler = SDL_CreateGPUSampler(device, &gs_info);
+
     fprintf(stderr, "Renderer init OK\n");
     return true;
 }
 
+// Gaussian texture layout: each gaussian occupies 16 consecutive RGBA32F
+// texels (= 64 floats, same byte layout as GpuGaussian). Width is fixed at
+// 4096 (POT, so the shader can use bit ops). Height grows to hold N gaussians.
+#define GAUSSIAN_TEX_WIDTH      4096u
+#define GAUSSIAN_TEXELS_PER     16u
+#define GAUSSIAN_BYTES_PER_TEXEL 16u  // RGBA32F
+
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
-    uint32_t buf_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
 
-    // Gaussian data buffer (static)
-    SDL_GPUBufferCreateInfo buf_info = {};
-    buf_info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
-    buf_info.size = buf_size;
-    r->gaussian_buffer = SDL_CreateGPUBuffer(r->device, &buf_info);
+    // --- Gaussian data texture (static) ---
+    uint32_t total_texels = scene->gaussian_count * GAUSSIAN_TEXELS_PER;
+    uint32_t tex_w = GAUSSIAN_TEX_WIDTH;
+    uint32_t tex_h = (total_texels + tex_w - 1u) / tex_w;
+    r->gaussian_tex_w = tex_w;
+    r->gaussian_tex_h = tex_h;
 
-    // Index buffer (dynamic, updated each frame with sorted indices)
+    SDL_GPUTextureCreateInfo gtex_info = {};
+    gtex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    gtex_info.format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
+    gtex_info.width = tex_w;
+    gtex_info.height = tex_h;
+    gtex_info.layer_count_or_depth = 1;
+    gtex_info.num_levels = 1;
+    gtex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    r->gaussian_texture = SDL_CreateGPUTexture(r->device, &gtex_info);
+
+    // --- Index vertex buffer (dynamic, per-instance, updated each frame) ---
     SDL_GPUBufferCreateInfo idx_info = {};
-    idx_info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    idx_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
     idx_info.size = scene->gaussian_count * sizeof(uint32_t);
     r->index_buffer = SDL_CreateGPUBuffer(r->device, &idx_info);
 
@@ -564,16 +613,19 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         r->transfer_bufs[i] = SDL_CreateGPUTransferBuffer(r->device, &xfer_info);
     }
 
-    // Upload gaussian data
+    // --- One-shot upload of gaussian data into the texture ---
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
+
+    uint32_t tex_buf_size = tex_w * tex_h * GAUSSIAN_BYTES_PER_TEXEL;
+    uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
 
     SDL_GPUTransferBufferCreateInfo upload_xfer_info = {};
     upload_xfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    upload_xfer_info.size = buf_size;
+    upload_xfer_info.size = tex_buf_size;
     SDL_GPUTransferBuffer* upload_xfer = SDL_CreateGPUTransferBuffer(r->device, &upload_xfer_info);
 
-    if (!r->gaussian_buffer || !r->index_buffer || !r->transfer_bufs[0] || !upload_xfer) {
-        fprintf(stderr, "FAIL: buffer creation failed\n");
+    if (!r->gaussian_texture || !r->index_buffer || !r->transfer_bufs[0] || !upload_xfer) {
+        fprintf(stderr, "FAIL: gaussian resource creation failed\n");
         free(gpu_data);
         return;
     }
@@ -581,7 +633,13 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     void* map = SDL_MapGPUTransferBuffer(r->device, upload_xfer, false);
     if (!map) { free(gpu_data); return; }
 
-    memcpy(map, gpu_data, buf_size);
+    // GpuGaussian is 64 floats = 16 RGBA32F texels. Tight packed array of N
+    // gaussians == tight packed array of N*16 texels, so a single memcpy
+    // suffices. Trailing slack texels (if any) are zeroed for cleanliness.
+    memcpy(map, gpu_data, payload_size);
+    if (tex_buf_size > payload_size) {
+        memset((uint8_t*)map + payload_size, 0, tex_buf_size - payload_size);
+    }
     SDL_UnmapGPUTransferBuffer(r->device, upload_xfer);
     free(gpu_data);
 
@@ -590,23 +648,27 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
 
-    SDL_GPUTransferBufferLocation src = {};
-    src.transfer_buffer = upload_xfer;
-    src.offset = 0;
+    SDL_GPUTextureTransferInfo tsrc = {};
+    tsrc.transfer_buffer = upload_xfer;
+    tsrc.offset = 0;
+    tsrc.pixels_per_row = tex_w;
+    tsrc.rows_per_layer = tex_h;
 
-    SDL_GPUBufferRegion dst = {};
-    dst.buffer = r->gaussian_buffer;
-    dst.offset = 0;
-    dst.size = buf_size;
+    SDL_GPUTextureRegion tdst = {};
+    tdst.texture = r->gaussian_texture;
+    tdst.w = tex_w;
+    tdst.h = tex_h;
+    tdst.d = 1;
 
-    SDL_UploadToGPUBuffer(copy, &src, &dst, false);
+    SDL_UploadToGPUTexture(copy, &tsrc, &tdst, false);
     SDL_EndGPUCopyPass(copy);
 
     SDL_SubmitGPUCommandBuffer(cmd);
     SDL_WaitForGPUIdle(r->device);
     SDL_ReleaseGPUTransferBuffer(r->device, upload_xfer);
 
-    fprintf(stderr, "Uploaded %u gaussians\n", scene->gaussian_count);
+    fprintf(stderr, "Uploaded %u gaussians (gaussian_tex = %ux%u RGBA32F)\n",
+            scene->gaussian_count, tex_w, tex_h);
 }
 
 // Release everything held by a MeshGpu and zero it. Safe to call on an
@@ -929,13 +991,22 @@ static void draw_world(Renderer* r, SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass
     }
 
     // Splats
-    if (scene->visible_count > 0 && r->splat_pipeline && r->gaussian_buffer && r->index_buffer) {
+    if (scene->visible_count > 0 && r->splat_pipeline && r->gaussian_texture && r->index_buffer) {
         SDL_BindGPUGraphicsPipeline(pass, r->splat_pipeline);
         SDL_FColor blend_const = { 0, 0, 0, wireframe_occlusion };
         SDL_SetGPUBlendConstants(pass, blend_const);
 
-        SDL_GPUBuffer* storage_bufs[2] = { r->index_buffer, r->gaussian_buffer };
-        SDL_BindGPUVertexStorageBuffers(pass, 0, storage_bufs, 2);
+        // Per-instance sorted-index attribute (replaces old indices SSBO).
+        SDL_GPUBufferBinding splat_vb_bind = {};
+        splat_vb_bind.buffer = r->index_buffer;
+        splat_vb_bind.offset = 0;
+        SDL_BindGPUVertexBuffers(pass, 0, &splat_vb_bind, 1);
+
+        // Gaussian data texture (replaces old gaussian SSBO).
+        SDL_GPUTextureSamplerBinding gtex_bind = {};
+        gtex_bind.texture = r->gaussian_texture;
+        gtex_bind.sampler = r->gaussian_sampler;
+        SDL_BindGPUVertexSamplers(pass, 0, &gtex_bind, 1);
 
         SDL_PushGPUVertexUniformData(cmd, 0, cam, sizeof(CameraUniforms));
 
@@ -1183,7 +1254,8 @@ void renderer_destroy(Renderer* r) {
     if (r->wireframe_pipeline) SDL_ReleaseGPUGraphicsPipeline(r->device, r->wireframe_pipeline);
     if (r->mesh_pipeline) SDL_ReleaseGPUGraphicsPipeline(r->device, r->mesh_pipeline);
     if (r->overlay_sampler) SDL_ReleaseGPUSampler(r->device, r->overlay_sampler);
-    if (r->gaussian_buffer) SDL_ReleaseGPUBuffer(r->device, r->gaussian_buffer);
+    if (r->gaussian_texture) SDL_ReleaseGPUTexture(r->device, r->gaussian_texture);
+    if (r->gaussian_sampler) SDL_ReleaseGPUSampler(r->device, r->gaussian_sampler);
     if (r->cube_vertex_buffer) SDL_ReleaseGPUBuffer(r->device, r->cube_vertex_buffer);
     if (r->cube_index_buffer) SDL_ReleaseGPUBuffer(r->device, r->cube_index_buffer);
     mesh_gpu_release(r->device, &r->mesh_gpu);

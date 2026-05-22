@@ -1,23 +1,24 @@
 #version 450
 
 // SDL_GPU SPIR-V layout for vertex shaders:
-//   set 0: storage textures, storage buffers  
-//   set 1: uniform buffers
-layout(std430, set = 0, binding = 0) readonly buffer IndexBuffer {
-    uint sorted_indices[];
-};
+//   set 0: vertex samplers, storage textures, storage buffers
+//   set 1: vertex uniform buffers
+//
+// Gaussian data is stored in an RGBA32F texture (16 texels per gaussian,
+// 64 floats = original GpuGaussian std430 layout). Width is fixed at
+// GAUSSIAN_TEX_WIDTH; height grows with gaussian_count. Layout per gaussian:
+//   texel 0 = (pos.x, pos.y, pos.z, opacity)
+//   texel 1 = (scale.x, scale.y, scale.z, pad)
+//   texel 2 = (rot.w, rot.x, rot.y, rot.z)
+//   texel 3 = (color.r, color.g, color.b, pad)            // raw f_dc
+//   texels 4..14 = sh_rest (45 floats packed tightly, RGB triples per coeff)
+//   texel 15.last_three_components = pad
+// This packing is identical to the previous storage-buffer GpuGaussian layout,
+// so pack_gpu_gaussians() output can be uploaded byte-for-byte.
+layout(set = 0, binding = 0) uniform sampler2D gaussian_tex;
 
-// Each gaussian occupies 64 floats (256 bytes). See GPU layout in gaussian.h.
-//   [0..3]   pos.xyz, opacity
-//   [4..7]   scale.xyz, pad
-//   [8..11]  rotation w,x,y,z
-//   [12..15] color.rgb (raw f_dc), pad
-//   [16..60] sh_rest: 15 coefficients × RGB triples
-//   [61..63] pad
-layout(std430, set = 0, binding = 1) readonly buffer GaussianBuffer {
-    float data[];
-} gaussians;
-const uint G_STRIDE = 64u;
+const int GAUSSIAN_TEX_WIDTH    = 4096;
+const int GAUSSIAN_TEXELS_PER   = 16;
 
 layout(set = 1, binding = 0) uniform CameraUBO {
     mat4 view;
@@ -32,10 +33,21 @@ layout(set = 1, binding = 0) uniform CameraUBO {
     float ortho_focal;
 };
 
+// Per-instance vertex attribute: the sorted gaussian index for this instance.
+// Replaces the old `sorted_indices[]` storage buffer.
+layout(location = 0) in uint splat_id;
+
 layout(location = 0) out vec3 frag_color;
 layout(location = 1) out float frag_opacity;
 layout(location = 2) out vec2 frag_center;
 layout(location = 3) out vec3 frag_conic;
+
+vec4 fetch_texel(int k) {
+    int linear = int(splat_id) * GAUSSIAN_TEXELS_PER + k;
+    int x = linear & (GAUSSIAN_TEX_WIDTH - 1);   // width is POT (4096)
+    int y = linear >> 12;                        // log2(4096) = 12
+    return texelFetch(gaussian_tex, ivec2(x, y), 0);
+}
 
 void main() {
     // 1. Determine quad corner from vertex ID
@@ -45,15 +57,16 @@ void main() {
     );
     vec2 corner = corners[quad_verts[gl_VertexIndex % 6]];
 
-    // 2. Fetch Gaussian data
-    uint idx  = sorted_indices[gl_InstanceIndex];
-    uint base = idx * G_STRIDE;
-    vec3 position = vec3(gaussians.data[base + 0u], gaussians.data[base + 1u], gaussians.data[base + 2u]);
-    float opacity = gaussians.data[base + 3u];
-    vec3 scale    = vec3(gaussians.data[base + 4u], gaussians.data[base + 5u], gaussians.data[base + 6u]);
-    vec4 rot      = vec4(gaussians.data[base + 8u], gaussians.data[base + 9u],
-                         gaussians.data[base + 10u], gaussians.data[base + 11u]); // (w, x, y, z)
-    vec3 dc       = vec3(gaussians.data[base + 12u], gaussians.data[base + 13u], gaussians.data[base + 14u]);
+    // 2. Fetch Gaussian header (texels 0..3)
+    vec4 t0 = fetch_texel(0);  // pos.xyz, opacity
+    vec4 t1 = fetch_texel(1);  // scale.xyz, pad
+    vec4 t2 = fetch_texel(2);  // rot (w,x,y,z)
+    vec4 t3 = fetch_texel(3);  // dc.rgb, pad
+    vec3  position = t0.xyz;
+    float opacity  = t0.w;
+    vec3  scale    = t1.xyz;
+    vec4  rot      = t2;
+    vec3  dc       = t3.xyz;
 
     // 3. Build rotation matrix from quaternion
     // rot = (w, x, y, z) stored as rot.x=w, rot.y=x, rot.z=y, rot.w=z
@@ -178,13 +191,18 @@ void main() {
     const float SH_C3_5 =  1.445305721320277;
     const float SH_C3_6 = -0.5900435899266435;
 
-    // Helper: fetch the k-th rest coefficient (RGB triple) at sh_rest base.
-    // sh_rest occupies floats [16 .. 60] within the gaussian (15 coeffs * 3 ch).
-    uint sh_base = base + 16u;
-    #define SH(k) vec3( \
-        gaussians.data[sh_base + uint(k) * 3u + 0u], \
-        gaussians.data[sh_base + uint(k) * 3u + 1u], \
-        gaussians.data[sh_base + uint(k) * 3u + 2u])
+    // Fetch the 12 texels covering sh_rest (floats 16..63 = 48 floats total,
+    // last 3 are padding). Flatten into a 48-float array so SH(k) can index
+    // three consecutive floats at offset k*3.
+    float sh_flat[48];
+    for (int i = 0; i < 12; ++i) {
+        vec4 tt = fetch_texel(4 + i);
+        sh_flat[i*4 + 0] = tt.x;
+        sh_flat[i*4 + 1] = tt.y;
+        sh_flat[i*4 + 2] = tt.z;
+        sh_flat[i*4 + 3] = tt.w;
+    }
+    #define SH(k) vec3(sh_flat[(k)*3 + 0], sh_flat[(k)*3 + 1], sh_flat[(k)*3 + 2])
 
     vec3 result = SH_C0 * dc;
 
