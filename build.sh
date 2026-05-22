@@ -11,6 +11,16 @@ IMGUI_LIB="third_party/libimgui.a"
 THIRDPARTY_LIB="third_party/libthirdparty.a"
 THIRDPARTY_SRC="third_party/third_party_impl.cpp"
 
+# Optional: stage the sokol_gfx + sokol_imgui implementations into
+# libthirdparty.a (still inert at runtime; the renderer port wires them up in
+# a later commit). Enable with: GSPLAT_USE_SOKOL=1 ./build.sh
+if [ -n "$GSPLAT_USE_SOKOL" ]; then
+    CXXFLAGS="$CXXFLAGS -DGSPLAT_USE_SOKOL"
+    THIRDPARTY_LIB="third_party/libthirdparty_sokol.a"   # separate cache slot
+    # GL loader + thread/dl deps that sokol_gfx's GLCORE backend needs.
+    LDFLAGS="$LDFLAGS -lGL -ldl -lpthread"
+fi
+
 echo "Compiling shaders..."
 glslc -fshader-stage=vertex shaders/splat.vert.glsl -o shaders/splat.vert.spv
 glslc -fshader-stage=fragment shaders/splat.frag.glsl -o shaders/splat.frag.spv
@@ -42,7 +52,12 @@ fi
 if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ]; then
     echo "Building third_party single-header impls..."
     obj="third_party/third_party_impl.o"
-    $CXX $CXXFLAGS -Ithird_party -c "$THIRDPARTY_SRC" -o "$obj"
+    # When sokol is staged in, sokol_imgui.h needs ImGui's headers visible.
+    EXTRA_TP_INCS=""
+    if [ -n "$GSPLAT_USE_SOKOL" ]; then
+        EXTRA_TP_INCS="-I$IMGUI_DIR"
+    fi
+    $CXX $CXXFLAGS -Ithird_party $EXTRA_TP_INCS -c "$THIRDPARTY_SRC" -o "$obj"
     ar rcs "$THIRDPARTY_LIB" "$obj"
     rm "$obj"
 fi
