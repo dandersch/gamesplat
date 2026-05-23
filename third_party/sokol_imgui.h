@@ -2345,8 +2345,11 @@ static void _simgui_update_texture(ImTextureData* tex) {
     SOKOL_ASSERT(tex);
     SOKOL_ASSERT(tex->Format == ImTextureFormat_RGBA32);
     if (tex->Status == ImTextureStatus_WantCreate) {
-        // create new sokol-gfx image, view and sampler
-        SOKOL_ASSERT(tex->TexID == 0);
+        // create new sokol-gfx image, view and sampler.
+        // Note: ImTextureData::TexID is initialized to ImTextureID_Invalid
+        // (== (ImTextureID)-1) in the bundled ImGui 1.92, so the original
+        // `tex->TexID == 0` assertion would always fire. Accept either.
+        SOKOL_ASSERT((tex->TexID == 0) || (tex->TexID == ImTextureID_Invalid));
         sg_image_desc img_desc;
         _simgui_clear(&img_desc, sizeof(img_desc));
         img_desc.usage.dynamic_update = true;

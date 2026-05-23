@@ -157,29 +157,31 @@ void camera_get_view_matrix(const Camera* cam, float* m) {
     m[15] = 1;
 }
 
-// Projection: column-major, Vulkan clip space (Y-flip, Z [0,1])
+// Projection: column-major, OpenGL clip space (Y-up, Z [-1,1]).
+// Previously this built a Vulkan-style proj (persp[5] = -f to flip Y, Z in
+// [0,1]); switched to GL convention for the sokol_gfx GLCORE backend.
 void camera_get_proj_matrix(const Camera* cam, float aspect, float* m) {
     float n = cam->near_plane;
     float fa = cam->far_plane;
     float t = cam->ortho_blend;
 
-    // Build perspective matrix
+    // Build perspective matrix (GL: Y-up, Z in [-1,1]).
     float persp[16] = {};
     float f = 1.0f / tanf(cam->fov_y * 0.5f);
     persp[0]  = f / aspect;
-    persp[5]  = -f;  // Vulkan Y-flip
-    persp[10] = fa / (n - fa);
+    persp[5]  = f;
+    persp[10] = (n + fa) / (n - fa);
     persp[11] = -1.0f;
-    persp[14] = (n * fa) / (n - fa);
+    persp[14] = (2.0f * n * fa) / (n - fa);
 
-    // Build orthographic matrix
+    // Build orthographic matrix (GL: Y-up, Z in [-1,1]).
     float ortho[16] = {};
     float half_h = cam->ortho_size;
     float half_w = half_h * aspect;
     ortho[0]  = 1.0f / half_w;
-    ortho[5]  = -1.0f / half_h;  // Vulkan Y-flip
-    ortho[10] = 1.0f / (n - fa);
-    ortho[14] = n / (n - fa);
+    ortho[5]  = 1.0f / half_h;
+    ortho[10] = 2.0f / (n - fa);
+    ortho[14] = (n + fa) / (n - fa);
     ortho[15] = 1.0f;
 
     // Lerp element-wise

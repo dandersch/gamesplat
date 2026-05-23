@@ -1,5 +1,5 @@
 #pragma once
-#include <SDL3/SDL.h>
+#include "sokol_gfx.h"
 #include "camera.h"
 #include "hotspot.h"
 #include <cstdint>
@@ -10,7 +10,8 @@ struct RefView {
     float   position[3];       // world-space camera center (-R^T * T)
     float   rotation[4];       // quaternion (w,x,y,z) from colmap
     float   yaw, pitch;        // derived from rotation for lerp target
-    SDL_GPUTexture* texture;   // NULL until image loaded
+    sg_image texture;          // id == 0 until image loaded
+    sg_view  texture_view;     // sampled view of `texture`
     int     width, height;
 
     // Authored clickable regions on this view's panorama. NULL until a
@@ -75,11 +76,11 @@ bool refview_load(RefViewSet* set, const char* colmap_dir);
 // Falls back to distance-based neighbors if db not found.
 void refview_load_covisibility(RefViewSet* set, const char* colmap_dir);
 
-// Load images as GPU textures. Call after refview_load.
-void refview_load_images(RefViewSet* set, SDL_GPUDevice* device);
+// Load images as sokol_gfx images + views. Call after refview_load.
+void refview_load_images(RefViewSet* set);
 
-// Release GPU textures.
-void refview_release_images(RefViewSet* set, SDL_GPUDevice* device);
+// Release sokol_gfx images + views.
+void refview_release_images(RefViewSet* set);
 
 // Advance interpolation, write into cam. Returns true while lerping (camera locked).
 bool refview_update(RefViewSet* set, Camera* cam, float dt);

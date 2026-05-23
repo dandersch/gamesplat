@@ -4,9 +4,11 @@
 #include <cstdio>
 #include <cstring>
 
+#include "sokol_gfx.h"
+#define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
+#include "sokol_imgui.h"
 #include "imgui_impl_sdl3.h"
-#include "imgui_impl_sdlgpu3.h"
 
 #include "camera.cpp"
 #include "gaussian.cpp"
@@ -283,12 +285,11 @@ struct AppState {
     const char* object_path;
     char        colmap_dir_buf[512];
 
-    SDL_GPUDevice* device;
     SDL_Window*    window;
-    bool           gpu_claimed;
-    bool           imgui_context_created;
+    SDL_GLContext  gl_context;
+    bool           sg_setup_done;
+    bool           simgui_setup_done;
     bool           imgui_sdl3_initialized;
-    bool           imgui_sdlgpu3_initialized;
     bool           renderer_started;
 
     Sfx           sfx_transition;
@@ -390,41 +391,61 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     audio_init();
     sfx_load(&state->sfx_transition, "res/transition.wav");
 
-    state->device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, false, NULL);
-    if (!state->device) {
-        fprintf(stderr, "SDL_CreateGPUDevice failed: %s\n", SDL_GetError());
-        return SDL_APP_FAILURE;
-    }
+    // Request a compatible GL context for sokol_gfx's GLCORE backend. 3.3
+    // core is the floor for SOKOL_GLCORE; we don't need anything newer for
+    // any of the generated shaders (glsl430).
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-    state->window = SDL_CreateWindow("gsplat", 1280, 720, SDL_WINDOW_RESIZABLE);
+    state->window = SDL_CreateWindow("gsplat", 1280, 720,
+                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
     if (!state->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
-    if (!SDL_ClaimWindowForGPUDevice(state->device, state->window)) {
-        fprintf(stderr, "SDL_ClaimWindowForGPUDevice failed: %s\n", SDL_GetError());
+    state->gl_context = SDL_GL_CreateContext(state->window);
+    if (!state->gl_context) {
+        fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
     }
-    state->gpu_claimed = true;
+    SDL_GL_MakeCurrent(state->window, state->gl_context);
+    SDL_GL_SetSwapInterval(1); // vsync
 
-    // ImGui init
+    // sokol_gfx setup. The GL backend has its own loader so we don't need
+    // gl3w/glad. defaults must match the swapchain we'll pass into sg_pass.
+    sg_desc sgd = {};
+    sgd.environment.defaults.color_format = SG_PIXELFORMAT_RGBA8;
+    sgd.environment.defaults.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    sgd.environment.defaults.sample_count = 1;
+    sg_setup(&sgd);
+    if (!sg_isvalid()) {
+        fprintf(stderr, "sg_setup failed\n");
+        return SDL_APP_FAILURE;
+    }
+    state->sg_setup_done = true;
+
+    // sokol_imgui creates the ImGui context itself, so we don't call
+    // ImGui::CreateContext(). ImGui_ImplSDL3 stays in the loop for event
+    // translation; it expects an existing context, so it goes after setup.
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    state->imgui_context_created = true;
+    simgui_desc_t sid = {};
+    sid.color_format = SG_PIXELFORMAT_RGBA8;
+    sid.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    sid.sample_count = 1;
+    simgui_setup(&sid);
+    state->simgui_setup_done = true;
+
     ImGui_ImplSDL3_InitForOther(state->window);
     state->imgui_sdl3_initialized = true;
 
-    SDL_GPUTextureFormat swapchain_format = SDL_GetGPUSwapchainTextureFormat(state->device, state->window);
-    ImGui_ImplSDLGPU3_InitInfo imgui_init = {};
-    imgui_init.Device = state->device;
-    imgui_init.ColorTargetFormat = swapchain_format;
-    ImGui_ImplSDLGPU3_Init(&imgui_init);
-    state->imgui_sdlgpu3_initialized = true;
-
-    // Renderer
+    // Renderer (no more SDL_GPUDevice; sokol_gfx is set up globally).
     state->renderer_started = true;
-    if (!renderer_init(&state->renderer, state->device, state->window)) {
+    if (!renderer_init(&state->renderer, state->window)) {
         fprintf(stderr, "Renderer init failed\n");
         return SDL_APP_FAILURE;
     }
@@ -457,7 +478,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
         state->refviews_loaded = refview_load(&state->refviews, colmap_dir);
         if (state->refviews_loaded) {
             refview_load_covisibility(&state->refviews, colmap_dir);
-            refview_load_images(&state->refviews, state->device);
+            refview_load_images(&state->refviews);
             hotspot_load_for_set(&state->refviews);
         }
     }
@@ -1128,10 +1149,11 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         }
     }
 
-    // ImGui frame
-    ImGui_ImplSDLGPU3_NewFrame();
+    // ImGui frame. simgui_new_frame calls ImGui::NewFrame internally and
+    // sets DisplaySize/DeltaTime. ImGui_ImplSDL3_NewFrame still runs before
+    // it to forward mouse/keyboard state into ImGui IO.
     ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
+    simgui_new_frame({ win_w, win_h, dt, 1.0f });
 
     ImGui::Begin("Info");
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
@@ -1470,10 +1492,12 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
                     if (cz <= 1e-4f) { any_behind = true; break; }
 
                     // camera dir -> NDC (inverse of overlay.frag construction).
-                    // Note: SDL_GPU (Vulkan) NDC has Y pointing down, but the
-                    // perspective pipeline elsewhere uses persp[5] = -f to flip
-                    // it to logical Y-up. The overlay shader writes v_ndc directly
-                    // (no proj), so screen Y here is also Y-up: ndc_y = +1 is top.
+                    // Logical convention: ndc_y = +1 is top. GL maps this
+                    // directly to the top of the framebuffer (Y-up clip
+                    // space); pre-sokol the perspective pipeline used a
+                    // Vulkan-style proj that needed compensating Y-flips.
+                    // The overlay shader writes v_ndc directly (no proj), so
+                    // the same Y-up convention applies here.
                     float ndc_x = (cx / cz) / cam_tan[0];
                     float ndc_y = -(cy / cz) / cam_tan[1];
 
@@ -1488,7 +1512,8 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         }
     }
 
-    ImGui::Render();
+    // simgui_render() (called inside renderer_draw_frame's pass) calls
+    // ImGui::Render() itself, so we don't call it here.
 
     // Find closest refview node to camera (used for overlay + current_node tracking)
     OverlayParams overlay = {};
@@ -1497,7 +1522,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         float best_dist2 = 1e30f;
         int best_idx = -1;
         for (uint32_t i = 0; i < refviews.count; i++) {
-            if (!refviews.views[i].texture) continue;
+            if (!refviews.views[i].texture.id) continue;
             float dx = cam.position[0] - refviews.views[i].position[0];
             float dy = cam.position[1] - refviews.views[i].position[1];
             float dz = cam.position[2] - refviews.views[i].position[2];
@@ -1517,6 +1542,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 
             if (alpha > 0.0f) {
                 overlay.texture = rv->texture;
+                overlay.texture_view = rv->texture_view;
                 overlay.alpha = alpha;
 
                 camera_get_overlay_ray_basis(&cam, (float)win_w / (float)win_h,
@@ -1569,26 +1595,23 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     AppState* state = (AppState*)appstate;
     if (!state) return;
 
-    if (state->device) {
-        SDL_WaitForGPUIdle(state->device);
-    }
-
+    // Tear down GPU resources before sg_shutdown (refview images, renderer
+    // pipelines, etc. all live in the sokol_gfx pools).
     if (state->scene_loaded) free_scene(&state->scene);
     if (state->mesh_path) mesh_free(&state->mesh);
     if (state->object_path) mesh_free(&state->object);
     if (state->refviews_loaded) {
-        refview_release_images(&state->refviews, state->device);
+        refview_release_images(&state->refviews);
         refview_free(&state->refviews);
     }
     if (state->renderer_started) renderer_destroy(&state->renderer);
 
-    if (state->imgui_sdlgpu3_initialized) ImGui_ImplSDLGPU3_Shutdown();
     if (state->imgui_sdl3_initialized) ImGui_ImplSDL3_Shutdown();
-    if (state->imgui_context_created) ImGui::DestroyContext();
+    if (state->simgui_setup_done) simgui_shutdown(); // destroys ImGui context
+    if (state->sg_setup_done) sg_shutdown();
 
-    if (state->gpu_claimed) SDL_ReleaseWindowFromGPUDevice(state->device, state->window);
+    if (state->gl_context) SDL_GL_DestroyContext(state->gl_context);
     if (state->window) SDL_DestroyWindow(state->window);
-    if (state->device) SDL_DestroyGPUDevice(state->device);
 
     sfx_free(&state->sfx_transition);
     audio_shutdown();
