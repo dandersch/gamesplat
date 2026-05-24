@@ -101,9 +101,9 @@ void main() {
 
     // 7. Jacobian of the screen-space projection at t (persp ↔ ortho lerp).
     float J00 = mix(fx_p / t.z,                     -fx_o, orthographic);
-    float J11 = mix(-fy_p / t.z,                     fy_o, orthographic);
+    float J11 = mix( fy_p / t.z,                    -fy_o, orthographic);
     float J02 = mix(-fx_p * t.x / (t.z * t.z),     0.0,   orthographic);
-    float J12 = mix( fy_p * t.y / (t.z * t.z),     0.0,   orthographic);
+    float J12 = mix(-fy_p * t.y / (t.z * t.z),     0.0,   orthographic);
 
     // 8. View rotation (upper-left 3x3 of view matrix)
     mat3 W = mat3(view);
@@ -126,11 +126,11 @@ void main() {
     // 12. Screen-space center
     vec2 persp_center = vec2(
         fx_p * t.x / t.z + viewport.x * 0.5,
-        viewport.y * 0.5 - fy_p * t.y / t.z
+        viewport.y * 0.5 + fy_p * t.y / t.z
     );
     vec2 ortho_center = vec2(
         -fx_o * t.x + viewport.x * 0.5,
-        viewport.y * 0.5 + fy_o * t.y
+        viewport.y * 0.5 - fy_o * t.y
     );
     vec2 center_px = mix(persp_center, ortho_center, orthographic);
 
