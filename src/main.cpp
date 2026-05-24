@@ -1492,11 +1492,11 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
                     if (cz <= 1e-4f) { any_behind = true; break; }
 
                     // camera dir -> NDC (inverse of overlay.frag construction).
-                    // Matches OpenGL NDC (y-up: +1 at top of framebuffer);
-                    // the overlay shader now uses camera_dir.y = +v_ndc.y * tan,
-                    // so we invert that here without a sign flip.
+                    // The overlay shader uses camera_dir.y = -v_ndc.y * tan
+                    // (see comment in shaders/overlay.glsl), so we mirror that
+                    // negation when inverting here.
                     float ndc_x = (cx / cz) / cam_tan[0];
-                    float ndc_y = (cy / cz) / cam_tan[1];
+                    float ndc_y = -(cy / cz) / cam_tan[1];
 
                     pts_buf[i].x = (ndc_x * 0.5f + 0.5f) * (float)win_w;
                     pts_buf[i].y = (1.0f - (ndc_y * 0.5f + 0.5f)) * (float)win_h;

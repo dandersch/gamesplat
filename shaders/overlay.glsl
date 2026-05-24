@@ -34,14 +34,16 @@ out vec4 out_color;
 const float PI = 3.14159265358979;
 
 void main() {
-    // v_ndc is OpenGL NDC (y-up, +1 at top of framebuffer). camera_dir.y is
-    // the camera-space "up" component; world-up should appear at the top of
-    // the screen, so it matches sign with v_ndc.y. (Under SDL_GPU/Vulkan NDC
-    // the top of the screen is at v_ndc.y = -1, which is why this used to
-    // negate.)
+    // camera_ray_basis (built in camera_get_overlay_ray_basis) is built from
+    // a world that is conceptually y-down (see proj-matrix comment in
+    // src/camera.cpp). The fullscreen vertex shader writes the framebuffer
+    // pixel position directly as v_ndc, so for the fragment at the *top* of
+    // the screen v_ndc.y is +1 in OpenGL — but in the basis convention that
+    // corresponds to "camera looking up", which is -y in camera space.
+    // Negating v_ndc.y here reproduces the original SDL_GPU behavior.
     vec3 camera_dir = normalize(vec3(
         v_ndc.x * camera_tan_half_fov.x,
-        v_ndc.y * camera_tan_half_fov.y,
+        -v_ndc.y * camera_tan_half_fov.y,
         1.0
     ));
 

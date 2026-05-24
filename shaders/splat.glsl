@@ -141,12 +141,13 @@ void main() {
     // 14. Position this vertex
     vec2 pos_px = center_px + corner * vec2(radius_x, radius_y);
 
-    // pos_px is in image-y-up convention (the persp_center.y / ortho_center.y
-    // formulas above are derived for a y-up screen). For OpenGL NDC (y-up,
-    // +1 at top of framebuffer) we keep the same sign on Y. The previous
-    // Vulkan-style "1 - 2y/H" mapping caused world-up gaussians to render at
-    // the bottom of the screen and pushed most splats off-screen vertically
-    // (only those near the vertical center remained visible).
+    // Gaussian PLY data is Y-up (the gaussian loader does not negate Y on
+    // load, unlike the OBJ/GLTF mesh loaders which flip Y to align meshes
+    // with the renderer's Y-down convention — see src/mesh.cpp). So for
+    // splats we need the OpenGL-style NDC mapping (+y at top of framebuffer)
+    // *without* the extra inversion that meshes get from the projection's
+    // Y-flip. The splat shader does not multiply by proj for X/Y (only for
+    // ndc_z below), so this mapping is independent of the mesh path.
     vec2 ndc = vec2(
         2.0 * pos_px.x / viewport.x - 1.0,
         2.0 * pos_px.y / viewport.y - 1.0

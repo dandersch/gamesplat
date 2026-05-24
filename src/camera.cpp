@@ -157,29 +157,50 @@ void camera_get_view_matrix(const Camera* cam, float* m) {
     m[15] = 1;
 }
 
-// Projection: column-major, OpenGL clip space (Y-up, Z [-1,1]).
-// Previously this built a Vulkan-style proj (persp[5] = -f to flip Y, Z in
-// [0,1]); switched to GL convention for the sokol_gfx GLCORE backend.
+// Projection: column-major. Hybrid convention chosen to make the existing
+// renderer/splat/mesh code work with the sokol_gfx GLCORE backend without
+// rewriting the world-space assumptions.
+//
+// Y: persp[5] / ortho[5] are negated ("Vulkan-style Y flip"). The renderer's
+//    world is Y-down (see comment in src/mesh.cpp where the OBJ/GLTF loaders
+//    negate Y on import) but the fly camera builds its view basis from
+//    world_up = (0,1,0). The Y-flip in the projection re-aligns the final
+//    framebuffer Y so that "physical up" ends up at the top of the screen
+//    under OpenGL's y-up NDC. (Under Vulkan the original SDL_GPU pipeline
+//    achieved the same outcome via VK_KHR_maintenance1 negative-height
+//    viewports — the math here matches that effective behavior.)
+//
+// X: persp[0] / ortho[0] are negated to fix mesh/wireframe horizontal
+//    tracking. camera_get_view_matrix computes right = cross(forward, world_up)
+//    which is actually camera-LEFT (it points to the world's -X when looking
+//    down +Z with world_up = +Y). Negating the proj's X column re-flips that
+//    so MVP-based draws (mesh, wireframe, overlay) end up with screen-right
+//    matching world-right. The splat shader doesn't use proj for X (it builds
+//    pixel-space coords directly from view-space x/z), so this proj negation
+//    only affects MVP-based draws.
+//
+// Z: kept in GL convention [-1,1] (was [0,1] under Vulkan); OpenGL clips
+//    against [-1,1] and the depth buffer is mapped via glDepthRange(0,1).
 void camera_get_proj_matrix(const Camera* cam, float aspect, float* m) {
     float n = cam->near_plane;
     float fa = cam->far_plane;
     float t = cam->ortho_blend;
 
-    // Build perspective matrix (GL: Y-up, Z in [-1,1]).
+    // Build perspective matrix (GL Z range, negated X and Y — see header note).
     float persp[16] = {};
     float f = 1.0f / tanf(cam->fov_y * 0.5f);
-    persp[0]  = f / aspect;
-    persp[5]  = f;
+    persp[0]  = -f / aspect;
+    persp[5]  = -f;
     persp[10] = (n + fa) / (n - fa);
     persp[11] = -1.0f;
     persp[14] = (2.0f * n * fa) / (n - fa);
 
-    // Build orthographic matrix (GL: Y-up, Z in [-1,1]).
+    // Build orthographic matrix (same X/Y sign treatment as perspective).
     float ortho[16] = {};
     float half_h = cam->ortho_size;
     float half_w = half_h * aspect;
-    ortho[0]  = 1.0f / half_w;
-    ortho[5]  = 1.0f / half_h;
+    ortho[0]  = -1.0f / half_w;
+    ortho[5]  = -1.0f / half_h;
     ortho[10] = 2.0f / (n - fa);
     ortho[14] = (n + fa) / (n - fa);
     ortho[15] = 1.0f;
