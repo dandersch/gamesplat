@@ -34,9 +34,14 @@ out vec4 out_color;
 const float PI = 3.14159265358979;
 
 void main() {
+    // v_ndc is OpenGL NDC (y-up, +1 at top of framebuffer). camera_dir.y is
+    // the camera-space "up" component; world-up should appear at the top of
+    // the screen, so it matches sign with v_ndc.y. (Under SDL_GPU/Vulkan NDC
+    // the top of the screen is at v_ndc.y = -1, which is why this used to
+    // negate.)
     vec3 camera_dir = normalize(vec3(
         v_ndc.x * camera_tan_half_fov.x,
-        -v_ndc.y * camera_tan_half_fov.y,
+        v_ndc.y * camera_tan_half_fov.y,
         1.0
     ));
 

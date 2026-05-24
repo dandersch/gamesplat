@@ -141,9 +141,15 @@ void main() {
     // 14. Position this vertex
     vec2 pos_px = center_px + corner * vec2(radius_x, radius_y);
 
+    // pos_px is in image-y-up convention (the persp_center.y / ortho_center.y
+    // formulas above are derived for a y-up screen). For OpenGL NDC (y-up,
+    // +1 at top of framebuffer) we keep the same sign on Y. The previous
+    // Vulkan-style "1 - 2y/H" mapping caused world-up gaussians to render at
+    // the bottom of the screen and pushed most splats off-screen vertically
+    // (only those near the vertical center remained visible).
     vec2 ndc = vec2(
         2.0 * pos_px.x / viewport.x - 1.0,
-        1.0 - 2.0 * pos_px.y / viewport.y   // flip Y for SDL_GPU/Vulkan NDC
+        2.0 * pos_px.y / viewport.y - 1.0
     );
     float ndc_z = (proj[2][2] * t.z + proj[3][2]) / (-t.z);
     gl_Position = vec4(ndc, ndc_z, 1.0);
