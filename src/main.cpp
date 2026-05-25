@@ -364,9 +364,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     }
 
     // set defaults (used primarily by web build since it has no cli)
-    ply_path    = ply_path    ? ply_path    : "test/export_n01.ply";
-    object_path = object_path ? object_path : "test/priest.glb";
-    mesh_path   = mesh_path   ? mesh_path   : "test/cyberpunk_guy.glb";
+    ply_path    = ply_path    ? ply_path    : "test/export_n01.sog";
+    //object_path = object_path ? object_path : "test/priest.glb";
+    //mesh_path   = mesh_path   ? mesh_path   : "test/cyberpunk_guy.glb";
     colmap_dir  = colmap_dir  ? colmap_dir  : "test/colmap";
 
     // Accept either a colmap base directory (containing sparse/0/) or the

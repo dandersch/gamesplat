@@ -1,10 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+CC="${CC:-emcc}"
 CXX="${CXX:-em++}"
 BUILD_DIR="${BUILD_DIR:-build/web}"
 OUT="$BUILD_DIR/index.html"
 SHELL_FILE="${SHELL_FILE:-web/shell.html}"
+WEBP_DIR="third_party/libwebp"
+WEBP_LIB="$BUILD_DIR/libwebpdecoder.a"
 
 # The demo asset pack is large. Keep the known-good initial heap as the
 # default, but make it easy to tune down/up while testing browser behavior.
@@ -29,6 +32,51 @@ COMMON_FLAGS=(
     -Ithird_party
     -Ithird_party/imgui
     -Ithird_party/imgui/backends
+    -I"$WEBP_DIR"
+    -I"$WEBP_DIR/src"
+)
+
+WEBP_CFLAGS=(
+    -O2
+    -Wall
+    -Wextra
+    -Wno-unused-function
+    -I"$WEBP_DIR"
+    -I"$WEBP_DIR/src"
+)
+
+WEBP_DECODER_SOURCES=(
+    "$WEBP_DIR/src/dec/alpha_dec.c"
+    "$WEBP_DIR/src/dec/buffer_dec.c"
+    "$WEBP_DIR/src/dec/frame_dec.c"
+    "$WEBP_DIR/src/dec/idec_dec.c"
+    "$WEBP_DIR/src/dec/io_dec.c"
+    "$WEBP_DIR/src/dec/quant_dec.c"
+    "$WEBP_DIR/src/dec/tree_dec.c"
+    "$WEBP_DIR/src/dec/vp8_dec.c"
+    "$WEBP_DIR/src/dec/vp8l_dec.c"
+    "$WEBP_DIR/src/dec/webp_dec.c"
+
+    "$WEBP_DIR/src/dsp/alpha_processing.c"
+    "$WEBP_DIR/src/dsp/cpu.c"
+    "$WEBP_DIR/src/dsp/dec.c"
+    "$WEBP_DIR/src/dsp/dec_clip_tables.c"
+    "$WEBP_DIR/src/dsp/filters.c"
+    "$WEBP_DIR/src/dsp/lossless.c"
+    "$WEBP_DIR/src/dsp/rescaler.c"
+    "$WEBP_DIR/src/dsp/upsampling.c"
+    "$WEBP_DIR/src/dsp/yuv.c"
+
+    "$WEBP_DIR/src/utils/bit_reader_utils.c"
+    "$WEBP_DIR/src/utils/color_cache_utils.c"
+    "$WEBP_DIR/src/utils/filters_utils.c"
+    "$WEBP_DIR/src/utils/huffman_utils.c"
+    "$WEBP_DIR/src/utils/palette.c"
+    "$WEBP_DIR/src/utils/quant_levels_dec_utils.c"
+    "$WEBP_DIR/src/utils/random_utils.c"
+    "$WEBP_DIR/src/utils/rescaler_utils.c"
+    "$WEBP_DIR/src/utils/thread_utils.c"
+    "$WEBP_DIR/src/utils/utils.c"
 )
 
 EM_FLAGS=(
@@ -46,11 +94,7 @@ EM_FLAGS=(
 
 PRELOAD_FLAGS=(
     --preload-file res/transition.wav@res/transition.wav
-    --preload-file test/export_n01.ply@test/export_n01.ply
-    --preload-file test/colmap/images@test/colmap/images
-    --preload-file test/colmap/sparse/0@test/colmap/sparse/0
-    --preload-file test/cyberpunk_guy.glb@test/cyberpunk_guy.glb
-    --preload-file test/priest.glb@test/priest.glb
+    --preload-file test/export_n01.sog@test/export_n01.sog
 )
 
 if [ "$USE_PRELOAD_CACHE" = "1" ]; then
@@ -68,9 +112,21 @@ SOURCES=(
     third_party/imgui/backends/imgui_impl_sdl3.cpp
 )
 
+echo "Building libwebp decoder..."
+WEBP_OBJS=()
+for src in "${WEBP_DECODER_SOURCES[@]}"; do
+    rel="${src#$WEBP_DIR/src/}"
+    obj="$BUILD_DIR/webp/${rel%.c}.o"
+    mkdir -p "$(dirname "$obj")"
+    "$CC" "${WEBP_CFLAGS[@]}" -c "$src" -o "$obj"
+    WEBP_OBJS+=("$obj")
+done
+emar rcs "$WEBP_LIB" "${WEBP_OBJS[@]}"
+
 echo "Building $OUT..."
 "$CXX" "${COMMON_FLAGS[@]}" "${EM_FLAGS[@]}" \
     "${SOURCES[@]}" "${PRELOAD_FLAGS[@]}" \
+    "$WEBP_LIB" \
     -o "$OUT"
 
 echo "Done: $OUT"

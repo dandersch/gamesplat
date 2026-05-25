@@ -1,9 +1,7 @@
 #include "gaussian.h"
 #include "miniz.h"
 #include "json_mini.h"
-#ifndef __EMSCRIPTEN__
 #include <webp/decode.h>
-#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -73,11 +71,7 @@ static void free_sog_archive_files(SogArchiveFile* files, int count) {
 }
 
 static void free_sog_image(SogImage* img) {
-#ifndef __EMSCRIPTEN__
     if (img->pixels) WebPFree(img->pixels);
-#else
-    free(img->pixels);
-#endif
     *img = {};
 }
 
@@ -337,15 +331,10 @@ static bool load_sog_image(SogArchiveFile* files, int file_count, const char* na
         return false;
     }
 
-#ifdef __EMSCRIPTEN__
-    // Native builds currently decode SOG's lossless WebP payloads with libwebp.
-    // For the web build we have two good future options: compile libwebp to
-    // WASM and link it statically, or add an async browser ImageBitmap/canvas
-    // decode bridge that copies RGBA pixels into WASM memory. Keep this path
-    // explicit so .ply-only web builds still compile until one option is added.
-    fprintf(stderr, "SOG: WebP decode is not implemented in the web build yet (%s)\n", name);
-    return false;
-#else
+    // Web builds link libwebp into the WASM module and use this same decode
+    // path. An alternative would be an async browser ImageBitmap/canvas bridge,
+    // but SOG images are ZIP entries in WASM memory, so staying in C keeps the
+    // loader synchronous and avoids browser color-management surprises.
     int w = 0, h = 0;
     if (!WebPGetInfo((const uint8_t*)file->data, file->size, &w, &h) || w <= 0 || h <= 0) {
         fprintf(stderr, "SOG: invalid WebP image: %s\n", name);
@@ -360,7 +349,6 @@ static bool load_sog_image(SogArchiveFile* files, int file_count, const char* na
     out->width = w;
     out->height = h;
     return true;
-#endif
 }
 
 static float sog_lerp(float a, float b, float t) {
