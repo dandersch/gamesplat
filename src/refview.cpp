@@ -209,6 +209,9 @@ void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
     set->use_covisibility = true;
 
     SDL_Log("RefView: Loaded %u covisibility edges from %s", edge_count, db_path);
+#else
+    (void)set;
+    (void)colmap_dir;
 #endif
 }
 

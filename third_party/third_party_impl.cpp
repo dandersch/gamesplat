@@ -12,11 +12,15 @@
 #include "cgltf.h"
 
 // --- sokol_gfx + sokol_imgui ---------------------------------------------
-// Desktop OpenGL backend; the same generated shader headers also carry the
-// glsl300es flavour so the same sources will work on WebGL2 when we re-target
-// for the web build.
+// Keep the native build on the desktop GL backend and switch only the
+// Emscripten build to WebGL2/GLES3. The generated shader headers carry both
+// glsl430 and glsl300es variants.
 #define SOKOL_IMPL
+#if defined(__EMSCRIPTEN__)
 #define SOKOL_GLES3
+#else
+#define SOKOL_GLCORE
+#endif
 #include "sokol_gfx.h"
 
 // sokol_imgui.h is the ImGui rendering backend (NOT to be confused with

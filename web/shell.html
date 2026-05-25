@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gsplat</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111;
+      color: #ddd;
+      font-family: system-ui, sans-serif;
+    }
+    #canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      outline: none;
+    }
+    #status {
+      position: fixed;
+      left: 12px;
+      bottom: 10px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.55);
+      font-size: 12px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <div id="status">Loading...</div>
+  <script>
+    var statusElement = document.getElementById('status');
+    var Module = {
+      canvas: document.getElementById('canvas'),
+      print: console.log.bind(console),
+      printErr: console.error.bind(console),
+      setStatus: function(text) {
+        statusElement.textContent = text;
+        statusElement.style.display = text ? 'block' : 'none';
+      },
+      monitorRunDependencies: function(left) {
+        Module.setStatus(left ? 'Preparing... (' + left + ')' : '');
+      }
+    };
+    window.onerror = function() {
+      Module.setStatus('Exception thrown, see browser console.');
+    };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>
