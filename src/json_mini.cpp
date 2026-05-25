@@ -126,6 +126,23 @@ bool json_parse_float(Json* j, float* out) {
     return true;
 }
 
+bool json_parse_bool(Json* j, bool* out) {
+    json_skip_ws(j);
+    if (!j->ok) return false;
+    if (j->end - j->p >= 4 && memcmp(j->p, "true", 4) == 0) {
+        j->p += 4;
+        *out = true;
+        return true;
+    }
+    if (j->end - j->p >= 5 && memcmp(j->p, "false", 5) == 0) {
+        j->p += 5;
+        *out = false;
+        return true;
+    }
+    json_set_error(j, "expected bool");
+    return false;
+}
+
 void json_skip_value(Json* j) {
     json_skip_ws(j);
     if (!j->ok || j->p >= j->end) { json_set_error(j, "expected value"); return; }

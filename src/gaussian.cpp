@@ -1,5 +1,6 @@
 #include "gaussian.h"
 #include "miniz.h"
+#include "json_mini.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,10 +25,34 @@ static bool str_ends_with_ci(const char* s, const char* suffix) {
 }
 
 struct SogArchiveFile {
-    const char* name;
+    char        name[MZ_ZIP_MAX_ARCHIVE_FILENAME_SIZE];
     void*       data;
     size_t      size;
-    bool        required;
+};
+
+struct SogMeta {
+    int      version;
+    uint32_t count;
+    bool     antialias;
+    bool     has_antialias;
+
+    float means_mins[3];
+    float means_maxs[3];
+    char  means_files[2][128];
+
+    float scales_codebook[256];
+    char  scales_file[128];
+
+    char  quats_file[128];
+
+    float sh0_codebook[256];
+    char  sh0_file[128];
+
+    bool  has_shN;
+    int   shN_count;
+    int   shN_bands;
+    float shN_codebook[256];
+    char  shN_files[2][128];
 };
 
 static void free_sog_archive_files(SogArchiveFile* files, int count) {
@@ -36,6 +61,234 @@ static void free_sog_archive_files(SogArchiveFile* files, int count) {
         files[i].data = NULL;
         files[i].size = 0;
     }
+}
+
+static SogArchiveFile* find_sog_archive_file(SogArchiveFile* files, int count, const char* name) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(files[i].name, name) == 0) return &files[i];
+    }
+    return NULL;
+}
+
+static bool parse_sog_float_array(Json* j, float* out, int expected) {
+    if (!json_expect_char(j, '[')) return false;
+    for (int i = 0; i < expected; i++) {
+        if (i > 0 && !json_expect_char(j, ',')) return false;
+        if (!json_parse_float(j, &out[i])) return false;
+    }
+    return json_expect_char(j, ']');
+}
+
+static bool parse_sog_string_array(Json* j, char out[][128], int expected) {
+    if (!json_expect_char(j, '[')) return false;
+    for (int i = 0; i < expected; i++) {
+        if (i > 0 && !json_expect_char(j, ',')) return false;
+        if (!json_parse_string(j, out[i], 128)) return false;
+    }
+    return json_expect_char(j, ']');
+}
+
+static bool parse_sog_means(Json* j, SogMeta* meta) {
+    bool has_mins = false, has_maxs = false, has_files = false;
+    if (!json_expect_char(j, '{')) return false;
+    if (!json_try_char(j, '}')) {
+        do {
+            char key[64];
+            if (!json_parse_string(j, key, sizeof(key))) return false;
+            if (!json_expect_char(j, ':')) return false;
+            if (strcmp(key, "mins") == 0) {
+                if (!parse_sog_float_array(j, meta->means_mins, 3)) return false;
+                has_mins = true;
+            } else if (strcmp(key, "maxs") == 0) {
+                if (!parse_sog_float_array(j, meta->means_maxs, 3)) return false;
+                has_maxs = true;
+            } else if (strcmp(key, "files") == 0) {
+                if (!parse_sog_string_array(j, meta->means_files, 2)) return false;
+                has_files = true;
+            } else {
+                json_skip_value(j);
+            }
+            if (!j->ok) return false;
+        } while (json_try_char(j, ','));
+        if (!json_expect_char(j, '}')) return false;
+    }
+    if (!has_mins || !has_maxs || !has_files) json_set_error(j, "SOG means missing required field");
+    return j->ok;
+}
+
+static bool parse_sog_codebook_file(Json* j, float* codebook, char file[128], const char* label) {
+    bool has_codebook = false, has_files = false;
+    char files[1][128] = {};
+    if (!json_expect_char(j, '{')) return false;
+    if (!json_try_char(j, '}')) {
+        do {
+            char key[64];
+            if (!json_parse_string(j, key, sizeof(key))) return false;
+            if (!json_expect_char(j, ':')) return false;
+            if (strcmp(key, "codebook") == 0) {
+                if (!parse_sog_float_array(j, codebook, 256)) return false;
+                has_codebook = true;
+            } else if (strcmp(key, "files") == 0) {
+                if (!parse_sog_string_array(j, files, 1)) return false;
+                snprintf(file, 128, "%s", files[0]);
+                has_files = true;
+            } else {
+                json_skip_value(j);
+            }
+            if (!j->ok) return false;
+        } while (json_try_char(j, ','));
+        if (!json_expect_char(j, '}')) return false;
+    }
+    if (!has_codebook || !has_files) {
+        static char msg[96];
+        snprintf(msg, sizeof(msg), "SOG %s missing required field", label);
+        json_set_error(j, msg);
+    }
+    return j->ok;
+}
+
+static bool parse_sog_quats(Json* j, SogMeta* meta) {
+    bool has_files = false;
+    char files[1][128] = {};
+    if (!json_expect_char(j, '{')) return false;
+    if (!json_try_char(j, '}')) {
+        do {
+            char key[64];
+            if (!json_parse_string(j, key, sizeof(key))) return false;
+            if (!json_expect_char(j, ':')) return false;
+            if (strcmp(key, "files") == 0) {
+                if (!parse_sog_string_array(j, files, 1)) return false;
+                snprintf(meta->quats_file, sizeof(meta->quats_file), "%s", files[0]);
+                has_files = true;
+            } else {
+                json_skip_value(j);
+            }
+            if (!j->ok) return false;
+        } while (json_try_char(j, ','));
+        if (!json_expect_char(j, '}')) return false;
+    }
+    if (!has_files) json_set_error(j, "SOG quats missing files");
+    return j->ok;
+}
+
+static bool parse_sog_shN(Json* j, SogMeta* meta) {
+    bool has_count = false, has_bands = false, has_codebook = false, has_files = false;
+    if (!json_expect_char(j, '{')) return false;
+    if (!json_try_char(j, '}')) {
+        do {
+            char key[64];
+            if (!json_parse_string(j, key, sizeof(key))) return false;
+            if (!json_expect_char(j, ':')) return false;
+            if (strcmp(key, "count") == 0) {
+                if (!json_parse_int(j, &meta->shN_count)) return false;
+                has_count = true;
+            } else if (strcmp(key, "bands") == 0) {
+                if (!json_parse_int(j, &meta->shN_bands)) return false;
+                has_bands = true;
+            } else if (strcmp(key, "codebook") == 0) {
+                if (!parse_sog_float_array(j, meta->shN_codebook, 256)) return false;
+                has_codebook = true;
+            } else if (strcmp(key, "files") == 0) {
+                if (!parse_sog_string_array(j, meta->shN_files, 2)) return false;
+                has_files = true;
+            } else {
+                json_skip_value(j);
+            }
+            if (!j->ok) return false;
+        } while (json_try_char(j, ','));
+        if (!json_expect_char(j, '}')) return false;
+    }
+    if (!has_count || !has_bands || !has_codebook || !has_files) json_set_error(j, "SOG shN missing required field");
+    if (j->ok && (meta->shN_count <= 0 || meta->shN_count > 65536)) json_set_error(j, "SOG shN count out of range");
+    if (j->ok && (meta->shN_bands < 1 || meta->shN_bands > 3)) json_set_error(j, "SOG shN bands out of range");
+    if (j->ok) meta->has_shN = true;
+    return j->ok;
+}
+
+static bool parse_sog_meta(const char* buf, size_t len, SogMeta* meta) {
+    *meta = {};
+    bool has_version = false, has_count = false, has_means = false;
+    bool has_scales = false, has_quats = false, has_sh0 = false;
+
+    Json j;
+    json_init(&j, buf, len);
+    if (!json_expect_char(&j, '{')) goto fail;
+    if (!json_try_char(&j, '}')) {
+        do {
+            char key[64];
+            if (!json_parse_string(&j, key, sizeof(key))) goto fail;
+            if (!json_expect_char(&j, ':')) goto fail;
+            if (strcmp(key, "version") == 0) {
+                if (!json_parse_int(&j, &meta->version)) goto fail;
+                has_version = true;
+            } else if (strcmp(key, "count") == 0) {
+                int count = 0;
+                if (!json_parse_int(&j, &count)) goto fail;
+                if (count <= 0) { json_set_error(&j, "SOG count out of range"); goto fail; }
+                meta->count = (uint32_t)count;
+                has_count = true;
+            } else if (strcmp(key, "antialias") == 0) {
+                if (!json_parse_bool(&j, &meta->antialias)) goto fail;
+                meta->has_antialias = true;
+            } else if (strcmp(key, "means") == 0) {
+                if (!parse_sog_means(&j, meta)) goto fail;
+                has_means = true;
+            } else if (strcmp(key, "scales") == 0) {
+                if (!parse_sog_codebook_file(&j, meta->scales_codebook, meta->scales_file, "scales")) goto fail;
+                has_scales = true;
+            } else if (strcmp(key, "quats") == 0) {
+                if (!parse_sog_quats(&j, meta)) goto fail;
+                has_quats = true;
+            } else if (strcmp(key, "sh0") == 0) {
+                if (!parse_sog_codebook_file(&j, meta->sh0_codebook, meta->sh0_file, "sh0")) goto fail;
+                has_sh0 = true;
+            } else if (strcmp(key, "shN") == 0) {
+                if (!parse_sog_shN(&j, meta)) goto fail;
+            } else {
+                json_skip_value(&j);
+                if (!j.ok) goto fail;
+            }
+        } while (json_try_char(&j, ','));
+        if (!json_expect_char(&j, '}')) goto fail;
+    }
+
+    if (!has_version || !has_count || !has_means || !has_scales || !has_quats || !has_sh0) {
+        json_set_error(&j, "SOG meta missing required top-level field");
+        goto fail;
+    }
+    if (meta->version != 2) {
+        json_set_error(&j, "unsupported SOG version");
+        goto fail;
+    }
+    return true;
+
+fail:
+    fprintf(stderr, "SOG: meta.json parse error at byte %d: %s\n", j.err_offset, j.err_msg ? j.err_msg : "unknown error");
+    return false;
+}
+
+static bool validate_sog_meta_files(SogArchiveFile* files, int file_count, const SogMeta* meta) {
+    const char* required[] = {
+        meta->means_files[0], meta->means_files[1], meta->scales_file,
+        meta->quats_file, meta->sh0_file,
+    };
+    for (int i = 0; i < (int)(sizeof(required) / sizeof(required[0])); i++) {
+        SogArchiveFile* f = find_sog_archive_file(files, file_count, required[i]);
+        if (!f || !f->data) {
+            fprintf(stderr, "SOG: archive missing file referenced by meta.json: %s\n", required[i]);
+            return false;
+        }
+    }
+    if (meta->has_shN) {
+        for (int i = 0; i < 2; i++) {
+            SogArchiveFile* f = find_sog_archive_file(files, file_count, meta->shN_files[i]);
+            if (!f || !f->data) {
+                fprintf(stderr, "SOG: archive missing file referenced by meta.json: %s\n", meta->shN_files[i]);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static bool load_sog(const char* path, GaussianScene* scene) {
@@ -48,44 +301,40 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         return false;
     }
 
-    // SOG v2 allows filenames to be chosen by meta.json. This first plumbing
-    // step only extracts the conventional splat-transform names; the metadata
-    // parser added next will resolve filenames from meta.json before decode.
-    SogArchiveFile files[] = {
-        { "meta.json",          NULL, 0, true  },
-        { "means_l.webp",       NULL, 0, true  },
-        { "means_u.webp",       NULL, 0, true  },
-        { "scales.webp",        NULL, 0, true  },
-        { "quats.webp",         NULL, 0, true  },
-        { "sh0.webp",           NULL, 0, true  },
-        { "shN_centroids.webp", NULL, 0, false },
-        { "shN_labels.webp",    NULL, 0, false },
-    };
-    const int file_count = (int)(sizeof(files) / sizeof(files[0]));
+    mz_uint zip_file_count = mz_zip_reader_get_num_files(&zip);
+    SogArchiveFile* files = (SogArchiveFile*)calloc(zip_file_count, sizeof(SogArchiveFile));
+    if (!files) {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+    int file_count = 0;
 
     bool ok = true;
-    for (int i = 0; i < file_count; i++) {
-        int index = mz_zip_reader_locate_file(&zip, files[i].name, NULL, 0);
-        if (index < 0) {
-            if (files[i].required) {
-                fprintf(stderr, "SOG: archive missing required file: %s\n", files[i].name);
-                ok = false;
-                break;
-            }
-            continue;
-        }
-
-        files[i].data = mz_zip_reader_extract_file_to_heap(&zip, files[i].name, &files[i].size, 0);
-        if (!files[i].data) {
-            fprintf(stderr, "SOG: failed to extract file: %s\n", files[i].name);
+    for (mz_uint i = 0; i < zip_file_count; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat)) {
+            fprintf(stderr, "SOG: failed to stat archive entry %u\n", i);
             ok = false;
             break;
         }
+        if (stat.m_is_directory) {
+            continue;
+        }
+
+        snprintf(files[file_count].name, sizeof(files[file_count].name), "%s", stat.m_filename);
+        files[file_count].data = mz_zip_reader_extract_to_heap(&zip, i, &files[file_count].size, 0);
+        if (!files[file_count].data) {
+            fprintf(stderr, "SOG: failed to extract file: %s\n", files[file_count].name);
+            ok = false;
+            break;
+        }
+        file_count++;
     }
 
     mz_zip_reader_end(&zip);
     if (!ok) {
         free_sog_archive_files(files, file_count);
+        free(files);
         return false;
     }
 
@@ -93,9 +342,34 @@ static bool load_sog(const char* path, GaussianScene* scene) {
     for (int i = 0; i < file_count; i++) {
         if (files[i].data) fprintf(stderr, "SOG:   %s (%zu bytes)\n", files[i].name, files[i].size);
     }
+
+    SogMeta meta;
+    SogArchiveFile* meta_file = find_sog_archive_file(files, file_count, "meta.json");
+    if (!meta_file || !meta_file->data) {
+        fprintf(stderr, "SOG: archive missing required file: meta.json\n");
+        free_sog_archive_files(files, file_count);
+        free(files);
+        return false;
+    }
+    if (!parse_sog_meta((const char*)meta_file->data, meta_file->size, &meta)) {
+        free_sog_archive_files(files, file_count);
+        free(files);
+        return false;
+    }
+    if (!validate_sog_meta_files(files, file_count, &meta)) {
+        free_sog_archive_files(files, file_count);
+        free(files);
+        return false;
+    }
+
+    fprintf(stderr, "SOG: meta version %d, %u gaussians, shN %s",
+            meta.version, meta.count, meta.has_shN ? "present" : "absent");
+    if (meta.has_shN) fprintf(stderr, " (bands=%d, count=%d)", meta.shN_bands, meta.shN_count);
+    fprintf(stderr, "\n");
     fprintf(stderr, "SOG: metadata parsing and gaussian decode not implemented yet\n");
 
     free_sog_archive_files(files, file_count);
+    free(files);
     return false;
 }
 

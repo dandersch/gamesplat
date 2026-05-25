@@ -38,9 +38,10 @@ bool json_expect_char(Json* j, char c);
 // Only \" and \\ escapes are honored.
 bool json_parse_string(Json* j, char* out, size_t out_size);
 
-// Parses a number as int / float.
+// Parses a number as int / float, or a literal as bool.
 bool json_parse_int(Json* j, int* out);
 bool json_parse_float(Json* j, float* out);
+bool json_parse_bool(Json* j, bool* out);
 
 // Skips any JSON value (object, array, string, number, true, false, null).
 // Used to ignore unknown keys for forward-compat.
