@@ -397,6 +397,71 @@ static bool validate_sog_base_images(const SogMeta* meta,
     return true;
 }
 
+static int sog_sh_coeff_count(int bands) {
+    switch (bands) {
+        case 1: return 3;
+        case 2: return 8;
+        case 3: return 15;
+        default: return 0;
+    }
+}
+
+static bool decode_sog_shN(SogArchiveFile* files, int file_count, const SogMeta* meta, GaussianScene* scene) {
+    if (!meta->has_shN) return true;
+
+    SogImage centroids = {}, labels = {};
+    bool ok = false;
+    int coeff_count = sog_sh_coeff_count(meta->shN_bands);
+    int expected_w = 0;
+    int expected_h = 0;
+    if (coeff_count <= 0) {
+        fprintf(stderr, "SOG: unsupported shN band count %d\n", meta->shN_bands);
+        return false;
+    }
+
+    if (!load_sog_image(files, file_count, meta->shN_files[0], &centroids)) goto done;
+    if (!load_sog_image(files, file_count, meta->shN_files[1], &labels)) goto done;
+
+    if ((uint64_t)meta->count > (uint64_t)labels.width * (uint64_t)labels.height) {
+        fprintf(stderr, "SOG: shN label image is too small for gaussian count\n");
+        goto done;
+    }
+
+    expected_w = 64 * coeff_count;
+    expected_h = (meta->shN_count + 63) / 64;
+    if (centroids.width < expected_w || centroids.height < expected_h) {
+        fprintf(stderr, "SOG: shN centroid image is too small (got %dx%d, need at least %dx%d)\n",
+                centroids.width, centroids.height, expected_w, expected_h);
+        goto done;
+    }
+
+    for (uint32_t i = 0; i < meta->count; i++) {
+        const uint8_t* label_px = labels.pixels + (size_t)i * 4;
+        uint32_t label = (uint32_t)label_px[0] | ((uint32_t)label_px[1] << 8);
+        if (label >= (uint32_t)meta->shN_count) {
+            fprintf(stderr, "SOG: shN label %u out of range at gaussian %u\n", label, i);
+            goto done;
+        }
+
+        Gaussian* g = &scene->gaussians[i];
+        for (int coeff = 0; coeff < coeff_count; coeff++) {
+            int u = (int)(label % 64) * coeff_count + coeff;
+            int v = (int)(label / 64);
+            const uint8_t* centroid_px = centroids.pixels + ((size_t)v * centroids.width + (size_t)u) * 4;
+            g->sh_rest[coeff * 3 + 0] = meta->shN_codebook[centroid_px[0]];
+            g->sh_rest[coeff * 3 + 1] = meta->shN_codebook[centroid_px[1]];
+            g->sh_rest[coeff * 3 + 2] = meta->shN_codebook[centroid_px[2]];
+        }
+    }
+
+    ok = true;
+
+done:
+    free_sog_image(&centroids);
+    free_sog_image(&labels);
+    return ok;
+}
+
 static bool decode_sog_sh0_scene(SogArchiveFile* files, int file_count, const SogMeta* meta, GaussianScene* scene) {
     SogImage means_l = {}, means_u = {}, scales = {}, quats = {}, sh0 = {};
     bool ok = false;
@@ -451,8 +516,11 @@ static bool decode_sog_sh0_scene(SogArchiveFile* files, int file_count, const So
         g->rotation[2] = qy;
         g->rotation[3] = qz;
         g->opacity = (float)s0[3] / 255.0f;
-        // sh_rest remains zero for this first SOG decode milestone. The next
-        // commit will populate it from shN_centroids/shN_labels when present.
+    }
+
+    if (!decode_sog_shN(files, file_count, meta, scene)) {
+        free_scene(scene);
+        goto done;
     }
 
     ok = true;
@@ -546,7 +614,8 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         return false;
     }
 
-    fprintf(stderr, "SOG: decoded %u gaussians (base SH only; shN decode pending)\n", meta.count);
+    fprintf(stderr, "SOG: decoded %u gaussians (SH degree %d)\n",
+            meta.count, meta.has_shN ? meta.shN_bands : 0);
 
     free_sog_archive_files(files, file_count);
     free(files);
