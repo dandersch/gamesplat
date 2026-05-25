@@ -5,7 +5,7 @@ CXX="${CXX:-g++}"
 CXXFLAGS="-O2 -std=c++17 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function"
 # sokol_gfx's GLCORE backend needs an OpenGL context plus the libdl/pthread
 # deps for its built-in GL loader.
-LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread"
+LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread -lwebp"
 OUT="gsplat"
 
 IMGUI_DIR="third_party/imgui"
@@ -42,12 +42,13 @@ fi
 # Build single-header third_party static lib if missing or out of date.
 # sokol_imgui needs ImGui's headers visible so the impl can talk to ImGui's
 # C++ API directly.
-if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ]; then
+if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ third_party/miniz.c -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
     echo "Building third_party single-header impls..."
-    obj="third_party/third_party_impl.o"
-    $CXX $CXXFLAGS -Ithird_party -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "$obj"
-    ar rcs "$THIRDPARTY_LIB" "$obj"
-    rm "$obj"
+    objs=("third_party/third_party_impl.o" "third_party/miniz.o")
+    $CXX $CXXFLAGS -Ithird_party -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
+    $CXX -O2 -Wall -Wextra -Wno-unused-function -Ithird_party -x c -c third_party/miniz.c -o "${objs[1]}"
+    ar rcs "$THIRDPARTY_LIB" "${objs[@]}"
+    rm "${objs[@]}"
 fi
 
 echo "Building $OUT..."

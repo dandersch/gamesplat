@@ -59,6 +59,7 @@ fi
 
 SOURCES=(
     src/main.cpp
+    third_party/miniz.c
     third_party/third_party_impl.cpp
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp

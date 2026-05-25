@@ -54,6 +54,10 @@ struct GaussianScene {
 // Load PLY, populate scene. Returns false on failure.
 bool load_ply(const char* path, GaussianScene* scene);
 
+// Load a gaussian scene by file extension. Currently dispatches .ply to the
+// existing loader and recognizes bundled .sog archives for the SOG loader.
+bool load_gaussian_scene(const char* path, GaussianScene* scene);
+
 // Free scene data
 void free_scene(GaussianScene* scene);
 

@@ -466,7 +466,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
     // Scene
     if (ply_path) {
-        state->scene_loaded = load_ply(ply_path, &state->scene);
+        state->scene_loaded = load_gaussian_scene(ply_path, &state->scene);
         if (state->scene_loaded) {
             renderer_upload_gaussians(&state->renderer, &state->scene);
         }

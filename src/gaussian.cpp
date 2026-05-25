@@ -1,13 +1,102 @@
 #include "gaussian.h"
+#include "miniz.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <cctype>
 
 // --- PLY Parser ---
 
 static float sigmoid(float x) {
     return 1.0f / (1.0f + expf(-x));
+}
+
+static bool str_ends_with_ci(const char* s, const char* suffix) {
+    size_t sl = strlen(s);
+    size_t tl = strlen(suffix);
+    if (tl > sl) return false;
+    s += sl - tl;
+    for (size_t i = 0; i < tl; i++) {
+        if (tolower((unsigned char)s[i]) != tolower((unsigned char)suffix[i])) return false;
+    }
+    return true;
+}
+
+struct SogArchiveFile {
+    const char* name;
+    void*       data;
+    size_t      size;
+    bool        required;
+};
+
+static void free_sog_archive_files(SogArchiveFile* files, int count) {
+    for (int i = 0; i < count; i++) {
+        free(files[i].data);
+        files[i].data = NULL;
+        files[i].size = 0;
+    }
+}
+
+static bool load_sog(const char* path, GaussianScene* scene) {
+    (void)scene;
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, path, 0)) {
+        fprintf(stderr, "SOG: failed to open zip archive: %s\n", path);
+        return false;
+    }
+
+    // SOG v2 allows filenames to be chosen by meta.json. This first plumbing
+    // step only extracts the conventional splat-transform names; the metadata
+    // parser added next will resolve filenames from meta.json before decode.
+    SogArchiveFile files[] = {
+        { "meta.json",          NULL, 0, true  },
+        { "means_l.webp",       NULL, 0, true  },
+        { "means_u.webp",       NULL, 0, true  },
+        { "scales.webp",        NULL, 0, true  },
+        { "quats.webp",         NULL, 0, true  },
+        { "sh0.webp",           NULL, 0, true  },
+        { "shN_centroids.webp", NULL, 0, false },
+        { "shN_labels.webp",    NULL, 0, false },
+    };
+    const int file_count = (int)(sizeof(files) / sizeof(files[0]));
+
+    bool ok = true;
+    for (int i = 0; i < file_count; i++) {
+        int index = mz_zip_reader_locate_file(&zip, files[i].name, NULL, 0);
+        if (index < 0) {
+            if (files[i].required) {
+                fprintf(stderr, "SOG: archive missing required file: %s\n", files[i].name);
+                ok = false;
+                break;
+            }
+            continue;
+        }
+
+        files[i].data = mz_zip_reader_extract_file_to_heap(&zip, files[i].name, &files[i].size, 0);
+        if (!files[i].data) {
+            fprintf(stderr, "SOG: failed to extract file: %s\n", files[i].name);
+            ok = false;
+            break;
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+    if (!ok) {
+        free_sog_archive_files(files, file_count);
+        return false;
+    }
+
+    fprintf(stderr, "SOG: extracted bundled archive files from %s\n", path);
+    for (int i = 0; i < file_count; i++) {
+        if (files[i].data) fprintf(stderr, "SOG:   %s (%zu bytes)\n", files[i].name, files[i].size);
+    }
+    fprintf(stderr, "SOG: metadata parsing and gaussian decode not implemented yet\n");
+
+    free_sog_archive_files(files, file_count);
+    return false;
 }
 
 struct PlyProperty {
@@ -213,6 +302,18 @@ bool load_ply(const char* path, GaussianScene* scene) {
     scene->visible_count    = 0;
 
     return true;
+}
+
+bool load_gaussian_scene(const char* path, GaussianScene* scene) {
+    if (str_ends_with_ci(path, ".ply")) {
+        return load_ply(path, scene);
+    }
+    if (str_ends_with_ci(path, ".sog")) {
+        return load_sog(path, scene);
+    }
+
+    fprintf(stderr, "Unsupported gaussian scene format: %s\n", path);
+    return false;
 }
 
 void free_scene(GaussianScene* scene) {
