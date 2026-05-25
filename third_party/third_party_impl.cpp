@@ -16,7 +16,7 @@
 // glsl300es flavour so the same sources will work on WebGL2 when we re-target
 // for the web build.
 #define SOKOL_IMPL
-#define SOKOL_GLCORE
+#define SOKOL_GLES3
 #include "sokol_gfx.h"
 
 // sokol_imgui.h is the ImGui rendering backend (NOT to be confused with

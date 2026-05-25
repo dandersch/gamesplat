@@ -362,6 +362,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
             ply_path = argv[i];
         }
     }
+    // set to defaults (used by web build)
+    ply_path    = ply_path    ? ply_path    : "test/export_n01.ply";
+    object_path = object_path ? object_path : "test/priest.glb";
+    mesh_path   = mesh_path   ? mesh_path   : "test/cyberpunk_guy.glb";
+    colmap_dir  = colmap_dir  ? colmap_dir  : "test/colmap";
 
     // Accept either a colmap base directory (containing sparse/0/) or the
     // sparse/0 directory directly. If the user passed the base, resolve it
@@ -391,12 +396,17 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     audio_init();
     sfx_load(&state->sfx_transition, "res/transition.wav");
 
+    // request webgl compatible profile
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     // Request a compatible GL context for sokol_gfx's GLCORE backend. 3.3
     // core is the floor for SOKOL_GLCORE; we don't need anything newer for
     // any of the generated shaders (glsl430).
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    // SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    // SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    // SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);

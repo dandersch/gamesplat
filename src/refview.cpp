@@ -1,12 +1,18 @@
 #include "refview.h"
 #include <SDL3/SDL.h>
-#include <sqlite3.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
 #include "stb_image.h"
 #include "sokol_gfx.h"
+
+#if !defined(__EMSCRIPTEN__)
+// let's not bother with adding a wasm build of sqlite since the feature that
+// relies on it (building paths between nodes based on image covisibility) is
+// questionable and the sqlite lookup could be done in a build step anyway
+#include <sqlite3.h>
+#endif
 
 // Skip the rest of the current line (handles arbitrarily long POINTS2D lines)
 static void skip_line(FILE* f) {
@@ -135,6 +141,7 @@ bool refview_load(RefViewSet* set, const char* colmap_dir) {
 }
 
 void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
+#if !defined(__EMSCRIPTEN__)
     char db_path[512];
     snprintf(db_path, sizeof(db_path), "%s/../../database/database.db", colmap_dir);
 
@@ -202,6 +209,7 @@ void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
     set->use_covisibility = true;
 
     SDL_Log("RefView: Loaded %u covisibility edges from %s", edge_count, db_path);
+#endif
 }
 
 struct ImageLoadTask {

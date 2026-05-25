@@ -2,5 +2,5 @@ gsplat
 *.spv
 third_party
 imgui.ini
-test/cactus.ply
-
+build/
+bin/
