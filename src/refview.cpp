@@ -229,6 +229,59 @@ static int image_load_thread(void* data) {
 }
 
 void refview_load_images(RefViewSet* set) {
+#if defined(__EMSCRIPTEN__)
+    // The web build does not enable pthreads, so SDL_CreateThread won't run
+    // the image decode tasks. Decode serially instead; this also keeps peak
+    // wasm heap usage lower for the large equirect PNGs.
+    ImageLoadTask task = {};
+    uint32_t loaded = 0;
+
+    for (uint32_t i = 0; i < set->count; i++) {
+        snprintf(task.path, sizeof(task.path), "%s/%s", set->image_dir, set->views[i].image_name);
+        task.pixels = NULL;
+        task.w = task.h = 0;
+        image_load_thread(&task);
+
+        RefView* v = &set->views[i];
+        uint8_t* pixels = task.pixels;
+        int img_w = task.w;
+        int img_h = task.h;
+
+        if (!pixels) {
+            SDL_Log("RefView: Could not load image %s (%s)", task.path, stbi_failure_reason());
+            continue;
+        }
+
+        v->width = img_w;
+        v->height = img_h;
+
+        sg_image_desc id = {};
+        id.type = SG_IMAGETYPE_2D;
+        id.width = img_w;
+        id.height = img_h;
+        id.num_slices = 1;
+        id.num_mipmaps = 1;
+        id.pixel_format = SG_PIXELFORMAT_RGBA8;
+        id.data.mip_levels[0].ptr = pixels;
+        id.data.mip_levels[0].size = (size_t)img_w * (size_t)img_h * 4u;
+        id.label = "refview-tex";
+        v->texture = sg_make_image(&id);
+        stbi_image_free(pixels);
+        if (v->texture.id == 0) {
+            SDL_Log("RefView: Failed to create sg_image for %s", task.path);
+            continue;
+        }
+
+        sg_view_desc vd = {};
+        vd.texture.image = v->texture;
+        vd.label = "refview-tex-view";
+        v->texture_view = sg_make_view(&vd);
+
+        loaded++;
+    }
+
+    SDL_Log("RefView: Loaded %u / %u images as sokol_gfx images", loaded, set->count);
+#else
     // Decode all images in parallel on separate threads. Uploads happen on
     // the main thread (sokol_gfx isn't thread-safe) but with all pixels
     // already decoded, the per-image work shrinks to a single sg_make_image
@@ -252,7 +305,7 @@ void refview_load_images(RefViewSet* set) {
         int img_h = tasks[i].h;
 
         if (!pixels) {
-            SDL_Log("RefView: Could not load image %s", tasks[i].path);
+            SDL_Log("RefView: Could not load image %s (%s)", tasks[i].path, stbi_failure_reason());
             continue;
         }
 
@@ -288,6 +341,7 @@ void refview_load_images(RefViewSet* set) {
     free(tasks);
 
     SDL_Log("RefView: Loaded %u / %u images as sokol_gfx images", loaded, set->count);
+#endif
 }
 
 void refview_release_images(RefViewSet* set) {
