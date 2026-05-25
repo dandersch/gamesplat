@@ -16,7 +16,7 @@ mkdir -p "$BUILD_DIR"
 
 echo "Generating sokol-shdc headers..."
 for name in wireframe overlay darken mesh splat; do
-    ./sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
+    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
 done
 
 COMMON_FLAGS=(
