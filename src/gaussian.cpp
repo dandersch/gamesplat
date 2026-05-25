@@ -511,10 +511,13 @@ static bool decode_sog_sh0_scene(SogArchiveFile* files, int file_count, const So
             case 2: qx = a;       qy = b;       qz = omitted; qw = c;       break;
             default:qx = a;       qy = b;       qz = c;       qw = omitted; break;
         }
-        g->rotation[0] = qw;
-        g->rotation[1] = qx;
-        g->rotation[2] = qy;
-        g->rotation[3] = qz;
+        // SOG's smallest-three decode yields the same component order that
+        // splat-transform writes back to PLY as rot_0..rot_3. Keep that order
+        // here so SOG scenes match their SOG->PLY roundtrips in this renderer.
+        g->rotation[0] = qx;
+        g->rotation[1] = qy;
+        g->rotation[2] = qz;
+        g->rotation[3] = qw;
         g->opacity = (float)s0[3] / 255.0f;
     }
 
