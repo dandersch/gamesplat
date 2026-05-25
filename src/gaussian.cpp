@@ -1,6 +1,9 @@
 #include "gaussian.h"
 #include "miniz.h"
 #include "json_mini.h"
+#ifndef __EMSCRIPTEN__
+#include <webp/decode.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,12 +58,47 @@ struct SogMeta {
     char  shN_files[2][128];
 };
 
+struct SogImage {
+    uint8_t* pixels;
+    int      width;
+    int      height;
+};
+
 static void free_sog_archive_files(SogArchiveFile* files, int count) {
     for (int i = 0; i < count; i++) {
         free(files[i].data);
         files[i].data = NULL;
         files[i].size = 0;
     }
+}
+
+static void free_sog_image(SogImage* img) {
+#ifndef __EMSCRIPTEN__
+    if (img->pixels) WebPFree(img->pixels);
+#else
+    free(img->pixels);
+#endif
+    *img = {};
+}
+
+static bool alloc_scene_storage(GaussianScene* scene, uint32_t count) {
+    scene->gaussian_count = count;
+    scene->gaussians = (Gaussian*)calloc(count, sizeof(Gaussian));
+    scene->visible_indices  = (uint32_t*)malloc(count * sizeof(uint32_t));
+    scene->visible_depths   = (float*)malloc(count * sizeof(float));
+    scene->sorted_indices   = (uint32_t*)malloc(count * sizeof(uint32_t));
+    scene->scratch_indices  = (uint32_t*)malloc(count * sizeof(uint32_t));
+    scene->scratch_keys     = (uint32_t*)malloc(count * sizeof(uint32_t));
+    scene->scratch_keys2    = (uint32_t*)malloc(count * sizeof(uint32_t));
+    scene->visible_count    = 0;
+
+    if (!scene->gaussians || !scene->visible_indices || !scene->visible_depths ||
+        !scene->sorted_indices || !scene->scratch_indices || !scene->scratch_keys ||
+        !scene->scratch_keys2) {
+        free_scene(scene);
+        return false;
+    }
+    return true;
 }
 
 static SogArchiveFile* find_sog_archive_file(SogArchiveFile* files, int count, const char* name) {
@@ -291,9 +329,144 @@ static bool validate_sog_meta_files(SogArchiveFile* files, int file_count, const
     return true;
 }
 
-static bool load_sog(const char* path, GaussianScene* scene) {
-    (void)scene;
+static bool load_sog_image(SogArchiveFile* files, int file_count, const char* name, SogImage* out) {
+    *out = {};
+    SogArchiveFile* file = find_sog_archive_file(files, file_count, name);
+    if (!file || !file->data) {
+        fprintf(stderr, "SOG: missing image file: %s\n", name);
+        return false;
+    }
 
+#ifdef __EMSCRIPTEN__
+    // Native builds currently decode SOG's lossless WebP payloads with libwebp.
+    // For the web build we have two good future options: compile libwebp to
+    // WASM and link it statically, or add an async browser ImageBitmap/canvas
+    // decode bridge that copies RGBA pixels into WASM memory. Keep this path
+    // explicit so .ply-only web builds still compile until one option is added.
+    fprintf(stderr, "SOG: WebP decode is not implemented in the web build yet (%s)\n", name);
+    return false;
+#else
+    int w = 0, h = 0;
+    if (!WebPGetInfo((const uint8_t*)file->data, file->size, &w, &h) || w <= 0 || h <= 0) {
+        fprintf(stderr, "SOG: invalid WebP image: %s\n", name);
+        return false;
+    }
+    uint8_t* rgba = WebPDecodeRGBA((const uint8_t*)file->data, file->size, &w, &h);
+    if (!rgba) {
+        fprintf(stderr, "SOG: failed to decode WebP image: %s\n", name);
+        return false;
+    }
+    out->pixels = rgba;
+    out->width = w;
+    out->height = h;
+    return true;
+#endif
+}
+
+static float sog_lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+static float sog_unlog(float n) {
+    return n < 0.0f ? -(expf(-n) - 1.0f) : (expf(n) - 1.0f);
+}
+
+static float sog_quat_component(uint8_t c) {
+    return ((float)c / 255.0f - 0.5f) * 2.0f / sqrtf(2.0f);
+}
+
+static bool validate_sog_base_images(const SogMeta* meta,
+                                     const SogImage* means_l,
+                                     const SogImage* means_u,
+                                     const SogImage* scales,
+                                     const SogImage* quats,
+                                     const SogImage* sh0) {
+    int w = means_l->width;
+    int h = means_l->height;
+    if (means_u->width != w || means_u->height != h ||
+        scales->width != w || scales->height != h ||
+        quats->width != w || quats->height != h ||
+        sh0->width != w || sh0->height != h) {
+        fprintf(stderr, "SOG: per-gaussian image dimensions do not match\n");
+        return false;
+    }
+    if ((uint64_t)meta->count > (uint64_t)w * (uint64_t)h) {
+        fprintf(stderr, "SOG: gaussian count exceeds image capacity\n");
+        return false;
+    }
+    return true;
+}
+
+static bool decode_sog_sh0_scene(SogArchiveFile* files, int file_count, const SogMeta* meta, GaussianScene* scene) {
+    SogImage means_l = {}, means_u = {}, scales = {}, quats = {}, sh0 = {};
+    bool ok = false;
+
+    if (!load_sog_image(files, file_count, meta->means_files[0], &means_l)) goto done;
+    if (!load_sog_image(files, file_count, meta->means_files[1], &means_u)) goto done;
+    if (!load_sog_image(files, file_count, meta->scales_file, &scales)) goto done;
+    if (!load_sog_image(files, file_count, meta->quats_file, &quats)) goto done;
+    if (!load_sog_image(files, file_count, meta->sh0_file, &sh0)) goto done;
+
+    if (!validate_sog_base_images(meta, &means_l, &means_u, &scales, &quats, &sh0)) goto done;
+    if (!alloc_scene_storage(scene, meta->count)) goto done;
+
+    for (uint32_t i = 0; i < meta->count; i++) {
+        const uint8_t* ml = means_l.pixels + (size_t)i * 4;
+        const uint8_t* mu = means_u.pixels + (size_t)i * 4;
+        const uint8_t* sc = scales.pixels  + (size_t)i * 4;
+        const uint8_t* qt = quats.pixels   + (size_t)i * 4;
+        const uint8_t* s0 = sh0.pixels     + (size_t)i * 4;
+        Gaussian* g = &scene->gaussians[i];
+
+        for (int axis = 0; axis < 3; axis++) {
+            uint32_t q = ((uint32_t)mu[axis] << 8) | (uint32_t)ml[axis];
+            float n = sog_lerp(meta->means_mins[axis], meta->means_maxs[axis], (float)q / 65535.0f);
+            g->position[axis] = sog_unlog(n);
+            // SOG v2 stores k-means labels for the original 3DGS log-scale
+            // values. The renderer expects linear-space Gaussian axis stddevs,
+            // matching the PLY loader's exp(scale_*) decode.
+            g->scale[axis] = expf(meta->scales_codebook[sc[axis]]);
+            g->color[axis] = meta->sh0_codebook[s0[axis]];
+        }
+
+        float a = sog_quat_component(qt[0]);
+        float b = sog_quat_component(qt[1]);
+        float c = sog_quat_component(qt[2]);
+        int mode = (int)qt[3] - 252;
+        if (mode < 0 || mode > 3) {
+            fprintf(stderr, "SOG: invalid quaternion mode %u at gaussian %u\n", qt[3], i);
+            free_scene(scene);
+            goto done;
+        }
+        float omitted = sqrtf(fmaxf(0.0f, 1.0f - (a*a + b*b + c*c)));
+        float qx, qy, qz, qw;
+        switch (mode) {
+            case 0: qx = omitted; qy = a;       qz = b;       qw = c;       break;
+            case 1: qx = a;       qy = omitted; qz = b;       qw = c;       break;
+            case 2: qx = a;       qy = b;       qz = omitted; qw = c;       break;
+            default:qx = a;       qy = b;       qz = c;       qw = omitted; break;
+        }
+        g->rotation[0] = qw;
+        g->rotation[1] = qx;
+        g->rotation[2] = qy;
+        g->rotation[3] = qz;
+        g->opacity = (float)s0[3] / 255.0f;
+        // sh_rest remains zero for this first SOG decode milestone. The next
+        // commit will populate it from shN_centroids/shN_labels when present.
+    }
+
+    ok = true;
+
+done:
+    free_sog_image(&means_l);
+    free_sog_image(&means_u);
+    free_sog_image(&scales);
+    free_sog_image(&quats);
+    free_sog_image(&sh0);
+    return ok;
+}
+
+static bool load_sog(const char* path, GaussianScene* scene) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, path, 0)) {
@@ -366,11 +539,18 @@ static bool load_sog(const char* path, GaussianScene* scene) {
             meta.version, meta.count, meta.has_shN ? "present" : "absent");
     if (meta.has_shN) fprintf(stderr, " (bands=%d, count=%d)", meta.shN_bands, meta.shN_count);
     fprintf(stderr, "\n");
-    fprintf(stderr, "SOG: metadata parsing and gaussian decode not implemented yet\n");
+
+    if (!decode_sog_sh0_scene(files, file_count, &meta, scene)) {
+        free_sog_archive_files(files, file_count);
+        free(files);
+        return false;
+    }
+
+    fprintf(stderr, "SOG: decoded %u gaussians (base SH only; shN decode pending)\n", meta.count);
 
     free_sog_archive_files(files, file_count);
     free(files);
-    return false;
+    return true;
 }
 
 struct PlyProperty {
