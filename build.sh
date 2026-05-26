@@ -7,7 +7,7 @@ CXXFLAGS="-O2 -std=c++17 -Wall -Wextra -Wno-missing-field-initializers -Wno-unus
 # deps for its built-in GL loader.
 LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread -lwebp"
 OUT="gsplat"
-ENABLE_TRACY="${ENABLE_TRACY:-0}"
+ENABLE_PROFILER="${ENABLE_PROFILER:-0}"
 
 IMGUI_DIR="third_party/imgui"
 IMGUI_LIB="third_party/libimgui.a"
@@ -24,10 +24,12 @@ INCLUDE_FLAGS=(
     -I"$TRACY_DIR"
 )
 
-PROFILE_FLAGS=()
+TRACY_FLAGS=()
+APP_PROFILE_FLAGS=()
 PROFILE_LIBS=()
-if [ "$ENABLE_TRACY" = "1" ]; then
-    PROFILE_FLAGS+=("-DTRACY_ENABLE")
+if [ "$ENABLE_PROFILER" = "1" ]; then
+    TRACY_FLAGS+=("-DTRACY_ENABLE")
+    APP_PROFILE_FLAGS+=("-DENABLE_PROFILER")
     PROFILE_LIBS+=("$TRACY_LIB")
 fi
 
@@ -57,11 +59,11 @@ if [ ! -f "$IMGUI_LIB" ]; then
     rm "${IMGUI_OBJS[@]}"
 fi
 
-if [ "$ENABLE_TRACY" = "1" ]; then
+if [ "$ENABLE_PROFILER" = "1" ]; then
     if [ ! -f "$TRACY_LIB" ] || [ -n "$(find "$TRACY_DIR" -type f -newer "$TRACY_LIB" -print -quit)" ]; then
         echo "Building tracy..."
         tracy_obj="third_party/tracy/TracyClient.o"
-        $CXX $CXXFLAGS -w "${PROFILE_FLAGS[@]}" -I"$TRACY_DIR" -c "$TRACY_SRC" -o "$tracy_obj"
+        $CXX $CXXFLAGS -w "${TRACY_FLAGS[@]}" -I"$TRACY_DIR" -c "$TRACY_SRC" -o "$tracy_obj"
         ar rcs "$TRACY_LIB" "$tracy_obj"
         rm "$tracy_obj"
     fi
@@ -80,6 +82,6 @@ if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || 
 fi
 
 echo "Building $OUT..."
-$CXX $CXXFLAGS "${PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
+$CXX $CXXFLAGS "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
 
 echo "Done: ./$OUT"

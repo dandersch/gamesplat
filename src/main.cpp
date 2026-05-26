@@ -10,6 +10,8 @@
 #include "sokol_imgui.h"
 #include "imgui_impl_sdl3.h"
 
+#include "profiler.h"
+
 #include "camera.cpp"
 #include "gaussian.cpp"
 #include "mesh.cpp"
@@ -952,6 +954,9 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     AppState* state = (AppState*)appstate;
     if (!state) return SDL_APP_FAILURE;
 
+    PROFILE_FRAME();
+    PROFILE_BEGIN("SDL_AppIterate");
+
     const char* mesh_path = state->mesh_path;
     const char* object_path = state->object_path;
     Renderer& renderer = state->renderer;
@@ -1598,6 +1603,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
                         1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
 
 
+    PROFILE_END();
     return SDL_APP_CONTINUE;
 }
 
