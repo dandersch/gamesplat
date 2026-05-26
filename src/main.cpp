@@ -468,34 +468,54 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
     // Scene
     if (ply_path) {
+        PROFILE("load gaussian scene") {
         state->scene_loaded = load_gaussian_scene(ply_path, &state->scene);
+        }
         if (state->scene_loaded) {
+            PROFILE("upload gaussian scene") {
             renderer_upload_gaussians(&state->renderer, &state->scene);
+            }
         }
     }
 
     // Mesh
     if (mesh_path) {
+        PROFILE("load mesh") {
         if (mesh_load(mesh_path, &state->mesh)) {
+            PROFILE("upload mesh") {
             renderer_upload_mesh(&state->renderer, &state->mesh);
+            }
+        }
         }
     }
 
     // Static scene object (no animation, identity transform)
     if (object_path) {
+        PROFILE("load object mesh") {
         if (mesh_load(object_path, &state->object)) {
+            PROFILE("upload object mesh") {
             renderer_upload_object_mesh(&state->renderer, &state->object);
+            }
+        }
         }
     }
 
     // Reference views
     state->refviews.selected = -1;
     if (colmap_dir) {
+        PROFILE("load reference views") {
         state->refviews_loaded = refview_load(&state->refviews, colmap_dir);
+        }
         if (state->refviews_loaded) {
+            PROFILE("load covisibility") {
             refview_load_covisibility(&state->refviews, colmap_dir);
+            }
+            PROFILE("load reference images") {
             refview_load_images(&state->refviews);
+            }
+            PROFILE("load hotspots") {
             hotspot_load_for_set(&state->refviews);
+            }
         }
     }
 
@@ -995,6 +1015,12 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     state->mouse_dx = 0.0f;
     state->mouse_dy = 0.0f;
 
+    bool examine_active = false;
+    int win_w = 0, win_h = 0;
+    float aspect = 1.0f;
+    CameraUniforms cam_uniforms = {};
+
+    PROFILE("frame update") {
     // Mesh path animation: walk between consecutive refview nodes and loop forever.
     if (mesh_path && refviews_loaded && refviews.count >= 2) {
         uint32_t a = anim_node % refviews.count;
@@ -1051,7 +1077,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     // Drive the examine lerp; while examining, FPS controls are fully
     // muted (no mouse look, no WASD) to keep the cam stationary for the
     // eventual return-lerp.
-    bool examine_active = examine_locks_input(examine);
+    examine_active = examine_locks_input(examine);
     examine_tick(&examine, &renderer.object_transform, dt);
 
     // While ACTIVE, mouse drag orbits the object around its AABB center
@@ -1110,9 +1136,8 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
 
     // Get window size
-    int win_w, win_h;
     SDL_GetWindowSize(window, &win_w, &win_h);
-    float aspect = (float)win_w / (float)win_h;
+    aspect = (float)win_w / (float)win_h;
 
     // Animate ortho blend toward target. Skipped while an inspect lerp is
     // active: refview_update drives ortho_blend from the same eased t as
@@ -1140,7 +1165,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
 
     // Build camera uniforms
-    CameraUniforms cam_uniforms = {};
+    cam_uniforms = {};
     camera_get_view_matrix(&cam, cam_uniforms.view);
     camera_get_proj_matrix(&cam, aspect, cam_uniforms.proj);
     cam_uniforms.viewport[0] = (float)win_w;
@@ -1150,10 +1175,13 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     // each in its own mix() branch (see comment in camera.h).
     cam_uniforms.persp_focal = (1.0f / tanf(cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
     cam_uniforms.ortho_focal = (float)win_h / (2.0f * cam.ortho_size);
+    }
 
     // Cull + sort
     if (scene_loaded) {
+        PROFILE("gaussian cull") {
         cull_gaussians(&scene, cam_uniforms.view, cam_uniforms.proj, cam.ortho_blend);
+        }
 
         if (scene.visible_count > 0) {
             SortContext sort_ctx = {};
@@ -1164,10 +1192,13 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
             sort_ctx.scratch_indices = scene.scratch_indices;
             sort_ctx.scratch_keys = scene.scratch_keys;
             sort_ctx.scratch_keys2 = scene.scratch_keys2;
+            PROFILE("gaussian sort") {
             sort_gaussians(&sort_ctx);
+            }
         }
     }
 
+    PROFILE("imgui") {
     // ImGui frame. simgui_new_frame calls ImGui::NewFrame internally and
     // sets DisplaySize/DeltaTime. ImGui_ImplSDL3_NewFrame still runs before
     // it to forward mouse/keyboard state into ImGui IO.
@@ -1527,13 +1558,20 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
             }
         }
     }
+    }
 
     // simgui_render() (called inside renderer_draw_frame's pass) calls
     // ImGui::Render() itself, so we don't call it here.
 
-    // Find closest refview node to camera (used for overlay + current_node tracking)
     OverlayParams overlay = {};
     OverlayParams* overlay_ptr = NULL;
+    NodeRenderParams node_params = {};
+    NodeRenderParams* node_ptr = NULL;
+    CameraUniforms  map_uniforms = {};
+    CameraUniforms* map_uniforms_ptr = NULL;
+
+    PROFILE("overlay params") {
+    // Find closest refview node to camera (used for overlay + current_node tracking)
     if (refviews_loaded) {
         float best_dist2 = 1e30f;
         int best_idx = -1;
@@ -1575,8 +1613,6 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
 
     // Build node render params
-    NodeRenderParams node_params = {};
-    NodeRenderParams* node_ptr = NULL;
     if (refviews_loaded && neighbor_count > 0 && show_node_boxes) {
         node_params.positions = neighbor_positions;
         node_params.count = neighbor_count;
@@ -1585,8 +1621,6 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
 
     // Build map-camera uniforms when the top-down overlay is active.
-    CameraUniforms  map_uniforms = {};
-    CameraUniforms* map_uniforms_ptr = NULL;
     if (map_view_active) {
         camera_get_view_matrix(&map_cam, map_uniforms.view);
         camera_get_proj_matrix(&map_cam, aspect, map_uniforms.proj);
@@ -1597,10 +1631,13 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         map_uniforms.ortho_focal   = (float)win_h / (2.0f * map_cam.ortho_size);
         map_uniforms_ptr = &map_uniforms;
     }
+    }
 
     // Render
+    PROFILE("render submit") {
     renderer_draw_frame(&renderer, &scene, &cam_uniforms, overlay_ptr, node_ptr,
                         1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
+    }
 
 
     PROFILE_END();

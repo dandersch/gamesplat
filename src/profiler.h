@@ -51,9 +51,11 @@ static inline void profiler_end(void) {
 #define PROFILE_FRAME() TracyCFrameMark
 
 #define PROFILE(name) \
-    for (int PROFILER_UQ(_profiler_once_) = (PROFILE_BEGIN(name), 0); \
-         PROFILER_UQ(_profiler_once_) == 0; \
-         PROFILER_UQ(_profiler_once_) += 1, PROFILE_END())
+    if (static const struct ___tracy_source_location_data _profiler_location = { name, __func__, __FILE__, (uint32_t)__LINE__, 0 }; false) { \
+    } else \
+        for (int PROFILER_UQ(_profiler_once_) = (profiler_begin(&_profiler_location), 0); \
+             PROFILER_UQ(_profiler_once_) == 0; \
+             PROFILER_UQ(_profiler_once_) += 1, profiler_end())
 
 #else
 
