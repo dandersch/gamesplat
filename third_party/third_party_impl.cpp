@@ -16,6 +16,9 @@
 // Emscripten build to WebGL2/GLES3. The generated shader headers carry both
 // glsl430 and glsl300es variants.
 #define SOKOL_IMPL
+#if defined(ENABLE_PROFILER)
+#define SOKOL_TRACE_HOOKS
+#endif
 #if defined(__EMSCRIPTEN__)
 #define SOKOL_GLES3
 #else
@@ -31,6 +34,10 @@
 #define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
 #include "sokol_imgui.h"
+#if defined(ENABLE_PROFILER)
+#define SOKOL_GFX_IMGUI_IMPL
+#include "sokol_gfx_imgui.h"
+#endif
 
 // Pull the sokol-shdc generated shader headers into the same TU as
 // sokol_gfx.h so the *_shader_desc() / SLOT_* / uniform-block-struct symbols

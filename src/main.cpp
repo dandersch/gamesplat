@@ -8,6 +8,9 @@
 #define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
 #include "sokol_imgui.h"
+#if defined(ENABLE_PROFILER)
+#include "sokol_gfx_imgui.h"
+#endif
 #include "imgui_impl_sdl3.h"
 
 #include "profiler.h"
@@ -291,6 +294,7 @@ struct AppState {
     SDL_GLContext  gl_context;
     bool           sg_setup_done;
     bool           simgui_setup_done;
+    bool           sgimgui_setup_done;
     bool           imgui_sdl3_initialized;
     bool           renderer_started;
 
@@ -455,6 +459,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     sid.sample_count = 1;
     simgui_setup(&sid);
     state->simgui_setup_done = true;
+
+#if defined(ENABLE_PROFILER)
+    sgimgui_desc_t sgimgui_desc = {};
+    sgimgui_setup(&sgimgui_desc);
+    state->sgimgui_setup_done = true;
+#endif
 
     ImGui_ImplSDL3_InitForOther(state->window);
     state->imgui_sdl3_initialized = true;
@@ -1350,6 +1360,28 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         ImGui::End();
     }
 
+#if defined(ENABLE_PROFILER)
+    ImGui::Begin("sokol-gfx", NULL, ImGuiWindowFlags_MenuBar);
+    if (ImGui::BeginMenuBar()) {
+        if (ImGui::BeginMenu("Windows")) {
+            sgimgui_draw_capabilities_menu_item("Capabilities");
+            sgimgui_draw_frame_stats_menu_item("Frame Stats");
+            sgimgui_draw_buffer_menu_item("Buffers");
+            sgimgui_draw_image_menu_item("Images");
+            sgimgui_draw_view_menu_item("Views");
+            sgimgui_draw_sampler_menu_item("Samplers");
+            sgimgui_draw_shader_menu_item("Shaders");
+            sgimgui_draw_pipeline_menu_item("Pipelines");
+            sgimgui_draw_capture_menu_item("Calls");
+            ImGui::EndMenu();
+        }
+        ImGui::EndMenuBar();
+    }
+    sgimgui_draw_frame_stats_window_content();
+    ImGui::End();
+    sgimgui_draw();
+#endif
+
     // Draw crosshair in camera mode (highlight when aiming at a node,
     // or show an upward arrow when aiming at a hotspot on the overlay).
     // Suppressed during examine: the object fills the view, so a hover
@@ -1661,6 +1693,9 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     if (state->renderer_started) renderer_destroy(&state->renderer);
 
     if (state->imgui_sdl3_initialized) ImGui_ImplSDL3_Shutdown();
+#if defined(ENABLE_PROFILER)
+    if (state->sgimgui_setup_done) sgimgui_shutdown();
+#endif
     if (state->simgui_setup_done) simgui_shutdown(); // destroys ImGui context
     if (state->sg_setup_done) sg_shutdown();
 
