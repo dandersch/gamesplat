@@ -23,6 +23,7 @@ INCLUDE_FLAGS=(
     -Ithird_party
     -I"$TRACY_DIR"
 )
+SOKOL_BACKEND_FLAGS=("-DSOKOL_GLCORE")
 
 TRACY_FLAGS=()
 APP_PROFILE_FLAGS=()
@@ -76,13 +77,13 @@ fi
 if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ third_party/miniz.c -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
     echo "Building third_party single-header impls..."
     objs=("third_party/third_party_impl.o" "third_party/miniz.o")
-    $CXX $CXXFLAGS "${APP_PROFILE_FLAGS[@]}" -Ithird_party -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
+    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -Ithird_party -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
     $CXX -O2 -Wall -Wextra -Wno-unused-function -Ithird_party -x c -c third_party/miniz.c -o "${objs[1]}"
     ar rcs "$THIRDPARTY_LIB" "${objs[@]}"
     rm "${objs[@]}"
 fi
 
 echo "Building $OUT..."
-$CXX $CXXFLAGS "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
+$CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
 
 echo "Done: ./$OUT"

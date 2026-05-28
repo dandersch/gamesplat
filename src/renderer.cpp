@@ -26,6 +26,7 @@ bool renderer_init(Renderer* r, SDL_Window* window) {
     r->window = window;
     r->mesh_transform.scale = 1.0f;
     r->object_transform.scale = 1.0f;
+    PROFILE_GPU_CONTEXT();
 
     // --- Splat pipeline -------------------------------------------------
     {
@@ -519,8 +520,8 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         }
     };
 
-    // TODO: PROFILE_GPU("mesh pass")
     PROFILE("render mesh pass") {
+    PROFILE_GPU("mesh pass") {
     // Primary animated mesh.
     {
         float model[16];
@@ -539,11 +540,12 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         draw_mesh_slot(&r->object_gpu, obj_mvp);
     }
     }
+    }
 
     // Splats
     if (scene->visible_count > 0 && r->gaussian_texture.id && r->index_buffer.id) {
-        // TODO: PROFILE_GPU("splat pass")
         PROFILE("render splat pass") {
+        PROFILE_GPU("splat pass") {
         sg_apply_pipeline(r->splat_pipeline);
 
         sg_bindings bnd = {};
@@ -559,12 +561,13 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         // 6 vertices per quad, scene->visible_count instances.
         sg_draw(0, 6, (int)scene->visible_count);
         }
+        }
     }
 
     // Equirectangular panorama overlay.
     if (overlay && overlay->texture.id && overlay->alpha > 0.0f) {
-        // TODO: PROFILE_GPU("overlay pass")
         PROFILE("render overlay pass") {
+        PROFILE_GPU("overlay pass") {
         sg_apply_pipeline(r->overlay_pipeline);
 
         sg_bindings bnd = {};
@@ -581,12 +584,13 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
 
         sg_draw(0, 3, 1); // fullscreen triangle
         }
+        }
     }
 
     // Wireframe node cubes.
     if (nodes && nodes->count > 0) {
-        // TODO: PROFILE_GPU("wireframe pass")
         PROFILE("render wireframe pass") {
+        PROFILE_GPU("wireframe pass") {
         sg_apply_pipeline(r->wireframe_pipeline);
 
         float scale = nodes->half_size * 2.0f;
@@ -609,6 +613,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
             sg_apply_uniforms(UB_WireframeUniforms, SG_RANGE_REF(u));
 
             sg_draw(0, 24, 1);
+        }
         }
         }
     }
@@ -653,13 +658,15 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
     sg_begin_pass(&pass);
     draw_world(r, scene, cam, overlay, nodes);
-    // TODO: PROFILE_GPU("imgui pass")
     PROFILE("render imgui pass") {
+    PROFILE_GPU("imgui pass") {
     simgui_render(); // imgui draws on top of the world inside the same pass
+    }
     }
     sg_end_pass();
     PROFILE("render commit") {
     sg_commit();
+    PROFILE_GPU_COLLECT();
     SDL_GL_SwapWindow(r->window);
     }
 }

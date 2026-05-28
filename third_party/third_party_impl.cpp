@@ -20,9 +20,13 @@
 #define SOKOL_TRACE_HOOKS
 #endif
 #if defined(__EMSCRIPTEN__)
+#if !defined(SOKOL_GLES3)
 #define SOKOL_GLES3
+#endif
 #else
+#if !defined(SOKOL_GLCORE)
 #define SOKOL_GLCORE
+#endif
 #endif
 #include "sokol_gfx.h"
 
