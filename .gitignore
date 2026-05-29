@@ -1,6 +1,5 @@
 gsplat
 *.spv
-third_party
 imgui.ini
 build/
 bin/

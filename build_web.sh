@@ -6,7 +6,8 @@ CXX="${CXX:-em++}"
 BUILD_DIR="${BUILD_DIR:-build/web}"
 OUT="$BUILD_DIR/index.html"
 SHELL_FILE="${SHELL_FILE:-web/shell.html}"
-WEBP_DIR="third_party/libwebp"
+VENDOR_DIR="vendor"
+WEBP_DIR="$VENDOR_DIR/libwebp"
 WEBP_LIB="$BUILD_DIR/libwebpdecoder.a"
 
 # The demo asset pack is large. Keep the known-good initial heap as the
@@ -29,9 +30,9 @@ COMMON_FLAGS=(
     -Wextra
     -Wno-missing-field-initializers
     -Wno-unused-function
-    -Ithird_party
-    -Ithird_party/imgui
-    -Ithird_party/imgui/backends
+    -I"$VENDOR_DIR"
+    -I"$VENDOR_DIR/imgui"
+    -I"$VENDOR_DIR/imgui/backends"
     -I"$WEBP_DIR"
     -I"$WEBP_DIR/src"
 )
@@ -103,13 +104,13 @@ fi
 
 SOURCES=(
     src/main.cpp
-    third_party/miniz.c
-    third_party/third_party_impl.cpp
-    third_party/imgui/imgui.cpp
-    third_party/imgui/imgui_draw.cpp
-    third_party/imgui/imgui_tables.cpp
-    third_party/imgui/imgui_widgets.cpp
-    third_party/imgui/backends/imgui_impl_sdl3.cpp
+    "$VENDOR_DIR/miniz.c"
+    "$VENDOR_DIR/third_party_impl.cpp"
+    "$VENDOR_DIR/imgui/imgui.cpp"
+    "$VENDOR_DIR/imgui/imgui_draw.cpp"
+    "$VENDOR_DIR/imgui/imgui_tables.cpp"
+    "$VENDOR_DIR/imgui/imgui_widgets.cpp"
+    "$VENDOR_DIR/imgui/backends/imgui_impl_sdl3.cpp"
 )
 
 echo "Building libwebp decoder..."

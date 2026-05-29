@@ -8,19 +8,24 @@ CXXFLAGS="-O2 -std=c++17 -Wall -Wextra -Wno-missing-field-initializers -Wno-unus
 LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread -lwebp"
 OUT="gsplat"
 ENABLE_PROFILER="${ENABLE_PROFILER:-0}"
+BUILD_DIR="${BUILD_DIR:-build}"
+OBJ_DIR="$BUILD_DIR/obj"
 
-IMGUI_DIR="third_party/imgui"
-IMGUI_LIB="third_party/libimgui.a"
-THIRDPARTY_LIB="third_party/libthirdparty.a"
-THIRDPARTY_SRC="third_party/third_party_impl.cpp"
-TRACY_DIR="third_party/tracy"
-TRACY_LIB="third_party/libtracy.a"
+VENDOR_DIR="vendor"
+IMGUI_DIR="$VENDOR_DIR/imgui"
+IMGUI_LIB="$BUILD_DIR/libimgui.a"
+THIRDPARTY_LIB="$BUILD_DIR/libthirdparty.a"
+THIRDPARTY_SRC="$VENDOR_DIR/third_party_impl.cpp"
+TRACY_DIR="$VENDOR_DIR/tracy"
+TRACY_LIB="$BUILD_DIR/libtracy.a"
 TRACY_SRC="$TRACY_DIR/TracyClient.cpp"
+
+mkdir -p "$BUILD_DIR" "$OBJ_DIR"
 
 INCLUDE_FLAGS=(
     -I"$IMGUI_DIR"
     -I"$IMGUI_DIR/backends"
-    -Ithird_party
+    -I"$VENDOR_DIR"
     -I"$TRACY_DIR"
 )
 SOKOL_BACKEND_FLAGS=("-DSOKOL_GLCORE")
@@ -32,7 +37,7 @@ if [ "$ENABLE_PROFILER" = "1" ]; then
     TRACY_FLAGS+=("-DTRACY_ENABLE")
     APP_PROFILE_FLAGS+=("-DENABLE_PROFILER")
     PROFILE_LIBS+=("$TRACY_LIB")
-    THIRDPARTY_LIB="third_party/libthirdparty_profiler.a"
+    THIRDPARTY_LIB="$BUILD_DIR/libthirdparty_profiler.a"
 fi
 
 echo "Generating sokol-shdc headers..."
@@ -53,7 +58,9 @@ if [ ! -f "$IMGUI_LIB" ]; then
     for src in "$IMGUI_DIR"/imgui.cpp "$IMGUI_DIR"/imgui_draw.cpp \
                "$IMGUI_DIR"/imgui_tables.cpp "$IMGUI_DIR"/imgui_widgets.cpp \
                "$IMGUI_DIR"/backends/imgui_impl_sdl3.cpp; do
-        obj="${src%.cpp}.o"
+        rel="${src#$VENDOR_DIR/}"
+        obj="$OBJ_DIR/${rel%.cpp}.o"
+        mkdir -p "$(dirname "$obj")"
         $CXX $CXXFLAGS -I"$IMGUI_DIR" -I"$IMGUI_DIR/backends" -c "$src" -o "$obj"
         IMGUI_OBJS+=("$obj")
     done
@@ -64,21 +71,22 @@ fi
 if [ "$ENABLE_PROFILER" = "1" ]; then
     if [ ! -f "$TRACY_LIB" ] || [ -n "$(find "$TRACY_DIR" -type f -newer "$TRACY_LIB" -print -quit)" ]; then
         echo "Building tracy..."
-        tracy_obj="third_party/tracy/TracyClient.o"
+        tracy_obj="$OBJ_DIR/tracy/TracyClient.o"
+        mkdir -p "$(dirname "$tracy_obj")"
         $CXX $CXXFLAGS -w "${TRACY_FLAGS[@]}" -I"$TRACY_DIR" -c "$TRACY_SRC" -o "$tracy_obj"
         ar rcs "$TRACY_LIB" "$tracy_obj"
         rm "$tracy_obj"
     fi
 fi
 
-# Build single-header third_party static lib if missing or out of date.
+# Build single-header vendor static lib if missing or out of date.
 # sokol_imgui needs ImGui's headers visible so the impl can talk to ImGui's
 # C++ API directly.
-if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ third_party/miniz.c -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
-    echo "Building third_party single-header impls..."
-    objs=("third_party/third_party_impl.o" "third_party/miniz.o")
-    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -Ithird_party -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
-    $CXX -O2 -Wall -Wextra -Wno-unused-function -Ithird_party -x c -c third_party/miniz.c -o "${objs[1]}"
+if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/miniz.c" -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
+    echo "Building vendor single-header impls..."
+    objs=("$OBJ_DIR/third_party_impl.o" "$OBJ_DIR/miniz.o")
+    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
+    $CXX -O2 -Wall -Wextra -Wno-unused-function -I"$VENDOR_DIR" -x c -c "$VENDOR_DIR/miniz.c" -o "${objs[1]}"
     ar rcs "$THIRDPARTY_LIB" "${objs[@]}"
     rm "${objs[@]}"
 fi
