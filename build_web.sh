@@ -95,7 +95,7 @@ EM_FLAGS=(
 
 PRELOAD_FLAGS=(
     --preload-file res/transition.wav@res/transition.wav
-    --preload-file test/export_n01.sog@test/export_n01.sog
+    --preload-file res/export_n01.sog@res/export_n01.sog
 )
 
 if [ "$USE_PRELOAD_CACHE" = "1" ]; then
