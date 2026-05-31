@@ -2,13 +2,14 @@
 #include "sokol_gfx.h"
 #include "camera.h"
 #include "hotspot.h"
+#include "colmap.h"
 #include <cstdint>
 
 struct RefView {
     char    image_name[256];
-    int     colmap_id;         // original IMAGE_ID from colmap
+    int     colmap_id;         // source IMAGE_ID
     float   position[3];       // world-space camera center (-R^T * T)
-    float   rotation[4];       // quaternion (w,x,y,z) from colmap
+    float   rotation[16];      // column-major world-to-camera matrix
     float   yaw, pitch;        // derived from rotation for lerp target
     sg_image texture;          // id == 0 until image loaded
     sg_view  texture_view;     // sampled view of `texture`
@@ -62,19 +63,18 @@ struct RefViewSet {
     // neighbor discovery
     float    neighbor_radius;  // only show nodes within this distance of current_node
 
-    // covisibility graph (from colmap database.db)
+    // covisibility graph
     CovisEdge* covis_edges;
     uint32_t   covis_edge_count;
     int        min_inliers;        // threshold: minimum inlier count to consider connected
     bool       use_covisibility;   // true = covis graph, false = distance-based
 };
 
-// Parse colmap images.txt from colmap_dir. Derives image_dir as ../../images/ relative to colmap_dir.
-bool refview_load(RefViewSet* set, const char* colmap_dir);
+// Build reference views from already-parsed camera poses.
+bool refview_load(RefViewSet* set, const ColmapImageSet* images, const char* image_dir);
 
-// Load covisibility graph from colmap database.db. Call after refview_load.
-// Falls back to distance-based neighbors if db not found.
-void refview_load_covisibility(RefViewSet* set, const char* colmap_dir);
+// Build covisibility graph from already-parsed source image-pair edges.
+void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis);
 
 // Load images as sokol_gfx images + views. Call after refview_load.
 void refview_load_images(RefViewSet* set);
@@ -90,7 +90,7 @@ bool refview_update(RefViewSet* set, Camera* cam, float dt);
 // Returns actual count written.
 uint32_t refview_get_neighbors(const RefViewSet* set, float* out_positions, uint32_t* out_indices, uint32_t max_count);
 
-// Build rotation matrix (with Y-flip) from colmap quaternion into a column-major mat4.
+// Copy this view's column-major world-to-camera rotation matrix.
 void refview_get_rotation_matrix(const RefView* v, float* out_mat4);
 
 void refview_free(RefViewSet* set);

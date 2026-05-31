@@ -7,57 +7,7 @@
 #include "stb_image.h"
 #include "sokol_gfx.h"
 
-#if !defined(__EMSCRIPTEN__)
-// let's not bother with adding a wasm build of sqlite since the feature that
-// relies on it (building paths between nodes based on image covisibility) is
-// questionable and the sqlite lookup could be done in a build step anyway
-#include <sqlite3.h>
-#endif
-
-// Skip the rest of the current line (handles arbitrarily long POINTS2D lines)
-static void skip_line(FILE* f) {
-    int c;
-    while ((c = fgetc(f)) != EOF && c != '\n') {}
-}
-
-// Convert colmap quaternion (world-to-camera, colmap convention: X-right Y-down Z-forward)
-// to world-space camera center and yaw/pitch matching our fly camera convention (Y-up).
-static void colmap_to_camera(float qw, float qx, float qy, float qz,
-                             float tx, float ty, float tz,
-                             float* out_pos, float* out_yaw, float* out_pitch)
-{
-    // Build rotation matrix R from quaternion (world-to-camera rotation)
-    float R[3][3];
-    R[0][0] = 1 - 2*(qy*qy + qz*qz);
-    R[0][1] = 2*(qx*qy - qw*qz);
-    R[0][2] = 2*(qx*qz + qw*qy);
-    R[1][0] = 2*(qx*qy + qw*qz);
-    R[1][1] = 1 - 2*(qx*qx + qz*qz);
-    R[1][2] = 2*(qy*qz - qw*qx);
-    R[2][0] = 2*(qx*qz - qw*qy);
-    R[2][1] = 2*(qy*qz + qw*qx);
-    R[2][2] = 1 - 2*(qx*qx + qy*qy);
-
-    // Camera center in world space: -R^T * T
-    out_pos[0] = -(R[0][0]*tx + R[1][0]*ty + R[2][0]*tz);
-    out_pos[1] = -(R[0][1]*tx + R[1][1]*ty + R[2][1]*tz);
-    out_pos[2] = -(R[0][2]*tx + R[1][2]*ty + R[2][2]*tz);
-
-    // Camera forward in world space: R^T * [0,0,1] (colmap Z-forward)
-    // = third column of R^T = third row of R
-    float fwd_colmap[3] = { R[2][0], R[2][1], R[2][2] };
-
-    // Colmap: Y-down. Our renderer: Y-up. Negate Y component.
-    float fwd[3] = { fwd_colmap[0], -fwd_colmap[1], fwd_colmap[2] };
-    out_pos[1] = -out_pos[1]; // also flip camera position Y
-
-    // Derive yaw/pitch from forward vector
-    // forward = (cos(pitch)*sin(yaw), sin(pitch), cos(pitch)*cos(yaw))
-    *out_pitch = asinf(fwd[1]);
-    *out_yaw   = atan2f(fwd[0], fwd[2]);
-}
-
-bool refview_load(RefViewSet* set, const char* colmap_dir) {
+bool refview_load(RefViewSet* set, const ColmapImageSet* images, const char* image_dir) {
     memset(set, 0, sizeof(*set));
     set->selected = -1;
     set->current_node = -1;
@@ -66,94 +16,41 @@ bool refview_load(RefViewSet* set, const char* colmap_dir) {
     set->min_inliers = 50;
     set->use_covisibility = false;
 
-    // Build path to images.txt
-    char images_txt[512];
-    snprintf(images_txt, sizeof(images_txt), "%s/images.txt", colmap_dir);
-
-    FILE* f = fopen(images_txt, "r");
-    if (!f) {
-        SDL_Log("RefView: Could not open %s", images_txt);
-        SDL_Log("RefView: If you only have images.bin, convert with:");
-        SDL_Log("  colmap model_converter --input_path %s --output_path %s --output_type TXT", colmap_dir, colmap_dir);
+    if (!images || images->count == 0) {
+        SDL_Log("RefView: No COLMAP images to load");
         return false;
     }
 
-    // Derive image directory: colmap_dir/../../images/
-    snprintf(set->image_dir, sizeof(set->image_dir), "%s/../../images", colmap_dir);
+    snprintf(set->image_dir, sizeof(set->image_dir), "%s", image_dir ? image_dir : "");
     SDL_Log("RefView: image directory: %s", set->image_dir);
 
-    // First pass: count images
-    uint32_t count = 0;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        count++;
-        skip_line(f); // skip POINTS2D line (can be very long)
+    set->views = (RefView*)calloc(images->count, sizeof(RefView));
+    set->count = images->count;
+
+    for (uint32_t i = 0; i < images->count; i++) {
+        const ColmapImage* image = &images->images[i];
+        RefView* v = &set->views[i];
+        v->colmap_id = image->image_id;
+        snprintf(v->image_name, sizeof(v->image_name), "%s", image->name);
+        memcpy(v->rotation, image->rotation, sizeof(v->rotation));
+        v->position[0] = image->position[0];
+        v->position[1] = image->position[1];
+        v->position[2] = image->position[2];
+        v->yaw = image->yaw;
+        v->pitch = image->pitch;
     }
 
-    if (count == 0) {
-        SDL_Log("RefView: No images found in %s", images_txt);
-        fclose(f);
-        return false;
-    }
-
-    set->views = (RefView*)calloc(count, sizeof(RefView));
-    set->count = count;
-
-    // Second pass: parse
-    rewind(f);
-    uint32_t idx = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-
-        int image_id, camera_id;
-        float qw, qx, qy, qz, tx, ty, tz;
-        char name[256] = {};
-
-        int parsed = sscanf(line, "%d %f %f %f %f %f %f %f %d %255s",
-                            &image_id, &qw, &qx, &qy, &qz, &tx, &ty, &tz, &camera_id, name);
-        if (parsed < 10) {
-            SDL_Log("RefView: Failed to parse line: %s", line);
-            skip_line(f);
-            continue;
-        }
-
-        RefView* v = &set->views[idx];
-        v->colmap_id = image_id;
-        snprintf(v->image_name, sizeof(v->image_name), "%s", name);
-        v->rotation[0] = qw;
-        v->rotation[1] = qx;
-        v->rotation[2] = qy;
-        v->rotation[3] = qz;
-
-        colmap_to_camera(qw, qx, qy, qz, tx, ty, tz,
-                         v->position, &v->yaw, &v->pitch);
-
-        idx++;
-        skip_line(f);
-    }
-
-    set->count = idx; // actual parsed count
-    fclose(f);
-
-    SDL_Log("RefView: Loaded %u camera nodes from %s", set->count, images_txt);
+    SDL_Log("RefView: Loaded %u camera nodes", set->count);
     return true;
 }
 
-void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
-#if !defined(__EMSCRIPTEN__)
-    char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/../../database/database.db", colmap_dir);
-
-    sqlite3* db = NULL;
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        SDL_Log("RefView: Could not open %s (%s), using distance-based neighbors",
-                db_path, db ? sqlite3_errmsg(db) : "unknown error");
-        if (db) sqlite3_close(db);
+void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis) {
+    if (!covis || covis->count == 0) {
+        SDL_Log("RefView: No covisibility data; using distance-based neighbors");
         return;
     }
 
-    // Build map from colmap image_id -> internal index
+    // Build map from source image_id -> internal index
     int max_colmap_id = 0;
     for (uint32_t i = 0; i < set->count; i++) {
         if (set->views[i].colmap_id > max_colmap_id)
@@ -165,28 +62,14 @@ void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
         id_to_idx[set->views[i].colmap_id] = (int)i;
     }
 
-    // Query verified pairs
-    const char* sql = "SELECT pair_id, rows FROM two_view_geometries WHERE config = 2 AND rows > 0";
-    sqlite3_stmt* stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        SDL_Log("RefView: SQL error: %s", sqlite3_errmsg(db));
-        free(id_to_idx);
-        sqlite3_close(db);
-        return;
-    }
-
     // First pass: count edges
     uint32_t edge_cap = 64;
     uint32_t edge_count = 0;
     CovisEdge* edges = (CovisEdge*)malloc(edge_cap * sizeof(CovisEdge));
 
-    const int64_t MAX_ID = 2147483647LL;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t pair_id = sqlite3_column_int64(stmt, 0);
-        int inliers = sqlite3_column_int(stmt, 1);
-
-        int id1 = (int)(pair_id / MAX_ID);
-        int id2 = (int)(pair_id % MAX_ID);
+    for (uint32_t i = 0; i < covis->count; i++) {
+        int id1 = covis->edges[i].image_id_a;
+        int id2 = covis->edges[i].image_id_b;
 
         if (id1 < 0 || id1 > max_colmap_id || id2 < 0 || id2 > max_colmap_id) continue;
         int idx1 = id_to_idx[id1];
@@ -197,22 +80,16 @@ void refview_load_covisibility(RefViewSet* set, const char* colmap_dir) {
             edge_cap *= 2;
             edges = (CovisEdge*)realloc(edges, edge_cap * sizeof(CovisEdge));
         }
-        edges[edge_count++] = { (uint32_t)idx1, (uint32_t)idx2, (uint32_t)inliers };
+        edges[edge_count++] = { (uint32_t)idx1, (uint32_t)idx2, covis->edges[i].inliers };
     }
 
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
     free(id_to_idx);
 
     set->covis_edges = edges;
     set->covis_edge_count = edge_count;
     set->use_covisibility = true;
 
-    SDL_Log("RefView: Loaded %u covisibility edges from %s", edge_count, db_path);
-#else
-    (void)set;
-    (void)colmap_dir;
-#endif
+    SDL_Log("RefView: Loaded %u covisibility edges", edge_count);
 }
 
 struct ImageLoadTask {
@@ -461,35 +338,7 @@ uint32_t refview_get_neighbors(const RefViewSet* set, float* out_positions, uint
 }
 
 void refview_get_rotation_matrix(const RefView* v, float* m) {
-    // Build world-to-camera rotation from colmap quaternion
-    float qw = v->rotation[0], qx = v->rotation[1];
-    float qy = v->rotation[2], qz = v->rotation[3];
-
-    // R = colmap world-to-camera rotation (colmap world has Y-down)
-    // We need R_adjusted = R * diag(1, -1, 1) to account for our Y-up world
-    // This negates column 1 of R
-    // Output is column-major mat4
-
-    float R[3][3];
-    R[0][0] = 1 - 2*(qy*qy + qz*qz);
-    R[0][1] = 2*(qx*qy - qw*qz);
-    R[0][2] = 2*(qx*qz + qw*qy);
-    R[1][0] = 2*(qx*qy + qw*qz);
-    R[1][1] = 1 - 2*(qx*qx + qz*qz);
-    R[1][2] = 2*(qy*qz - qw*qx);
-    R[2][0] = 2*(qx*qz - qw*qy);
-    R[2][1] = 2*(qy*qz + qw*qx);
-    R[2][2] = 1 - 2*(qx*qx + qy*qy);
-
-    // Column-major mat4, with Y-flip (negate column 1)
-    // Column 0
-    m[0]  = R[0][0];  m[1]  = R[1][0];  m[2]  = R[2][0];  m[3]  = 0;
-    // Column 1 (negated for Y-flip)
-    m[4]  = -R[0][1]; m[5]  = -R[1][1]; m[6]  = -R[2][1]; m[7]  = 0;
-    // Column 2
-    m[8]  = R[0][2];  m[9]  = R[1][2];  m[10] = R[2][2];  m[11] = 0;
-    // Column 3
-    m[12] = 0;         m[13] = 0;         m[14] = 0;         m[15] = 1;
+    memcpy(m, v->rotation, sizeof(v->rotation));
 }
 
 void refview_free(RefViewSet* set) {

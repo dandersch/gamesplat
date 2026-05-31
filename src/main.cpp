@@ -21,16 +21,9 @@
 #include "renderer.cpp"
 #include "json_mini.cpp"
 #include "hotspot.cpp"
+#include "colmap.cpp"
 #include "refview.cpp"
 #include "audio.cpp"
-
-// Returns true if file at `path` exists and is readable.
-static bool file_exists(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return false;
-    fclose(f);
-    return true;
-}
 
 // Examine mode: while active, the --object mesh is lerped in front of the
 // camera for inspection (separate from the refview hotspot inspect mode).
@@ -288,7 +281,6 @@ struct AppState {
     const char* colmap_dir;
     const char* mesh_path;
     const char* object_path;
-    char        colmap_dir_buf[512];
 
     SDL_Window*    window;
     SDL_GLContext  gl_context;
@@ -374,24 +366,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     //object_path = object_path ? object_path : "res/priest.glb";
     //mesh_path   = mesh_path   ? mesh_path   : "res/cyberpunk_guy.glb";
     colmap_dir  = colmap_dir  ? colmap_dir  : "res/colmap";
-
-    // Accept either a colmap base directory (containing sparse/0/) or the
-    // sparse/0 directory directly. If the user passed the base, resolve it
-    // to <base>/sparse/0 so the rest of the code (which derives image_dir
-    // and database.db via ../../) keeps working unchanged.
-    if (colmap_dir) {
-        char probe[512];
-        snprintf(probe, sizeof(probe), "%s/images.txt", colmap_dir);
-        bool has_model_here = file_exists(probe);
-        if (!has_model_here) {
-            snprintf(probe, sizeof(probe), "%s/images.bin", colmap_dir);
-            has_model_here = file_exists(probe);
-        }
-        if (!has_model_here) {
-            snprintf(state->colmap_dir_buf, sizeof(state->colmap_dir_buf), "%s/sparse/0", colmap_dir);
-            colmap_dir = state->colmap_dir_buf;
-        }
-    }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -513,12 +487,19 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     // Reference views
     state->refviews.selected = -1;
     if (colmap_dir) {
+        ColmapPaths colmap_paths = {};
+        ColmapImageSet colmap_images = {};
+        ColmapCovisibility colmap_covis = {};
         PROFILE("load reference views") {
-        state->refviews_loaded = refview_load(&state->refviews, colmap_dir);
+        state->refviews_loaded = colmap_resolve_paths(&colmap_paths, colmap_dir)
+                              && colmap_load_images_txt(&colmap_images, colmap_paths.model_dir)
+                              && refview_load(&state->refviews, &colmap_images, colmap_paths.image_dir);
         }
         if (state->refviews_loaded) {
             PROFILE("load covisibility") {
-            refview_load_covisibility(&state->refviews, colmap_dir);
+            if (colmap_load_covisibility(&colmap_covis, colmap_paths.database_path)) {
+                refview_load_covisibility(&state->refviews, &colmap_covis);
+            }
             }
             PROFILE("load reference images") {
             refview_load_images(&state->refviews);
@@ -527,6 +508,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
             hotspot_load_for_set(&state->refviews);
             }
         }
+        colmap_free_covisibility(&colmap_covis);
+        colmap_free_image_set(&colmap_images);
     }
 
     // Camera
