@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include "maths.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -288,13 +289,6 @@ static bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
     // Bucket triangle indices by texture_id so submeshes can share GPU state.
     std::map<int32_t, std::vector<uint32_t>> buckets;
 
-    // 4x4 column-major * vec3 (treated as point, w=1).
-    auto transform_point = [](const float* m, float x, float y, float z, float out[3]) {
-        out[0] = m[0]*x + m[4]*y + m[8] *z + m[12];
-        out[1] = m[1]*x + m[5]*y + m[9] *z + m[13];
-        out[2] = m[2]*x + m[6]*y + m[10]*z + m[14];
-    };
-
     // Recursive node walker (lambda needs std::function for self-reference).
     // Avoid std::function dep by hand-rolling a stack.
     std::vector<const cgltf_node*> stack;
@@ -345,7 +339,7 @@ static bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
                 float p[3] = {0, 0, 0};
                 cgltf_accessor_read_float(pos_acc, vi, p, 3);
                 float wp[3];
-                transform_point(world, p[0], p[1], p[2], wp);
+                math_mat4_transform_point(world, p, wp);
 
                 // Negate Y to match renderer's Y-down convention (same as OBJ loader).
                 verts.push_back(wp[0]);
@@ -495,9 +489,9 @@ void mesh_aabb_world(const float local_min[3], const float local_max[3],
             (i & 2) ? local_max[1] : local_min[1],
             (i & 4) ? local_max[2] : local_min[2],
         };
-        float wx = model[0]*c[0] + model[4]*c[1] + model[8] *c[2] + model[12];
-        float wy = model[1]*c[0] + model[5]*c[1] + model[9] *c[2] + model[13];
-        float wz = model[2]*c[0] + model[6]*c[1] + model[10]*c[2] + model[14];
+        float wc[3];
+        math_mat4_transform_point(model, c, wc);
+        float wx = wc[0], wy = wc[1], wz = wc[2];
         if (first) {
             out_min[0] = out_max[0] = wx;
             out_min[1] = out_max[1] = wy;

@@ -1,7 +1,5 @@
 #include "camera.h"
-
-static void cross(const float* a, const float* b, float* out);
-static void normalize3(float* v);
+#include "maths.h"
 
 void camera_init(Camera* cam) {
     cam->position[0] = 0.0f;
@@ -33,10 +31,10 @@ void camera_get_overlay_ray_basis(const Camera* cam, float aspect, float* out_ma
 
     // Build a right-handed horizontal basis for the panorama ray while keeping
     // the existing vertical flip in shader space.
-    cross(world_up, forward, right);
-    normalize3(right);
-    cross(forward, right, up);
-    normalize3(up);
+    math_vec3_cross(world_up, forward, right);
+    math_vec3_normalize(right);
+    math_vec3_cross(forward, right, up);
+    math_vec3_normalize(up);
 
     memset(out_mat4, 0, 16 * sizeof(float));
     out_mat4[0]  = right[0];
@@ -53,17 +51,6 @@ void camera_get_overlay_ray_basis(const Camera* cam, float aspect, float* out_ma
     float tan_half_fov_y = tanf(cam->fov_y * 0.5f);
     out_tan_half_fov[0] = tan_half_fov_y * aspect;
     out_tan_half_fov[1] = tan_half_fov_y;
-}
-
-static void cross(const float* a, const float* b, float* out) {
-    out[0] = a[1]*b[2] - a[2]*b[1];
-    out[1] = a[2]*b[0] - a[0]*b[2];
-    out[2] = a[0]*b[1] - a[1]*b[0];
-}
-
-static void normalize3(float* v) {
-    float len = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    if (len > 1e-8f) { v[0] /= len; v[1] /= len; v[2] /= len; }
 }
 
 void camera_update(Camera* cam, const bool* keys, float dx, float dy, float dt) {
@@ -84,8 +71,8 @@ void camera_update(Camera* cam, const bool* keys, float dx, float dy, float dt) 
     float forward[3], right[3];
     camera_get_forward(cam, forward);
     float world_up[3] = {0, 1, 0};
-    cross(forward, world_up, right);
-    normalize3(right);
+    math_vec3_cross(forward, world_up, right);
+    math_vec3_normalize(right);
 
     float speed = cam->move_speed * dt;
     if (keys[6]) speed *= 3.0f; // shift
@@ -129,9 +116,9 @@ void camera_get_view_matrix(const Camera* cam, float* m) {
     float forward[3], right[3], up[3];
     camera_get_forward(cam, forward);
     float world_up[3] = {0, 1, 0};
-    cross(forward, world_up, right);
-    normalize3(right);
-    cross(right, forward, up);
+    math_vec3_cross(forward, world_up, right);
+    math_vec3_normalize(right);
+    math_vec3_cross(right, forward, up);
 
     // View matrix = transpose(R) with translation
     // R columns = right, up, -forward

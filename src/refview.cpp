@@ -1,4 +1,5 @@
 #include "refview.h"
+#include "maths.h"
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -234,15 +235,6 @@ void refview_release_images(RefViewSet* set) {
     }
 }
 
-static float lerpf(float a, float b, float t) {
-    return a + (b - a) * t;
-}
-
-// Smooth step for nicer interpolation
-static float smoothstep(float t) {
-    return t * t * (3.0f - 2.0f * t);
-}
-
 bool refview_update(RefViewSet* set, Camera* cam, float dt) {
     if (!set->lerping) return false;
     if (!set->inspect_mode && set->selected < 0) return false;
@@ -253,12 +245,12 @@ bool refview_update(RefViewSet* set, Camera* cam, float dt) {
         set->lerping = false;
     }
 
-    float t = smoothstep(set->lerp_t);
+    float t = math_smoothstep01(set->lerp_t);
 
     if (set->inspect_mode) {
-        cam->position[0] = lerpf(set->start_pos[0], set->inspect_target_pos[0], t);
-        cam->position[1] = lerpf(set->start_pos[1], set->inspect_target_pos[1], t);
-        cam->position[2] = lerpf(set->start_pos[2], set->inspect_target_pos[2], t);
+        cam->position[0] = math_lerp(set->start_pos[0], set->inspect_target_pos[0], t);
+        cam->position[1] = math_lerp(set->start_pos[1], set->inspect_target_pos[1], t);
+        cam->position[2] = math_lerp(set->start_pos[2], set->inspect_target_pos[2], t);
 
         // Drive the perspective<->ortho blend off the same eased t as the
         // position lerp so both finish together. Decoupled timers (the
@@ -276,7 +268,7 @@ bool refview_update(RefViewSet* set, Camera* cam, float dt) {
             while (dyaw >  PI) dyaw -= 2.0f * PI;
             while (dyaw < -PI) dyaw += 2.0f * PI;
             cam->yaw   = set->start_yaw + dyaw * t;
-            cam->pitch = lerpf(set->start_pitch, set->inspect_target_pitch, t);
+            cam->pitch = math_lerp(set->start_pitch, set->inspect_target_pitch, t);
         }
 
         if (!set->lerping) {
@@ -285,9 +277,9 @@ bool refview_update(RefViewSet* set, Camera* cam, float dt) {
         }
     } else {
         RefView* target = &set->views[set->selected];
-        cam->position[0] = lerpf(set->start_pos[0], target->position[0], t);
-        cam->position[1] = lerpf(set->start_pos[1], target->position[1], t);
-        cam->position[2] = lerpf(set->start_pos[2], target->position[2], t);
+        cam->position[0] = math_lerp(set->start_pos[0], target->position[0], t);
+        cam->position[1] = math_lerp(set->start_pos[1], target->position[1], t);
+        cam->position[2] = math_lerp(set->start_pos[2], target->position[2], t);
     }
 
     return true;

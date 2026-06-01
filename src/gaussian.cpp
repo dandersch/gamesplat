@@ -1,4 +1,5 @@
 #include "gaussian.h"
+#include "maths.h"
 #include "miniz.h"
 #include "json_mini.h"
 #include <webp/decode.h>
@@ -866,19 +867,12 @@ GpuGaussian* pack_gpu_gaussians(const GaussianScene* scene) {
 
 // --- Culling ---
 
-// Transform point by column-major 4x4 matrix, return xyz
-static void mat4_transform_point(const float* m, const float* p, float* out) {
-    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
-    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
-    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
-}
-
 void cull_gaussians(GaussianScene* scene, const float* view, const float* proj, float ortho_blend) {
     scene->visible_count = 0;
 
     for (uint32_t i = 0; i < scene->gaussian_count; i++) {
         float p_view[3];
-        mat4_transform_point(view, scene->gaussians[i].position, p_view);
+        math_mat4_transform_point(view, scene->gaussians[i].position, p_view);
 
         // Near-plane cull: camera looks -Z, visible objects have z < 0
         if (p_view[2] > -0.2f) continue;

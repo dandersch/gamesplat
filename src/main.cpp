@@ -14,6 +14,7 @@
 #include "imgui_impl_sdl3.h"
 
 #include "profiler.h"
+#include "maths.h"
 
 #include "camera.cpp"
 #include "gaussian.cpp"
@@ -59,79 +60,14 @@ static const float EXAMINE_PITCH_LIMIT       = 1.50f;  // ~86 deg
 static const float EXAMINE_ZOOM_MIN          = 0.40f;
 static const float EXAMINE_ZOOM_MAX          = 3.00f;
 
-// 3x3 column-major rotation helpers. mat3_from_euler_zyx mirrors the layout
-// used by mat4_from_transform in renderer.cpp so decomposition round-trips.
-static void mat3_from_euler_zyx(const float e[3], float m[9]) {
-    float cx = cosf(e[0]), sx = sinf(e[0]);
-    float cy = cosf(e[1]), sy = sinf(e[1]);
-    float cz = cosf(e[2]), sz = sinf(e[2]);
-    // column 0
-    m[0] = cy * cz;
-    m[1] = cy * sz;
-    m[2] = -sy;
-    // column 1
-    m[3] = sx * sy * cz - cx * sz;
-    m[4] = sx * sy * sz + cx * cz;
-    m[5] = sx * cy;
-    // column 2
-    m[6] = cx * sy * cz + sx * sz;
-    m[7] = cx * sy * sz - sx * cz;
-    m[8] = cx * cy;
-}
-
-static void mat3_mul(const float a[9], const float b[9], float out[9]) {
-    for (int c = 0; c < 3; c++) {
-        for (int r = 0; r < 3; r++) {
-            out[c*3+r] = a[0*3+r]*b[c*3+0] + a[1*3+r]*b[c*3+1] + a[2*3+r]*b[c*3+2];
-        }
-    }
-}
-
-// Rodrigues: rotation by `theta` (rad) about unit axis `a`. Column-major.
-static void mat3_axis_angle(const float a[3], float theta, float m[9]) {
-    float c = cosf(theta), s = sinf(theta), C = 1.0f - c;
-    float x = a[0], y = a[1], z = a[2];
-    m[0] = c + x*x*C;
-    m[1] = y*x*C + z*s;
-    m[2] = z*x*C - y*s;
-    m[3] = x*y*C - z*s;
-    m[4] = c + y*y*C;
-    m[5] = z*y*C + x*s;
-    m[6] = x*z*C + y*s;
-    m[7] = y*z*C - x*s;
-    m[8] = c + z*z*C;
-}
-
-// Inverse of mat3_from_euler_zyx; uses the same gimbal-lock fallback as
-// examine_compute_target.
-static void mat3_decompose_zyx(const float m[9], float e[3]) {
-    float sy = -m[2]; // -r20
-    if (sy > 1.0f) sy = 1.0f;
-    if (sy < -1.0f) sy = -1.0f;
-    e[1] = asinf(sy);
-    if (fabsf(sy) < 0.99995f) {
-        e[0] = atan2f(m[5], m[8]);   // atan2(r21, r22)
-        e[2] = atan2f(m[1], m[0]);   // atan2(r10, r00)
-    } else {
-        e[0] = 0.0f;
-        e[2] = atan2f(-m[3], m[4]);  // atan2(-r01, r11)
-    }
-}
-
 static bool examine_locks_input(const Examine& e) { return e.state != Examine::OFF; }
-
-static float smoothstep01(float t) {
-    if (t < 0.0f) t = 0.0f;
-    if (t > 1.0f) t = 1.0f;
-    return t * t * (3.0f - 2.0f * t);
-}
 
 // Linear interp between two MeshTransforms with smoothstep easing on t.
 // Rotation uses naive per-axis Euler lerp (good enough for the small swings
 // we get going from rest -> camera-aligned pose over 0.4s).
 static void examine_lerp_transform(const MeshTransform& a, const MeshTransform& b,
                                    float t, MeshTransform* out) {
-    float k = smoothstep01(t);
+    float k = math_smoothstep01(t);
     for (int i = 0; i < 3; ++i) {
         out->translation[i]    = a.translation[i]    + (b.translation[i]    - a.translation[i]) * k;
         out->rotation_euler[i] = a.rotation_euler[i] + (b.rotation_euler[i] - a.rotation_euler[i]) * k;
@@ -1085,17 +1021,17 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         // R_orbit = R_yaw(world_up) * R_pitch(cam_right_entry).
         float wu[3] = { 0.0f, 1.0f, 0.0f };
         float Ry[9], Rp[9], R_orbit[9];
-        mat3_axis_angle(wu,                       examine.orbit_yaw,   Ry);
-        mat3_axis_angle(examine.cam_right_entry,  examine.orbit_pitch, Rp);
-        mat3_mul(Ry, Rp, R_orbit);
+        math_mat3_axis_angle(wu,                       examine.orbit_yaw,   Ry);
+        math_mat3_axis_angle(examine.cam_right_entry,  examine.orbit_pitch, Rp);
+        math_mat3_mul(Ry, Rp, R_orbit);
 
         // Compose with the base rotation captured at examine entry.
         float R_base[9], R_new[9];
-        mat3_from_euler_zyx(examine.base_rotation_euler, R_base);
-        mat3_mul(R_orbit, R_base, R_new);
+        math_mat3_from_euler_zyx(examine.base_rotation_euler, R_base);
+        math_mat3_mul(R_orbit, R_base, R_new);
 
         // Write Euler back into object_transform.
-        mat3_decompose_zyx(R_new, renderer.object_transform.rotation_euler);
+        math_mat3_decompose_zyx(R_new, renderer.object_transform.rotation_euler);
 
         // Place the AABB center at the (zoom-adjusted) pivot along the
         // entry forward, then back the translation off by the rotated
