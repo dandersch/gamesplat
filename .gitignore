@@ -1,4 +1,5 @@
 gsplat
+gsplat_hot
 *.spv
 imgui.ini
 build/

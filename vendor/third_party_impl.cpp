@@ -2,6 +2,9 @@
 // single-header libraries in third_party/. Built once into libthirdparty.a
 // and cached so we don't pay the parse cost on every incremental build.
 
+#include <cstddef>
+#include <cstring>
+
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
@@ -51,3 +54,45 @@
 #include "../shaders/darken.glsl.h"
 #include "../shaders/mesh.glsl.h"
 #include "../shaders/splat.glsl.h"
+
+#if defined(_MSC_VER)
+#define GSPLAT_HOTRELOAD_EXPORT extern "C" __declspec(dllexport)
+#else
+#define GSPLAT_HOTRELOAD_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+
+// POC hot-reload hooks for preserving the private file-scope state owned by
+// sokol_gfx.h and sokol_imgui.h across DLL reloads. These intentionally live in
+// the same translation unit that defines SOKOL_*_IMPL so they can see the
+// otherwise-internal `_sg` and `_simgui` objects.
+GSPLAT_HOTRELOAD_EXPORT size_t gsplat_sg_state_size(void) {
+    return sizeof(_sg);
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_sg_state_save(void* dst, size_t dst_size) {
+    if (dst && dst_size == sizeof(_sg)) {
+        memcpy(dst, &_sg, sizeof(_sg));
+    }
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_sg_state_load(const void* src, size_t src_size) {
+    if (src && src_size == sizeof(_sg)) {
+        memcpy(&_sg, src, sizeof(_sg));
+    }
+}
+
+GSPLAT_HOTRELOAD_EXPORT size_t gsplat_simgui_state_size(void) {
+    return sizeof(_simgui);
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_simgui_state_save(void* dst, size_t dst_size) {
+    if (dst && dst_size == sizeof(_simgui)) {
+        memcpy(dst, &_simgui, sizeof(_simgui));
+    }
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_simgui_state_load(const void* src, size_t src_size) {
+    if (src && src_size == sizeof(_simgui)) {
+        memcpy(&_simgui, src, sizeof(_simgui));
+    }
+}

@@ -8,7 +8,14 @@ CXXFLAGS="-O2 -std=c++17 -Wall -Wextra -Wno-missing-field-initializers -Wno-unus
 LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread -lwebp"
 OUT="gsplat"
 ENABLE_PROFILER="${ENABLE_PROFILER:-0}"
-BUILD_DIR="${BUILD_DIR:-build}"
+HOTRELOAD="${HOTRELOAD:-0}"
+if [ -z "${BUILD_DIR+x}" ]; then
+    if [ "$HOTRELOAD" = "1" ]; then
+        BUILD_DIR="build/hotreload"
+    else
+        BUILD_DIR="build"
+    fi
+fi
 OBJ_DIR="$BUILD_DIR/obj"
 
 VENDOR_DIR="vendor"
@@ -29,6 +36,10 @@ INCLUDE_FLAGS=(
     -I"$TRACY_DIR"
 )
 SOKOL_BACKEND_FLAGS=("-DSOKOL_GLCORE")
+PIC_FLAGS=()
+if [ "$HOTRELOAD" = "1" ]; then
+    PIC_FLAGS+=("-fPIC")
+fi
 
 TRACY_FLAGS=()
 APP_PROFILE_FLAGS=()
@@ -61,7 +72,7 @@ if [ ! -f "$IMGUI_LIB" ]; then
         rel="${src#$VENDOR_DIR/}"
         obj="$OBJ_DIR/${rel%.cpp}.o"
         mkdir -p "$(dirname "$obj")"
-        $CXX $CXXFLAGS -I"$IMGUI_DIR" -I"$IMGUI_DIR/backends" -c "$src" -o "$obj"
+        $CXX $CXXFLAGS "${PIC_FLAGS[@]}" -I"$IMGUI_DIR" -I"$IMGUI_DIR/backends" -c "$src" -o "$obj"
         IMGUI_OBJS+=("$obj")
     done
     ar rcs "$IMGUI_LIB" "${IMGUI_OBJS[@]}"
@@ -73,7 +84,7 @@ if [ "$ENABLE_PROFILER" = "1" ]; then
         echo "Building tracy..."
         tracy_obj="$OBJ_DIR/tracy/TracyClient.o"
         mkdir -p "$(dirname "$tracy_obj")"
-        $CXX $CXXFLAGS -w "${TRACY_FLAGS[@]}" -I"$TRACY_DIR" -c "$TRACY_SRC" -o "$tracy_obj"
+        $CXX $CXXFLAGS "${PIC_FLAGS[@]}" -w "${TRACY_FLAGS[@]}" -I"$TRACY_DIR" -c "$TRACY_SRC" -o "$tracy_obj"
         ar rcs "$TRACY_LIB" "$tracy_obj"
         rm "$tracy_obj"
     fi
@@ -85,13 +96,26 @@ fi
 if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/miniz.c" -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
     echo "Building vendor single-header impls..."
     objs=("$OBJ_DIR/third_party_impl.o" "$OBJ_DIR/miniz.o")
-    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
-    $CXX -O2 -Wall -Wextra -Wno-unused-function -I"$VENDOR_DIR" -x c -c "$VENDOR_DIR/miniz.c" -o "${objs[1]}"
+    $CXX $CXXFLAGS "${PIC_FLAGS[@]}" "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
+    $CXX -O2 -Wall -Wextra -Wno-unused-function "${PIC_FLAGS[@]}" -I"$VENDOR_DIR" -x c -c "$VENDOR_DIR/miniz.c" -o "${objs[1]}"
     ar rcs "$THIRDPARTY_LIB" "${objs[@]}"
     rm "${objs[@]}"
 fi
 
-echo "Building $OUT..."
-$CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
+if [ "$HOTRELOAD" = "1" ]; then
+    CODE_SO="$BUILD_DIR/gsplat_code.so"
+    SHIM_OUT="gsplat_hot"
 
-echo "Done: ./$OUT"
+    echo "Building $CODE_SO..."
+    $CXX $CXXFLAGS -fPIC -shared -DCOMPILE_AS_DLL "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$CODE_SO" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
+
+    echo "Building $SHIM_OUT..."
+    $CXX $CXXFLAGS src/shim.cpp -o "$SHIM_OUT" -lSDL3 -ldl
+
+    echo "Done: ./$SHIM_OUT (reloads $CODE_SO)"
+else
+    echo "Building $OUT..."
+    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$OUT" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
+
+    echo "Done: ./$OUT"
+fi

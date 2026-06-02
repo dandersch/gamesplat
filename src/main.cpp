@@ -1,6 +1,10 @@
-#include <SDL3/SDL.h>
+#if defined(COMPILE_AS_DLL)
+#define SDL_MAIN_USE_CALLBACKS 0
+#else
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_main.h>
+#endif
+#include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
 
@@ -25,6 +29,12 @@
 #include "colmap.cpp"
 #include "refview.cpp"
 #include "audio.cpp"
+
+#if defined(_MSC_VER)
+#define GSPLAT_EXPORT extern "C" __declspec(dllexport)
+#else
+#define GSPLAT_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 // Examine mode: while active, the --object mesh is lerped in front of the
 // camera for inspection (separate from the refview hotspot inspect mode).
@@ -225,6 +235,7 @@ struct AppState {
     bool           sgimgui_setup_done;
     bool           imgui_sdl3_initialized;
     bool           renderer_started;
+    ImGuiContext*  imgui_context;
 
     AudioState    audio;
     Sfx           sfx_transition;
@@ -277,9 +288,12 @@ struct AppState {
     float mouse_dy;
 };
 
-SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
+GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     if (*appstate) {
         AppState* state = (AppState*)*appstate;
+        if (state->imgui_context) {
+            ImGui::SetCurrentContext(state->imgui_context);
+        }
         state->last_time = SDL_GetPerformanceCounter();
         state->freq = SDL_GetPerformanceFrequency();
         return SDL_APP_CONTINUE;
@@ -377,6 +391,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     sid.sample_count = 1;
     simgui_setup(&sid);
     state->simgui_setup_done = true;
+    state->imgui_context = ImGui::GetCurrentContext();
 
 #if defined(ENABLE_PROFILER)
     sgimgui_desc_t sgimgui_desc = {};
@@ -484,7 +499,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     return SDL_APP_CONTINUE;
 }
 
-SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
+GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     AppState* state = (AppState*)appstate;
     if (!state) return SDL_APP_FAILURE;
     SDL_Event& ev = *event;
@@ -908,7 +923,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     return SDL_APP_CONTINUE;
 }
 
-SDL_AppResult SDL_AppIterate(void *appstate) {
+GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     AppState* state = (AppState*)appstate;
     if (!state) return SDL_APP_FAILURE;
 
@@ -1604,7 +1619,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     return SDL_APP_CONTINUE;
 }
 
-void SDL_AppQuit(void *appstate, SDL_AppResult result) {
+GSPLAT_EXPORT void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     (void)result;
     AppState* state = (AppState*)appstate;
     if (!state) return;
