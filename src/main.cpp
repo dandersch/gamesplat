@@ -278,6 +278,13 @@ struct AppState {
 };
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
+    if (*appstate) {
+        AppState* state = (AppState*)*appstate;
+        state->last_time = SDL_GetPerformanceCounter();
+        state->freq = SDL_GetPerformanceFrequency();
+        return SDL_APP_CONTINUE;
+    }
+
     AppState* state = new AppState();
     *appstate = state;
 
