@@ -11,6 +11,49 @@
 // - Point transform is m * vec4(p, 1).
 // - Object Euler transforms use T * Rz * Ry * Rx * S.
 
+// TODO: use 3rd party math library
+//
+// This file is intentionally a small project-convention layer for now. If the
+// math surface keeps growing, replace these implementations with one of the
+// single-header libraries in vendor/ while keeping the math_* API as the seam.
+//
+// Findings from the raymath.h vs HandmadeMath.h convention probe/discussion:
+//
+// Shared positives:
+// - Both are simple single-header C/C++ options with optional C++ conveniences.
+// - Both provide the basics we need: vec2/3/4, mat4, quaternions, dot/cross,
+//   normalize, lerp, LookAt, perspective/ortho, axis-angle, and quat helpers.
+// - Both can match our camera view matrix directly with their RH LookAt helper.
+// - Both can match our projection matrices after applying our intentional X/Y
+//   sign flips. Keep camera/projection wrappers project-owned either way.
+// - Neither raw quaternion-to-matrix helper replaces colmap_pose_to_camera();
+//   COLMAP import has project-specific world-to-camera, center, and Y-flip
+//   logic that should stay explicit or be wrapped with focused tests.
+//
+// Handmade Math pros/cons:
+// - Pro: HMM_Mat4 raw memory/layout matches our current float[16] column-major
+//   layout; HMM_MulM4(a, b) matches our current out = a * b semantics.
+// - Pro: explicit RH/LH and NO/ZO projection variants make graphics convention
+//   choices visible.
+// - Pro: HMM_Mat3 maps well to examine-mode rotation helpers.
+// - Con: HMM_* API is terse/less application-level; Euler compose/decompose
+//   still needs project wrappers.
+//
+// raymath.h pros/cons:
+// - Pro: friendlier app/game API names and useful higher-level helpers such as
+//   MatrixCompose, MatrixDecompose, MatrixRotateZYX, QuaternionFromEuler, and
+//   Vector3Transform.
+// - Pro: MatrixCompose(translation, QuaternionFromEuler(...), scale) matched
+//   our object transform convention in the probe.
+// - Con: MatrixToFloatV() must be used for shader-style float[16] output; raw
+//   memcpy of Matrix does not match our layout.
+// - Con: MatrixMultiply call order is opposite our current math_mat4_mul mental
+//   model for composition; use a wrapper if adopting raymath.
+//
+// Current leaning: Handmade Math is the safer backend for matching existing
+// conventions directly; raymath.h remains viable if all matrix serialization
+// and multiplication goes through math_* wrappers.
+
 static inline float math_clamp(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }

@@ -226,6 +226,7 @@ struct AppState {
     bool           imgui_sdl3_initialized;
     bool           renderer_started;
 
+    AudioState    audio;
     Sfx           sfx_transition;
     Renderer      renderer;
     GaussianScene scene;
@@ -309,8 +310,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     }
 
     // Audio is non-fatal: if init fails (no device, etc.) sfx_play becomes a
-    // no-op via the g_audio_ready flag and the rest of the app keeps running.
-    audio_init();
+    // no-op via the AudioState::ready flag and the rest of the app keeps running.
+    audio_init(&state->audio);
     sfx_load(&state->sfx_transition, "res/transition.wav");
 
 #if defined(__EMSCRIPTEN__)
@@ -500,6 +501,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     float& node_half_size = state->node_half_size;
     float& mouse_dx = state->mouse_dx;
     float& mouse_dy = state->mouse_dy;
+    AudioState& audio = state->audio;
 
     ImGui_ImplSDL3_ProcessEvent(event);
 
@@ -628,7 +630,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             if (hotspot_idx >= 0) {
                 const Hotspot* h = &refviews.views[hotspot_view].hotspots[hotspot_idx];
                 if (h->action.type == HOTSPOT_ACTION_WARP) {
-                    sfx_play(&sfx_transition, 1.2f);
+                    sfx_play(&audio, &sfx_transition, 1.2f);
                     int32_t warp_target = h->action.warp.target_view;
                     RefView* tv = &refviews.views[warp_target];
                     float dx = tv->position[0] - cam.position[0];
@@ -647,7 +649,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                     refviews.start_pitch = cam.pitch;
                     break;
                 } else if (h->action.type == HOTSPOT_ACTION_INSPECT) {
-                    sfx_play(&sfx_transition, 1.2f);
+                    sfx_play(&audio, &sfx_transition, 1.2f);
                     const HotspotActionInspect* it = &h->action.inspect;
                     float dx = it->position[0] - cam.position[0];
                     float dy = it->position[1] - cam.position[1];
@@ -719,7 +721,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 // Start examine: capture rest pose, compute target,
                 // snapshot camera basis + distance for orbit/zoom,
                 // begin LERP_IN. AABB radius = half-diagonal.
-                sfx_play(&sfx_transition, 1.2f);
+                sfx_play(&audio, &sfx_transition, 1.2f);
                 examine.rest  = renderer.object_transform;
                 examine.start = renderer.object_transform;
                 examine.aabb_center_local[0] = (object.aabb_min[0] + object.aabb_max[0]) * 0.5f;
@@ -766,7 +768,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 examine.t = 0.0f;
                 examine.state = Examine::LERP_IN;
             } else if (best_hit >= 0) {
-                sfx_play(&sfx_transition, 1.2f);
+                sfx_play(&audio, &sfx_transition, 1.2f);
                 uint32_t view_idx = neighbor_indices[best_hit];
                 RefView* tv = &refviews.views[view_idx];
                 float dx = tv->position[0] - cam.position[0];
@@ -1622,7 +1624,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     if (state->window) SDL_DestroyWindow(state->window);
 
     sfx_free(&state->sfx_transition);
-    audio_shutdown();
+    audio_shutdown(&state->audio);
 
     delete state;
 }

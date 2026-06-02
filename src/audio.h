@@ -30,10 +30,17 @@ struct Sfx {
     uint32_t      bytes;  // size of `pcm` in bytes
 };
 
+#define AUDIO_VOICE_COUNT 8
+
+struct AudioState {
+    SDL_AudioStream* voices[AUDIO_VOICE_COUNT];
+    bool             ready;
+};
+
 // Opens the default playback device and allocates the voice pool.
 // Requires SDL_Init to have been called with SDL_INIT_AUDIO.
-bool   audio_init(void);
-void   audio_shutdown(void);
+bool   audio_init(AudioState* audio);
+void   audio_shutdown(AudioState* audio);
 
 // Returns false (and leaves *out zeroed) if the wav can't be loaded.
 bool   sfx_load(Sfx* out, const char* wav_path);
@@ -41,7 +48,7 @@ void   sfx_free(Sfx* s);
 
 // Linear gain. 1.0 = unity, 0.5 = -6 dB, 0.0 = silent. Values >1 are allowed
 // but may clip on the device output.
-void   sfx_play(const Sfx* s, float volume);
+void   sfx_play(AudioState* audio, const Sfx* s, float volume);
 
 // Drops any audio currently queued on every voice (useful on scene changes).
-void   sfx_stop_all(void);
+void   sfx_stop_all(AudioState* audio);

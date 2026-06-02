@@ -1,18 +1,10 @@
 #include "audio.h"
 #include <cstdio>
 
-// Number of simultaneously-playing voices. Each voice is one SDL_AudioStream
-// bound to the default playback device; SDL mixes their outputs for us.
-//
-// 8 is comfortably above what point-and-click navigation needs (transition
-// whoosh, click feedback, maybe an ambient one-shot or two). If we ever
-// actually run out, sfx_play() will steal a voice -- see comment there.
-#define AUDIO_VOICE_COUNT 8
+bool audio_init(AudioState* audio) {
+    if (!audio) return false;
+    *audio = (AudioState){};
 
-static SDL_AudioStream* g_voices[AUDIO_VOICE_COUNT];
-static bool             g_audio_ready = false;
-
-bool audio_init(void) {
     // SDL_INIT_AUDIO must already have been requested by the caller. If it
     // wasn't, SDL_OpenAudioDeviceStream below will fail and we bail.
     for (int i = 0; i < AUDIO_VOICE_COUNT; i++) {
@@ -22,37 +14,38 @@ bool audio_init(void) {
         // cb     = NULL  -> pull mode; we just queue PCM with
         //                   SDL_PutAudioStreamData and SDL drains it on its
         //                   own audio thread. No callback to write.
-        g_voices[i] = SDL_OpenAudioDeviceStream(
+        audio->voices[i] = SDL_OpenAudioDeviceStream(
             SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, NULL, NULL, NULL);
-        if (!g_voices[i]) {
+        if (!audio->voices[i]) {
             fprintf(stderr,
                     "audio_init: SDL_OpenAudioDeviceStream voice %d failed: %s\n",
                     i, SDL_GetError());
             // Tear down the streams we already opened so we don't leak.
             for (int j = 0; j < i; j++) {
-                SDL_DestroyAudioStream(g_voices[j]);
-                g_voices[j] = NULL;
+                SDL_DestroyAudioStream(audio->voices[j]);
+                audio->voices[j] = NULL;
             }
             return false;
         }
         // Streams returned by SDL_OpenAudioDeviceStream start *paused* on
         // their logical device. Resume so queued data actually plays.
-        SDL_ResumeAudioStreamDevice(g_voices[i]);
+        SDL_ResumeAudioStreamDevice(audio->voices[i]);
     }
-    g_audio_ready = true;
+    audio->ready = true;
     return true;
 }
 
-void audio_shutdown(void) {
+void audio_shutdown(AudioState* audio) {
+    if (!audio) return;
     for (int i = 0; i < AUDIO_VOICE_COUNT; i++) {
-        if (g_voices[i]) {
+        if (audio->voices[i]) {
             // Destroying the stream also unbinds it and closes the underlying
             // logical device opened by SDL_OpenAudioDeviceStream.
-            SDL_DestroyAudioStream(g_voices[i]);
-            g_voices[i] = NULL;
+            SDL_DestroyAudioStream(audio->voices[i]);
+            audio->voices[i] = NULL;
         }
     }
-    g_audio_ready = false;
+    audio->ready = false;
 }
 
 bool sfx_load(Sfx* out, const char* wav_path) {
@@ -73,8 +66,8 @@ void sfx_free(Sfx* s) {
     s->bytes = 0;
 }
 
-void sfx_play(const Sfx* s, float volume) {
-    if (!g_audio_ready || !s || !s->pcm || s->bytes == 0) return;
+void sfx_play(AudioState* audio, const Sfx* s, float volume) {
+    if (!audio || !audio->ready || !s || !s->pcm || s->bytes == 0) return;
 
     // Pick a voice. Preference order:
     //   1. The first stream whose queue is empty (truly free).
@@ -87,11 +80,11 @@ void sfx_play(const Sfx* s, float volume) {
     int chosen = 0;
     int max_queued = -1;
     for (int i = 0; i < AUDIO_VOICE_COUNT; i++) {
-        int q = (int)SDL_GetAudioStreamQueued(g_voices[i]);
+        int q = (int)SDL_GetAudioStreamQueued(audio->voices[i]);
         if (q == 0) { chosen = i; max_queued = 0; break; }
         if (q > max_queued) { max_queued = q; chosen = i; }
     }
-    SDL_AudioStream* v = g_voices[chosen];
+    SDL_AudioStream* v = audio->voices[chosen];
 
     // Tell the stream the *input* format for this batch of samples. The
     // output side stays at the device's native format, so SDL will resample
@@ -103,9 +96,9 @@ void sfx_play(const Sfx* s, float volume) {
     SDL_PutAudioStreamData(v, s->pcm, (int)s->bytes);
 }
 
-void sfx_stop_all(void) {
-    if (!g_audio_ready) return;
+void sfx_stop_all(AudioState* audio) {
+    if (!audio || !audio->ready) return;
     for (int i = 0; i < AUDIO_VOICE_COUNT; i++) {
-        SDL_ClearAudioStream(g_voices[i]);
+        SDL_ClearAudioStream(audio->voices[i]);
     }
 }
