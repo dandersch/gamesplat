@@ -22,13 +22,23 @@
 // Forward decl (defined later in this TU).
 static void mesh_gpu_release(MeshGpu* m);
 
-bool renderer_init(Renderer* r, SDL_Window* window) {
-    memset(r, 0, sizeof(*r));
-    r->window = window;
-    r->mesh_transform.scale = 1.0f;
-    r->object_transform.scale = 1.0f;
-    PROFILE_GPU_CONTEXT();
+static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
+    if (!pipeline->id) return;
+    sg_pipeline_desc desc = sg_query_pipeline_desc(*pipeline);
+    sg_destroy_pipeline(*pipeline);
+    if (desc.shader.id) sg_destroy_shader(desc.shader);
+    *pipeline = {};
+}
 
+static void renderer_destroy_shader_pipelines(Renderer* r) {
+    renderer_destroy_shader_pipeline(&r->splat_pipeline);
+    renderer_destroy_shader_pipeline(&r->overlay_pipeline);
+    renderer_destroy_shader_pipeline(&r->darken_pipeline);
+    renderer_destroy_shader_pipeline(&r->wireframe_pipeline);
+    renderer_destroy_shader_pipeline(&r->mesh_pipeline);
+}
+
+static bool renderer_create_shader_pipelines(Renderer* r) {
     // --- Splat pipeline -------------------------------------------------
     {
         sg_pipeline_desc pd = {};
@@ -181,6 +191,34 @@ bool renderer_init(Renderer* r, SDL_Window* window) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "mesh-pipeline";
         r->mesh_pipeline = sg_make_pipeline(&pd);
+    }
+
+    bool ok = r->splat_pipeline.id && r->overlay_pipeline.id &&
+              r->darken_pipeline.id && r->wireframe_pipeline.id &&
+              r->mesh_pipeline.id;
+    if (!ok) {
+        fprintf(stderr, "renderer_create_shader_pipelines failed\n");
+        renderer_destroy_shader_pipelines(r);
+    }
+    return ok;
+}
+
+bool renderer_reload_shaders(Renderer* r) {
+    renderer_destroy_shader_pipelines(r);
+    bool ok = renderer_create_shader_pipelines(r);
+    if (ok) fprintf(stderr, "Renderer shaders reloaded\n");
+    return ok;
+}
+
+bool renderer_init(Renderer* r, SDL_Window* window) {
+    memset(r, 0, sizeof(*r));
+    r->window = window;
+    r->mesh_transform.scale = 1.0f;
+    r->object_transform.scale = 1.0f;
+    PROFILE_GPU_CONTEXT();
+
+    if (!renderer_create_shader_pipelines(r)) {
+        return false;
     }
 
     // --- Samplers -------------------------------------------------------
@@ -652,11 +690,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 }
 
 void renderer_destroy(Renderer* r) {
-    if (r->splat_pipeline.id)     sg_destroy_pipeline(r->splat_pipeline);
-    if (r->overlay_pipeline.id)   sg_destroy_pipeline(r->overlay_pipeline);
-    if (r->darken_pipeline.id)    sg_destroy_pipeline(r->darken_pipeline);
-    if (r->wireframe_pipeline.id) sg_destroy_pipeline(r->wireframe_pipeline);
-    if (r->mesh_pipeline.id)      sg_destroy_pipeline(r->mesh_pipeline);
+    renderer_destroy_shader_pipelines(r);
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->gaussian_sampler.id)   sg_destroy_sampler(r->gaussian_sampler);

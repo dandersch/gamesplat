@@ -75,6 +75,10 @@ bool renderer_upload_mesh(Renderer* r, const Mesh* mesh);
 // Upload a second, static mesh that is drawn alongside the primary mesh with
 // an identity model transform. Intended for scene props supplied via --object.
 bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
+// Recreate shader-backed pipeline objects from the currently-loaded generated
+// shader descriptors. Intended for DLL hot reload after sokol-shdc regenerated
+// the embedded shader headers and the app code DLL was reloaded.
+bool renderer_reload_shaders(Renderer* r);
 // map_cam is reserved for the top-down overlay; the two-pass map_cam path is
 // temporarily disabled in the sokol port (see TODO in renderer.cpp).
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);

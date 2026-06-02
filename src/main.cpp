@@ -294,6 +294,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         if (state->imgui_context) {
             ImGui::SetCurrentContext(state->imgui_context);
         }
+        if (state->renderer_started) {
+            renderer_reload_shaders(&state->renderer);
+        }
         state->last_time = SDL_GetPerformanceCounter();
         state->freq = SDL_GetPerformanceFrequency();
         return SDL_APP_CONTINUE;
