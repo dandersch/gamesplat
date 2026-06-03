@@ -497,7 +497,8 @@ static void mat4_from_transform(const MeshTransform& t, float* out) {
 // nodes for one camera into the currently-active sg_begin_pass. ImGui is NOT
 // drawn here; the caller is responsible for that after this returns.
 static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam,
-                       const OverlayParams* overlay, const NodeRenderParams* nodes) {
+                       const OverlayParams* overlay, const NodeRenderParams* nodes,
+                       const SplatEffectParams* splat_effect) {
     // VP shared by both mesh slots and the wireframe pass.
     float vp[16];
     math_mat4_mul(cam->proj, cam->view, vp);
@@ -575,6 +576,13 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         // The CameraUniforms host struct lays out 1:1 with the generated
         // CameraUBO_t (verified by the existing usage in main.cpp).
         sg_apply_uniforms(UB_CameraUBO, sg_range{ cam, sizeof(CameraUniforms) });
+        SplatEffectUBO_t effect_ubo = {};
+        if (splat_effect) {
+            memcpy(effect_ubo.effect_center_radius, splat_effect->center_radius, sizeof(effect_ubo.effect_center_radius));
+            memcpy(effect_ubo.effect_params, splat_effect->params, sizeof(effect_ubo.effect_params));
+            memcpy(effect_ubo.effect_color, splat_effect->color, sizeof(effect_ubo.effect_color));
+        }
+        sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
 
         // 6 vertices per quad, scene->visible_count instances.
         sg_draw(0, 6, (int)scene->visible_count);
@@ -639,6 +647,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
 
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
                          const OverlayParams* overlay, const NodeRenderParams* nodes,
+                         const SplatEffectParams* splat_effect,
                          float wireframe_occlusion, const CameraUniforms* map_cam) {
     (void)wireframe_occlusion; // see splat-pipeline blend comment in renderer_init
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
@@ -675,7 +684,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.swapchain.gl.framebuffer = 0;
 
     sg_begin_pass(&pass);
-    draw_world(r, scene, cam, overlay, nodes);
+    draw_world(r, scene, cam, overlay, nodes, splat_effect);
     PROFILE("render imgui pass") {
     PROFILE_GPU("imgui pass") {
     simgui_render(); // imgui draws on top of the world inside the same pass

@@ -30,6 +30,12 @@ layout(binding = 0) uniform CameraUBO {
     float ortho_focal;
 };
 
+layout(binding = 1) uniform SplatEffectUBO {
+    vec4 effect_center_radius; // xyz = scene center, w = scene radius
+    vec4 effect_params;        // x = elapsed, y = duration, z = strength, w = active
+    vec4 effect_color;         // rgb = tint, a = tint strength
+};
+
 // Per-instance attribute: the sorted gaussian index for this instance.
 in uint splat_id;
 
@@ -43,6 +49,18 @@ vec4 fetch_texel(int k) {
     int x = linear & (GAUSSIAN_TEX_WIDTH - 1);   // width is POT (4096)
     int y = linear >> 12;                        // log2(4096) = 12
     return texelFetch(sampler2D(gaussian_tex, gaussian_smp), ivec2(x, y), 0);
+}
+
+float hash11(float p) {
+    return fract(sin(p * 127.1) * 43758.5453123);
+}
+
+vec3 hash31(float p) {
+    return vec3(
+        hash11(p + 1.0),
+        hash11(p + 2.0),
+        hash11(p + 3.0)
+    ) * 2.0 - 1.0;
 }
 
 void main() {
@@ -63,6 +81,32 @@ void main() {
     vec3  scale    = t1.xyz;
     vec4  rot      = t2;
     vec3  dc       = t3.xyz;
+
+    float effect_wave = 0.0;
+    if (effect_params.w > 0.5) {
+        float duration = max(effect_params.y, 0.001);
+        float progress = clamp(effect_params.x / duration, 0.0, 1.0);
+        float scene_radius = max(effect_center_radius.w, 0.001);
+        vec3 effect_center = effect_center_radius.xyz;
+
+        vec3 to_splat = position - effect_center;
+        vec3 jitter = hash31(float(splat_id)) * (scene_radius * 0.015);
+        float dist = length(to_splat);
+        float wave_radius = progress * scene_radius * 1.15;
+        float band_width = scene_radius * 0.085;
+        float band = (dist - wave_radius) / band_width;
+        float wave = exp(-band * band);
+        float attack = smoothstep(0.0, 0.08, progress);
+        float release = 1.0 - smoothstep(0.82, 1.0, progress);
+        effect_wave = wave * attack * release;
+
+        vec3 dir = normalize(to_splat + jitter + vec3(0.0, scene_radius * 0.01, 0.0));
+        float signed_ripple = sin(progress * 18.849556 + dist * 8.0 / scene_radius);
+        position += dir * (effect_wave * effect_params.z * scene_radius);
+        position += dir * (effect_wave * signed_ripple * 0.012 * scene_radius);
+        scale *= 1.0 + effect_wave * 0.75;
+        opacity *= 1.0 - effect_wave * 0.20;
+    }
 
     // 3. Build rotation matrix from quaternion (column-major mat3 ctor).
     float qw = rot.x, qx = rot.y, qy = rot.z, qz = rot.w;
@@ -213,6 +257,7 @@ void main() {
 
     result += 0.5;
     vec3 color = max(result, vec3(0.0));
+    color += effect_color.rgb * (effect_wave * effect_color.a);
 
     frag_color = color;
     frag_opacity = opacity;

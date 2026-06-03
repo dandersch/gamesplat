@@ -26,6 +26,16 @@ struct NodeRenderParams {
     float        half_size;   // AABB half-extent for the wireframe cubes
 };
 
+// Shader-only splat effect parameters. The vec4-style layout mirrors the
+// SplatEffectUBO in shaders/splat.glsl and keeps WebGL/GLES uniform packing
+// simple: center_radius.xyz = effect center, .w = scene radius;
+// params = (elapsed, duration, strength, active); color = tint.rgb + strength.
+struct SplatEffectParams {
+    float center_radius[4];
+    float params[4];
+    float color[4];
+};
+
 // Per-mesh GPU resources. The renderer owns one of these for the animated
 // `--mesh` slot and one for the static `--object` slot. The pipeline and
 // sampler are shared (same vertex format / shading).
@@ -81,5 +91,5 @@ bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
 bool renderer_reload_shaders(Renderer* r);
 // map_cam is reserved for the top-down overlay; the two-pass map_cam path is
 // temporarily disabled in the sokol port (see TODO in renderer.cpp).
-void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);
+void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, const SplatEffectParams* splat_effect = NULL, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);
 void renderer_destroy(Renderer* r);

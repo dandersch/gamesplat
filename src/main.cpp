@@ -219,6 +219,34 @@ static bool ray_aabb(const float origin[3], const float dir[3],
     return true;
 }
 
+static void compute_gaussian_scene_radius_from_center(const GaussianScene* scene, const float center[3], float* radius) {
+    if (!scene || scene->gaussian_count == 0) {
+        *radius = 1.0f;
+        return;
+    }
+
+    float max_r2 = 0.0f;
+    for (uint32_t i = 0; i < scene->gaussian_count; ++i) {
+        const float* p = scene->gaussians[i].position;
+        float dx = p[0] - center[0];
+        float dy = p[1] - center[1];
+        float dz = p[2] - center[2];
+        float r2 = dx*dx + dy*dy + dz*dz;
+        if (r2 > max_r2) max_r2 = r2;
+    }
+
+    float r = sqrtf(max_r2);
+    *radius = r > 1e-4f ? r : 1.0f;
+}
+
+static float g_app_time = 0.0f;
+static float g_splat_effect_start_time = 0.0f;
+static float g_splat_effect_duration = 2.25f;
+static float g_splat_effect_strength = 0.08f;
+static float g_splat_effect_tint_strength = 0.45f;
+static bool  g_splat_effect_active = false;
+static float g_splat_effect_center[3] = { 0.0f, 0.0f, 0.0f };
+static float g_splat_effect_radius = 1.0f;
 
 static const uint32_t MAX_NEIGHBORS = 64;
 
@@ -296,6 +324,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         }
         if (state->renderer_started) {
             renderer_reload_shaders(&state->renderer);
+        }
+        if (state->scene_loaded) {
+            compute_gaussian_scene_radius_from_center(&state->scene, g_splat_effect_center, &g_splat_effect_radius);
         }
         state->last_time = SDL_GetPerformanceCounter();
         state->freq = SDL_GetPerformanceFrequency();
@@ -418,6 +449,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         state->scene_loaded = load_gaussian_scene(ply_path, &state->scene);
         }
         if (state->scene_loaded) {
+            compute_gaussian_scene_radius_from_center(&state->scene, g_splat_effect_center, &g_splat_effect_radius);
             PROFILE("upload gaussian scene") {
             renderer_upload_gaussians(&state->renderer, &state->scene);
             }
@@ -965,6 +997,11 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     uint64_t now = SDL_GetPerformanceCounter();
     float dt = (float)(now - state->last_time) / (float)state->freq;
     state->last_time = now;
+    g_app_time += dt;
+    if (g_splat_effect_duration <= 0.0f) g_splat_effect_duration = 2.25f;
+    if (g_splat_effect_strength <= 0.0f) g_splat_effect_strength = 0.08f;
+    if (g_splat_effect_tint_strength <= 0.0f) g_splat_effect_tint_strength = 0.45f;
+    if (g_splat_effect_radius <= 0.0f) g_splat_effect_radius = 1.0f;
 
     float mouse_dx = state->mouse_dx;
     float mouse_dy = state->mouse_dy;
@@ -1165,6 +1202,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
     if (scene_loaded) {
         ImGui::Text("Visible: %u / %u", scene.visible_count, scene.gaussian_count);
+        if (ImGui::Button("Shockwave Burst")) {
+            g_splat_effect_active = true;
+            g_splat_effect_start_time = g_app_time;
+        }
+        ImGui::SliderFloat("Shockwave Strength", &g_splat_effect_strength, 0.0f, 0.25f, "%.3f");
+        ImGui::SliderFloat("Shockwave Duration", &g_splat_effect_duration, 0.25f, 5.0f, "%.2fs");
+        ImGui::SliderFloat("Shockwave Tint", &g_splat_effect_tint_strength, 0.0f, 1.5f, "%.2f");
     }
     ImGui::Text("Camera: %.1f, %.1f, %.1f  yaw %.3f  pitch %.3f",
                 cam.position[0], cam.position[1], cam.position[2],
@@ -1545,6 +1589,8 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     OverlayParams* overlay_ptr = NULL;
     NodeRenderParams node_params = {};
     NodeRenderParams* node_ptr = NULL;
+    SplatEffectParams splat_effect = {};
+    SplatEffectParams* splat_effect_ptr = NULL;
     CameraUniforms  map_uniforms = {};
     CameraUniforms* map_uniforms_ptr = NULL;
 
@@ -1609,12 +1655,33 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         map_uniforms.ortho_focal   = (float)win_h / (2.0f * map_cam.ortho_size);
         map_uniforms_ptr = &map_uniforms;
     }
+
+    if (scene_loaded && g_splat_effect_active) {
+        float elapsed = g_app_time - g_splat_effect_start_time;
+        if (elapsed >= g_splat_effect_duration) {
+            g_splat_effect_active = false;
+        } else {
+            splat_effect.center_radius[0] = g_splat_effect_center[0];
+            splat_effect.center_radius[1] = g_splat_effect_center[1];
+            splat_effect.center_radius[2] = g_splat_effect_center[2];
+            splat_effect.center_radius[3] = g_splat_effect_radius;
+            splat_effect.params[0] = elapsed;
+            splat_effect.params[1] = g_splat_effect_duration;
+            splat_effect.params[2] = g_splat_effect_strength;
+            splat_effect.params[3] = 1.0f;
+            splat_effect.color[0] = 1.0f;
+            splat_effect.color[1] = 0.55f;
+            splat_effect.color[2] = 0.18f;
+            splat_effect.color[3] = g_splat_effect_tint_strength;
+            splat_effect_ptr = &splat_effect;
+        }
+    }
     }
 
     // Render
     PROFILE("render submit") {
     renderer_draw_frame(&renderer, &scene, &cam_uniforms, overlay_ptr, node_ptr,
-                        1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
+                        splat_effect_ptr, 1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
     }
 
 

@@ -40,11 +40,13 @@
 //   still needs project wrappers.
 //
 // raymath.h pros/cons:
+// - Pro: nice cheatsheet w/ full api https://www.raylib.com/cheatsheet/raymath_cheatsheet.html
 // - Pro: friendlier app/game API names and useful higher-level helpers such as
 //   MatrixCompose, MatrixDecompose, MatrixRotateZYX, QuaternionFromEuler, and
 //   Vector3Transform.
 // - Pro: MatrixCompose(translation, QuaternionFromEuler(...), scale) matched
 //   our object transform convention in the probe.
+//-  Con: No Mat3 type
 // - Con: MatrixToFloatV() must be used for shader-style float[16] output; raw
 //   memcpy of Matrix does not match our layout.
 // - Con: MatrixMultiply call order is opposite our current math_mat4_mul mental
