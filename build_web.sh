@@ -19,7 +19,7 @@ USE_PRELOAD_CACHE="${USE_PRELOAD_CACHE:-1}"
 mkdir -p "$BUILD_DIR"
 
 echo "Generating sokol-shdc headers..."
-for name in wireframe overlay darken mesh splat; do
+for name in wireframe overlay darken mesh splat accum; do
     ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
 done
 

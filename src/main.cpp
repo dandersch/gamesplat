@@ -1011,24 +1011,11 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     cam_uniforms.ortho_focal = (float)win_h / (2.0f * cam.ortho_size);
     }
 
-    // Cull + sort
+    // Cull here; sort later after ImGui so a same-frame render-mode switch
+    // uses the currently selected sorted/stochastic path.
     if (scene_loaded) {
         PROFILE("gaussian cull") {
         cull_gaussians(&scene, cam_uniforms.view, cam_uniforms.proj, cam.ortho_blend);
-        }
-
-        if (scene.visible_count > 0) {
-            SortContext sort_ctx = {};
-            sort_ctx.depths = scene.visible_depths;
-            sort_ctx.input_indices = scene.visible_indices;
-            sort_ctx.count = scene.visible_count;
-            sort_ctx.sorted_indices = scene.sorted_indices;
-            sort_ctx.scratch_indices = scene.scratch_indices;
-            sort_ctx.scratch_keys = scene.scratch_keys;
-            sort_ctx.scratch_keys2 = scene.scratch_keys2;
-            PROFILE("gaussian sort") {
-            sort_gaussians(&sort_ctx);
-            }
         }
     }
 
@@ -1043,13 +1030,40 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
     if (scene_loaded) {
         ImGui::Text("Visible: %u / %u", scene.visible_count, scene.gaussian_count);
+        int render_mode = (int)renderer.splat_render_mode;
+        const char* render_mode_labels[] = { "Alpha Blend / Sorted", "Stochastic / Unsorted" };
+        if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 2)) {
+            renderer.splat_render_mode = (SplatRenderMode)render_mode;
+            renderer_reset_stochastic_accumulation(&renderer);
+        }
+        if (renderer.splat_render_mode == SplatRenderMode::StochasticUnsorted) {
+            int samples_per_frame = (int)renderer.stochastic_samples_per_frame;
+            if (ImGui::SliderInt("ST Samples / Frame", &samples_per_frame, 1, 16)) {
+                renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
+            }
+            if (ImGui::Checkbox("ST Accumulation", &renderer.stochastic_accumulation_enabled)) {
+                renderer_reset_stochastic_accumulation(&renderer);
+            }
+            if (renderer.stochastic_accumulation_enabled) {
+                ImGui::Text("ST accumulated samples: %u", renderer.stochastic_sample_count);
+            } else {
+                ImGui::Text("ST accumulation off: averaging current-frame samples only");
+            }
+        }
         if (ImGui::Button("Shockwave Burst")) {
             g_splat_effect_active = true;
             g_splat_effect_start_time = g_app_time;
+            renderer_reset_stochastic_accumulation(&renderer);
         }
-        ImGui::SliderFloat("Shockwave Strength", &g_splat_effect_strength, 0.0f, 0.25f, "%.3f");
-        ImGui::SliderFloat("Shockwave Duration", &g_splat_effect_duration, 0.25f, 5.0f, "%.2fs");
-        ImGui::SliderFloat("Shockwave Tint", &g_splat_effect_tint_strength, 0.0f, 1.5f, "%.2f");
+        if (ImGui::SliderFloat("Shockwave Strength", &g_splat_effect_strength, 0.0f, 0.25f, "%.3f")) {
+            renderer_reset_stochastic_accumulation(&renderer);
+        }
+        if (ImGui::SliderFloat("Shockwave Duration", &g_splat_effect_duration, 0.25f, 5.0f, "%.2fs")) {
+            renderer_reset_stochastic_accumulation(&renderer);
+        }
+        if (ImGui::SliderFloat("Shockwave Tint", &g_splat_effect_tint_strength, 0.0f, 1.5f, "%.2f")) {
+            renderer_reset_stochastic_accumulation(&renderer);
+        }
     }
     ImGui::Text("Camera: %.1f, %.1f, %.1f  yaw %.3f  pitch %.3f",
                 cam.position[0], cam.position[1], cam.position[2],
@@ -1517,6 +1531,20 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
             splat_effect_ptr = &splat_effect;
         }
     }
+    }
+
+    if (scene_loaded && renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted && scene.visible_count > 0) {
+        SortContext sort_ctx = {};
+        sort_ctx.depths = scene.visible_depths;
+        sort_ctx.input_indices = scene.visible_indices;
+        sort_ctx.count = scene.visible_count;
+        sort_ctx.sorted_indices = scene.sorted_indices;
+        sort_ctx.scratch_indices = scene.scratch_indices;
+        sort_ctx.scratch_keys = scene.scratch_keys;
+        sort_ctx.scratch_keys2 = scene.scratch_keys2;
+        PROFILE("gaussian sort") {
+        sort_gaussians(&sort_ctx);
+        }
     }
 
     // Render

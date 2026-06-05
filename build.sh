@@ -56,7 +56,7 @@ echo "Generating sokol-shdc headers..."
 # embedded per-backend shader sources plus a code-generated sg_shader_desc.
 # These are consumed at runtime by renderer.cpp via the *_shader_desc()
 # helpers (one per program).
-for name in wireframe overlay darken mesh splat; do
+for name in wireframe overlay darken mesh splat accum; do
     ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
 done
 

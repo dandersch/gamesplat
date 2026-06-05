@@ -18,6 +18,7 @@
 #include "../shaders/darken.glsl.h"
 #include "../shaders/mesh.glsl.h"
 #include "../shaders/splat.glsl.h"
+#include "../shaders/accum.glsl.h"
 
 // Forward decl (defined later in this TU).
 static void mesh_gpu_release(MeshGpu* m);
@@ -32,6 +33,9 @@ static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
 
 static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_pipeline);
+    renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
+    renderer_destroy_shader_pipeline(&r->accum_pipeline);
+    renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
     renderer_destroy_shader_pipeline(&r->darken_pipeline);
     renderer_destroy_shader_pipeline(&r->wireframe_pipeline);
@@ -72,6 +76,53 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "splat-pipeline";
         r->splat_pipeline = sg_make_pipeline(&pd);
+    }
+
+    // --- Stochastic splat pipeline --------------------------------------
+    {
+        sg_pipeline_desc pd = {};
+        pd.shader = sg_make_shader(splat_stochastic_shader_desc(sg_query_backend()));
+        pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+        pd.layout.buffers[0].stride = sizeof(uint32_t);
+        pd.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
+        pd.layout.attrs[ATTR_splat_stochastic_splat_id].buffer_index = 0;
+        pd.layout.attrs[ATTR_splat_stochastic_splat_id].offset = 0;
+        pd.layout.attrs[ATTR_splat_stochastic_splat_id].format = SG_VERTEXFORMAT_UINT;
+        pd.depth.compare = SG_COMPAREFUNC_LESS;
+        pd.depth.write_enabled = true;
+        pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+        pd.cull_mode = SG_CULLMODE_NONE;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].blend.enabled = false;
+        pd.colors[0].write_mask = SG_COLORMASK_RGBA;
+        pd.label = "splat-stochastic-pipeline";
+        r->splat_stochastic_pipeline = sg_make_pipeline(&pd);
+    }
+
+    // --- Fullscreen accumulation/display pipelines ----------------------
+    {
+        sg_pipeline_desc pd = {};
+        pd.shader = sg_make_shader(accum_shader_desc(sg_query_backend()));
+        pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+        pd.cull_mode = SG_CULLMODE_NONE;
+        pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].blend.enabled = false;
+        pd.colors[0].write_mask = SG_COLORMASK_RGBA;
+        pd.label = "stochastic-accum-pipeline";
+        r->accum_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.shader = sg_make_shader(blit_shader_desc(sg_query_backend()));
+        pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+        pd.cull_mode = SG_CULLMODE_NONE;
+        pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].blend.enabled = false;
+        pd.colors[0].write_mask = SG_COLORMASK_RGBA;
+        pd.label = "stochastic-blit-pipeline";
+        r->blit_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Overlay pipeline -----------------------------------------------
@@ -193,7 +244,8 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->mesh_pipeline = sg_make_pipeline(&pd);
     }
 
-    bool ok = r->splat_pipeline.id && r->overlay_pipeline.id &&
+    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
+              r->accum_pipeline.id && r->blit_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
               r->mesh_pipeline.id;
     if (!ok) {
@@ -213,6 +265,9 @@ bool renderer_reload_shaders(Renderer* r) {
 bool renderer_init(Renderer* r, SDL_Window* window) {
     memset(r, 0, sizeof(*r));
     r->window = window;
+    r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
+    r->stochastic_samples_per_frame = 1;
+    r->stochastic_accumulation_enabled = true;
     r->mesh_transform.scale = 1.0f;
     r->object_transform.scale = 1.0f;
     PROFILE_GPU_CONTEXT();
@@ -257,6 +312,17 @@ bool renderer_init(Renderer* r, SDL_Window* window) {
         sd.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
         sd.label = "gaussian-sampler";
         r->gaussian_sampler = sg_make_sampler(&sd);
+    }
+    {
+        sg_sampler_desc sd = {};
+        sd.min_filter = SG_FILTER_NEAREST;
+        sd.mag_filter = SG_FILTER_NEAREST;
+        sd.mipmap_filter = SG_FILTER_NEAREST;
+        sd.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+        sd.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+        sd.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
+        sd.label = "accum-sampler";
+        r->accum_sampler = sg_make_sampler(&sd);
     }
 
     // --- Cube geometry (unit cube centered at origin, ±0.5) -------------
@@ -303,6 +369,7 @@ bool renderer_init(Renderer* r, SDL_Window* window) {
 
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
+    renderer_reset_stochastic_accumulation(r);
 
     uint32_t total_texels = scene->gaussian_count * GAUSSIAN_TEXELS_PER;
     uint32_t tex_w = GAUSSIAN_TEX_WIDTH;
@@ -348,6 +415,16 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.label = "splat-index-vb";
     r->index_buffer = sg_make_buffer(&bd);
     r->index_buffer_capacity = scene->gaussian_count;
+
+    // Dynamic per-instance unsorted visible-index buffer. In stochastic mode
+    // this is updated from culling output directly (no depth sort), preserving
+    // frustum culling while avoiding per-frame sort order.
+    sg_buffer_desc ubd = {};
+    ubd.usage.vertex_buffer = true;
+    ubd.usage.stream_update = true;
+    ubd.size = scene->gaussian_count * sizeof(uint32_t);
+    ubd.label = "splat-unsorted-visible-index-vb";
+    r->unsorted_index_buffer = sg_make_buffer(&ubd);
 
     fprintf(stderr, "Uploaded %u gaussians (gaussian_tex = %ux%u RGBA32F)\n",
             scene->gaussian_count, tex_w, tex_h);
@@ -493,12 +570,118 @@ static void mat4_from_transform(const MeshTransform& t, float* out) {
     out[15] = 1.0f;
 }
 
+void renderer_reset_stochastic_accumulation(Renderer* r) {
+    r->stochastic_sample_count = 0;
+    r->stochastic_accum_write_index = 0;
+    r->stochastic_prev_cam_valid = false;
+    r->stochastic_prev_effect_valid = false;
+}
+
+static void renderer_destroy_stochastic_targets(Renderer* r) {
+    if (r->stochastic_sample_texture_view.id) sg_destroy_view(r->stochastic_sample_texture_view);
+    if (r->stochastic_sample_color_view.id)   sg_destroy_view(r->stochastic_sample_color_view);
+    if (r->stochastic_sample_image.id)        sg_destroy_image(r->stochastic_sample_image);
+    if (r->stochastic_depth_view.id)          sg_destroy_view(r->stochastic_depth_view);
+    if (r->stochastic_depth_image.id)         sg_destroy_image(r->stochastic_depth_image);
+    for (int i = 0; i < 2; ++i) {
+        if (r->stochastic_accum_texture_views[i].id) sg_destroy_view(r->stochastic_accum_texture_views[i]);
+        if (r->stochastic_accum_color_views[i].id)   sg_destroy_view(r->stochastic_accum_color_views[i]);
+        if (r->stochastic_accum_images[i].id)        sg_destroy_image(r->stochastic_accum_images[i]);
+        r->stochastic_accum_texture_views[i] = {};
+        r->stochastic_accum_color_views[i] = {};
+        r->stochastic_accum_images[i] = {};
+    }
+    r->stochastic_sample_texture_view = {};
+    r->stochastic_sample_color_view = {};
+    r->stochastic_sample_image = {};
+    r->stochastic_depth_view = {};
+    r->stochastic_depth_image = {};
+    r->stochastic_width = 0;
+    r->stochastic_height = 0;
+    renderer_reset_stochastic_accumulation(r);
+}
+
+static sg_view make_texture_view(sg_image image, const char* label) {
+    sg_view_desc vd = {};
+    vd.texture.image = image;
+    vd.label = label;
+    return sg_make_view(&vd);
+}
+
+static sg_view make_color_attachment_view(sg_image image, const char* label) {
+    sg_view_desc vd = {};
+    vd.color_attachment.image = image;
+    vd.label = label;
+    return sg_make_view(&vd);
+}
+
+static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+    if (r->stochastic_width == (uint32_t)width && r->stochastic_height == (uint32_t)height &&
+        r->stochastic_sample_image.id && r->stochastic_depth_image.id &&
+        r->stochastic_accum_images[0].id && r->stochastic_accum_images[1].id) {
+        return true;
+    }
+
+    renderer_destroy_stochastic_targets(r);
+
+    sg_image_desc color_desc = {};
+    color_desc.type = SG_IMAGETYPE_2D;
+    color_desc.usage.color_attachment = true;
+    color_desc.width = width;
+    color_desc.height = height;
+    color_desc.num_slices = 1;
+    color_desc.num_mipmaps = 1;
+    color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    color_desc.sample_count = 1;
+
+    color_desc.label = "stochastic-sample-color";
+    r->stochastic_sample_image = sg_make_image(&color_desc);
+    r->stochastic_sample_color_view = make_color_attachment_view(r->stochastic_sample_image, "stochastic-sample-color-att-view");
+    r->stochastic_sample_texture_view = make_texture_view(r->stochastic_sample_image, "stochastic-sample-tex-view");
+
+    for (int i = 0; i < 2; ++i) {
+        color_desc.label = i == 0 ? "stochastic-accum-a" : "stochastic-accum-b";
+        r->stochastic_accum_images[i] = sg_make_image(&color_desc);
+        r->stochastic_accum_color_views[i] = make_color_attachment_view(r->stochastic_accum_images[i], i == 0 ? "stochastic-accum-a-att-view" : "stochastic-accum-b-att-view");
+        r->stochastic_accum_texture_views[i] = make_texture_view(r->stochastic_accum_images[i], i == 0 ? "stochastic-accum-a-tex-view" : "stochastic-accum-b-tex-view");
+    }
+
+    sg_image_desc depth_desc = {};
+    depth_desc.type = SG_IMAGETYPE_2D;
+    depth_desc.usage.depth_stencil_attachment = true;
+    depth_desc.width = width;
+    depth_desc.height = height;
+    depth_desc.num_slices = 1;
+    depth_desc.num_mipmaps = 1;
+    depth_desc.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    depth_desc.sample_count = 1;
+    depth_desc.label = "stochastic-depth-stencil";
+    r->stochastic_depth_image = sg_make_image(&depth_desc);
+
+    sg_view_desc dvd = {};
+    dvd.depth_stencil_attachment.image = r->stochastic_depth_image;
+    dvd.label = "stochastic-depth-stencil-att-view";
+    r->stochastic_depth_view = sg_make_view(&dvd);
+
+    r->stochastic_width = (uint32_t)width;
+    r->stochastic_height = (uint32_t)height;
+    renderer_reset_stochastic_accumulation(r);
+
+    return r->stochastic_sample_image.id && r->stochastic_sample_color_view.id &&
+           r->stochastic_sample_texture_view.id && r->stochastic_depth_image.id &&
+           r->stochastic_depth_view.id && r->stochastic_accum_images[0].id &&
+           r->stochastic_accum_images[1].id && r->stochastic_accum_color_views[0].id &&
+           r->stochastic_accum_color_views[1].id && r->stochastic_accum_texture_views[0].id &&
+           r->stochastic_accum_texture_views[1].id;
+}
+
 // Draws mesh + splats + (optional) panorama overlay + (optional) wireframe
 // nodes for one camera into the currently-active sg_begin_pass. ImGui is NOT
 // drawn here; the caller is responsible for that after this returns.
 static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam,
                        const OverlayParams* overlay, const NodeRenderParams* nodes,
-                       const SplatEffectParams* splat_effect) {
+                       const SplatEffectParams* splat_effect, SplatRenderMode splat_mode) {
     // VP shared by both mesh slots and the wireframe pass.
     float vp[16];
     math_mat4_mul(cam->proj, cam->view, vp);
@@ -562,13 +745,18 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     }
 
     // Splats
-    if (scene->visible_count > 0 && r->gaussian_texture.id && r->index_buffer.id) {
+    sg_buffer splat_id_buffer = (splat_mode == SplatRenderMode::StochasticUnsorted)
+        ? r->unsorted_index_buffer
+        : r->index_buffer;
+    if (scene->visible_count > 0 && r->gaussian_texture.id && splat_id_buffer.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
-        sg_apply_pipeline(r->splat_pipeline);
+        sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
+            ? r->splat_stochastic_pipeline
+            : r->splat_pipeline);
 
         sg_bindings bnd = {};
-        bnd.vertex_buffers[0] = r->index_buffer;            // per-instance sorted ids
+        bnd.vertex_buffers[0] = splat_id_buffer;
         bnd.views[VIEW_gaussian_tex] = r->gaussian_texture_view;
         bnd.samplers[SMP_gaussian_smp] = r->gaussian_sampler;
         sg_apply_bindings(&bnd);
@@ -583,6 +771,11 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
             memcpy(effect_ubo.effect_color, splat_effect->color, sizeof(effect_ubo.effect_color));
         }
         sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
+        if (splat_mode == SplatRenderMode::StochasticUnsorted) {
+            StochasticUBO_t stochastic_ubo = {};
+            stochastic_ubo.frame_seed = (float)r->stochastic_frame_seed;
+            sg_apply_uniforms(UB_StochasticUBO, SG_RANGE_REF(stochastic_ubo));
+        }
 
         // 6 vertices per quad, scene->visible_count instances.
         sg_draw(0, 6, (int)scene->visible_count);
@@ -652,18 +845,149 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     (void)wireframe_occlusion; // see splat-pipeline blend comment in renderer_init
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
 
-    // Push fresh sorted indices to the GPU once per frame.
-    if (scene->visible_count > 0 && r->index_buffer.id) {
+    const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticUnsorted);
+
+    // Push fresh visible IDs to the GPU once per frame. Alpha blend uses
+    // depth-sorted IDs; stochastic mode deliberately keeps culling order
+    // unsorted and skips the sorted-index buffer entirely.
+    if (!stochastic && scene->visible_count > 0 && r->index_buffer.id) {
         PROFILE("update sorted index buffer") {
         sg_range range;
         range.ptr = scene->sorted_indices;
         range.size = scene->visible_count * sizeof(uint32_t);
         sg_update_buffer(r->index_buffer, &range);
         }
+    } else if (stochastic && scene->visible_count > 0 && r->unsorted_index_buffer.id) {
+        PROFILE("update unsorted visible index buffer") {
+        sg_range range;
+        range.ptr = scene->visible_indices;
+        range.size = scene->visible_count * sizeof(uint32_t);
+        sg_update_buffer(r->unsorted_index_buffer, &range);
+        }
     }
 
     int win_w = 0, win_h = 0;
     SDL_GetWindowSize(r->window, &win_w, &win_h);
+
+    if (stochastic) {
+        if (!renderer_ensure_stochastic_targets(r, win_w, win_h)) {
+            fprintf(stderr, "Failed to create stochastic render targets\n");
+            return;
+        }
+
+        SplatEffectParams empty_effect = {};
+        const SplatEffectParams* effect_for_compare = splat_effect ? splat_effect : &empty_effect;
+        if ((r->stochastic_prev_cam_valid && memcmp(&r->stochastic_prev_cam, cam, sizeof(*cam)) != 0) ||
+            (r->stochastic_prev_effect_valid && memcmp(&r->stochastic_prev_effect, effect_for_compare, sizeof(*effect_for_compare)) != 0)) {
+            renderer_reset_stochastic_accumulation(r);
+        }
+        memcpy(&r->stochastic_prev_cam, cam, sizeof(*cam));
+        memcpy(&r->stochastic_prev_effect, effect_for_compare, sizeof(*effect_for_compare));
+        r->stochastic_prev_cam_valid = true;
+        r->stochastic_prev_effect_valid = true;
+        uint32_t samples_per_frame = r->stochastic_samples_per_frame;
+        if (samples_per_frame < 1) samples_per_frame = 1;
+        if (samples_per_frame > 16) samples_per_frame = 16;
+
+        uint32_t write_index = r->stochastic_accum_write_index & 1u;
+        bool display_accum_texture = false;
+        for (uint32_t sample_i = 0; sample_i < samples_per_frame; ++sample_i) {
+            r->stochastic_frame_seed++;
+
+            sg_pass sample_pass = {};
+            sample_pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+            sample_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+            sample_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+            sample_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+            sample_pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+            sample_pass.action.depth.clear_value = 1.0f;
+            sample_pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
+            sample_pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
+            sample_pass.action.stencil.clear_value = 0;
+            sample_pass.attachments.colors[0] = r->stochastic_sample_color_view;
+            sample_pass.attachments.depth_stencil = r->stochastic_depth_view;
+
+            sg_begin_pass(&sample_pass);
+            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted);
+            sg_end_pass();
+
+            if (r->stochastic_accumulation_enabled || samples_per_frame > 1) {
+                uint32_t next_sample_count = r->stochastic_accumulation_enabled
+                    ? r->stochastic_sample_count + 1
+                    : sample_i + 1;
+                write_index = r->stochastic_accumulation_enabled
+                    ? (r->stochastic_accum_write_index & 1u)
+                    : (sample_i & 1u);
+                uint32_t read_index = (write_index + 1u) & 1u;
+
+                sg_pass accum_pass = {};
+                accum_pass.action.colors[0].load_action = (next_sample_count == 1) ? SG_LOADACTION_CLEAR : SG_LOADACTION_DONTCARE;
+                accum_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+                accum_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+                accum_pass.attachments.colors[0] = r->stochastic_accum_color_views[write_index];
+                sg_begin_pass(&accum_pass);
+                sg_apply_pipeline(r->accum_pipeline);
+                sg_bindings accum_bnd = {};
+                accum_bnd.views[VIEW_sample_tex] = r->stochastic_sample_texture_view;
+                accum_bnd.samplers[SMP_sample_smp] = r->accum_sampler;
+                accum_bnd.views[VIEW_history_tex] = (next_sample_count == 1)
+                    ? r->stochastic_sample_texture_view
+                    : r->stochastic_accum_texture_views[read_index];
+                accum_bnd.samplers[SMP_history_smp] = r->accum_sampler;
+                sg_apply_bindings(&accum_bnd);
+                AccumUBO_t accum_ubo = {};
+                accum_ubo.sample_count = (float)next_sample_count;
+                sg_apply_uniforms(UB_AccumUBO, SG_RANGE_REF(accum_ubo));
+                sg_draw(0, 3, 1);
+                sg_end_pass();
+
+                display_accum_texture = true;
+                if (r->stochastic_accumulation_enabled) {
+                    r->stochastic_sample_count = next_sample_count;
+                    r->stochastic_accum_write_index = (write_index + 1u) & 1u;
+                }
+            }
+        }
+
+        sg_pass pass = {};
+        pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+        pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+        pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+        pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+        pass.action.depth.clear_value = 1.0f;
+        pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
+        pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
+        pass.action.stencil.clear_value = 0;
+        pass.swapchain.width = win_w;
+        pass.swapchain.height = win_h;
+        pass.swapchain.sample_count = 1;
+        pass.swapchain.color_format = SG_PIXELFORMAT_RGBA8;
+        pass.swapchain.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+        pass.swapchain.gl.framebuffer = 0;
+
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->blit_pipeline);
+        sg_bindings blit_bnd = {};
+        blit_bnd.views[VIEW_display_tex] = display_accum_texture
+            ? r->stochastic_accum_texture_views[write_index]
+            : r->stochastic_sample_texture_view;
+        blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
+        sg_apply_bindings(&blit_bnd);
+        sg_draw(0, 3, 1);
+        PROFILE("render imgui pass") {
+        PROFILE_GPU("imgui pass") {
+        simgui_render();
+        }
+        }
+        sg_end_pass();
+        PROFILE("render commit") {
+        sg_commit();
+        PROFILE_GPU_COLLECT();
+        SDL_GL_SwapWindow(r->window);
+        }
+        return;
+    }
 
     sg_pass pass = {};
     pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
@@ -684,7 +1008,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.swapchain.gl.framebuffer = 0;
 
     sg_begin_pass(&pass);
-    draw_world(r, scene, cam, overlay, nodes, splat_effect);
+    draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
     PROFILE("render imgui pass") {
     PROFILE_GPU("imgui pass") {
     simgui_render(); // imgui draws on top of the world inside the same pass
@@ -703,11 +1027,14 @@ void renderer_destroy(Renderer* r) {
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->gaussian_sampler.id)   sg_destroy_sampler(r->gaussian_sampler);
+    if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
     if (r->gaussian_texture_view.id) sg_destroy_view(r->gaussian_texture_view);
     if (r->gaussian_texture.id)   sg_destroy_image(r->gaussian_texture);
+    renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);
     if (r->index_buffer.id)       sg_destroy_buffer(r->index_buffer);
+    if (r->unsorted_index_buffer.id) sg_destroy_buffer(r->unsorted_index_buffer);
     mesh_gpu_release(&r->mesh_gpu);
     mesh_gpu_release(&r->object_gpu);
 }

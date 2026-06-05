@@ -43,6 +43,7 @@ out vec3  frag_color;
 out float frag_opacity;
 out vec2  frag_center;
 out vec3  frag_conic;
+flat out uint frag_splat_id;
 
 vec4 fetch_texel(int k) {
     int linear = int(splat_id) * GAUSSIAN_TEXELS_PER + k;
@@ -263,6 +264,7 @@ void main() {
     frag_opacity = opacity;
     frag_center = center_px;
     frag_conic = conic;
+    frag_splat_id = splat_id;
 }
 @end
 
@@ -271,6 +273,7 @@ in vec3  frag_color;
 in float frag_opacity;
 in vec2  frag_center;
 in vec3  frag_conic;
+flat in uint frag_splat_id;
 
 out vec4 out_color;
 
@@ -293,4 +296,48 @@ void main() {
 }
 @end
 
+@fs splat_stochastic_fs
+in vec3  frag_color;
+in float frag_opacity;
+in vec2  frag_center;
+in vec3  frag_conic;
+flat in uint frag_splat_id;
+
+layout(binding = 2) uniform StochasticUBO {
+    float frame_seed;
+    float stochastic_pad0;
+    float stochastic_pad1;
+    float stochastic_pad2;
+};
+
+out vec4 out_color;
+
+float hash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main() {
+    vec2 d = gl_FragCoord.xy - frag_center;
+
+    float power = -0.5 * (
+        frag_conic.x * d.x * d.x +
+        2.0 * frag_conic.y * d.x * d.y +
+        frag_conic.z * d.y * d.y
+    );
+
+    if (power > 0.0) discard;
+
+    float alpha = min(frag_opacity * exp(power), 0.99);
+    if (alpha < 1.0 / 255.0) discard;
+
+    float r = hash13(vec3(gl_FragCoord.xy, float(frag_splat_id) + frame_seed));
+    if (r >= alpha) discard;
+
+    out_color = vec4(frag_color, 1.0);
+}
+@end
+
 @program splat splat_vs splat_fs
+@program splat_stochastic splat_vs splat_stochastic_fs

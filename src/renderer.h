@@ -36,6 +36,11 @@ struct SplatEffectParams {
     float color[4];
 };
 
+enum class SplatRenderMode {
+    AlphaBlendSorted = 0,
+    StochasticUnsorted = 1,
+};
+
 // Per-mesh GPU resources. The renderer owns one of these for the animated
 // `--mesh` slot and one for the static `--object` slot. The pipeline and
 // sampler are shared (same vertex format / shading).
@@ -53,7 +58,11 @@ struct MeshGpu {
 
 struct Renderer {
     SDL_Window*     window;
+    SplatRenderMode splat_render_mode;
     sg_pipeline     splat_pipeline;
+    sg_pipeline     splat_stochastic_pipeline;
+    sg_pipeline     accum_pipeline;
+    sg_pipeline     blit_pipeline;
     sg_pipeline     overlay_pipeline;
     sg_pipeline     darken_pipeline;     // fullscreen dim of FPS view behind map overlay
     sg_pipeline     wireframe_pipeline;
@@ -65,6 +74,7 @@ struct Renderer {
     sg_image        gaussian_texture;
     sg_view         gaussian_texture_view;
     sg_sampler      gaussian_sampler;
+    sg_sampler      accum_sampler;
     uint32_t        gaussian_tex_w;
     uint32_t        gaussian_tex_h;
     sg_buffer       cube_vertex_buffer;
@@ -75,8 +85,29 @@ struct Renderer {
     MeshTransform   mesh_transform;         // translation/rotation/scale applied each frame to mesh_gpu
     MeshTransform   object_transform;       // applied each frame to object_gpu (identity by default)
     sg_buffer       index_buffer;           // dynamic per-instance sorted-index buffer (stream)
+    sg_buffer       unsorted_index_buffer;  // dynamic per-instance visible-index buffer in cull order (stream)
     uint32_t        index_buffer_capacity;  // in elements (uint32_t)
     uint32_t        gaussian_count;
+
+    sg_image        stochastic_sample_image;
+    sg_view         stochastic_sample_color_view;
+    sg_view         stochastic_sample_texture_view;
+    sg_image        stochastic_depth_image;
+    sg_view         stochastic_depth_view;
+    sg_image        stochastic_accum_images[2];
+    sg_view         stochastic_accum_color_views[2];
+    sg_view         stochastic_accum_texture_views[2];
+    uint32_t        stochastic_width;
+    uint32_t        stochastic_height;
+    uint32_t        stochastic_sample_count;
+    uint32_t        stochastic_samples_per_frame;
+    uint32_t        stochastic_frame_seed;
+    uint32_t        stochastic_accum_write_index;
+    CameraUniforms  stochastic_prev_cam;
+    SplatEffectParams stochastic_prev_effect;
+    bool            stochastic_prev_effect_valid;
+    bool            stochastic_prev_cam_valid;
+    bool            stochastic_accumulation_enabled;
 };
 
 bool renderer_init(Renderer* r, SDL_Window* window);
@@ -89,6 +120,7 @@ bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
 // shader descriptors. Intended for DLL hot reload after sokol-shdc regenerated
 // the embedded shader headers and the app code DLL was reloaded.
 bool renderer_reload_shaders(Renderer* r);
+void renderer_reset_stochastic_accumulation(Renderer* r);
 // map_cam is reserved for the top-down overlay; the two-pass map_cam path is
 // temporarily disabled in the sokol port (see TODO in renderer.cpp).
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, const SplatEffectParams* splat_effect = NULL, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);
