@@ -23,8 +23,8 @@
 #define SOKOL_TRACE_HOOKS
 #endif
 #if defined(__EMSCRIPTEN__)
-#if !defined(SOKOL_GLES3)
-#define SOKOL_GLES3
+#if !defined(SOKOL_WGPU)
+#define SOKOL_WGPU
 #endif
 #else
 #if !defined(SOKOL_GLCORE)

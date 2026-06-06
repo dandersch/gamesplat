@@ -57,7 +57,7 @@ echo "Generating sokol-shdc headers..."
 # These are consumed at runtime by renderer.cpp via the *_shader_desc()
 # helpers (one per program).
 for name in wireframe overlay darken mesh splat accum; do
-    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
+    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es:wgsl
 done
 
 # Build imgui static lib if missing. imgui_impl_sdlgpu3.cpp is no longer part

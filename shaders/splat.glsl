@@ -1,25 +1,26 @@
 // 3D Gaussian splat rendering. Vertex shader fetches packed gaussian data
-// from an RGBA32F texture (16 texels per gaussian) and projects a 2D oriented
-// quad with screen-space covariance. Per-instance vertex attribute carries
-// the sorted gaussian id.
+// from a readonly storage buffer and projects a 2D oriented quad with
+// screen-space covariance. Per-instance vertex attribute carries the sorted
+// gaussian id.
 //
 // sokol-shdc input. Compiled into shaders/splat.glsl.h.
 
 @vs splat_vs
-// Gaussian data is laid out as 16 RGBA32F texels per gaussian (= 64 floats,
+// Gaussian data is laid out as 16 vec4s per gaussian (= 64 floats,
 // byte-identical to the host-side GpuGaussian struct):
-//   texel 0 = (pos.x, pos.y, pos.z, opacity)
-//   texel 1 = (scale.x, scale.y, scale.z, pad)
-//   texel 2 = (rot.w, rot.x, rot.y, rot.z)
-//   texel 3 = (color.r, color.g, color.b, pad)   // raw f_dc
-//   texels 4..14 = sh_rest (45 floats packed tightly, RGB triples per coeff)
-//   texel 15.last_three_components = pad
-// Texture width is fixed (POT) so we can use bit ops to address.
-layout(binding = 0) uniform texture2D gaussian_tex;
-layout(binding = 0) uniform sampler   gaussian_smp;
+//   data[0] = (pos.x, pos.y, pos.z, opacity)
+//   data[1] = (scale.x, scale.y, scale.z, pad)
+//   data[2] = (rot.w, rot.x, rot.y, rot.z)
+//   data[3] = (color.r, color.g, color.b, pad)   // raw f_dc
+//   data[4]..data[14] = sh_rest (45 floats packed tightly, RGB triples per coeff)
+//   data[15].last_three_components = pad
+struct GaussianData {
+    vec4 data[16];
+};
 
-const int GAUSSIAN_TEX_WIDTH  = 4096;
-const int GAUSSIAN_TEXELS_PER = 16;
+layout(binding = 0) readonly buffer gaussian_buf {
+    GaussianData gaussians[];
+};
 
 layout(binding = 0) uniform CameraUBO {
     mat4 view;
@@ -28,6 +29,8 @@ layout(binding = 0) uniform CameraUBO {
     float orthographic; // 1.0 = orthographic, 0.0 = perspective
     float persp_focal;
     float ortho_focal;
+    float clip_y_sign;
+    float clip_z_01;
 };
 
 layout(binding = 1) uniform SplatEffectUBO {
@@ -46,10 +49,7 @@ out vec3  frag_conic;
 flat out uint frag_splat_id;
 
 vec4 fetch_texel(int k) {
-    int linear = int(splat_id) * GAUSSIAN_TEXELS_PER + k;
-    int x = linear & (GAUSSIAN_TEX_WIDTH - 1);   // width is POT (4096)
-    int y = linear >> 12;                        // log2(4096) = 12
-    return texelFetch(sampler2D(gaussian_tex, gaussian_smp), ivec2(x, y), 0);
+    return gaussians[int(splat_id)].data[k];
 }
 
 float hash11(float p) {
@@ -179,12 +179,21 @@ void main() {
     );
     vec2 center_px = mix(persp_center, ortho_center, orthographic);
 
+    // center_px/conic are built in the original GL framebuffer-Y convention.
+    // WebGPU's fragment position is top-left-origin, so when clip_y_sign is
+    // -1 convert both the center and the covariance cross term into that same
+    // raster pixel coordinate system. Keeping clip-space and frag-space in
+    // agreement avoids the "collapsed horizontal line" failure mode.
+    float y_flip = (1.0 - clip_y_sign) * 0.5;
+    vec2 raster_center_px = vec2(center_px.x, mix(center_px.y, viewport.y - center_px.y, y_flip));
+    vec3 raster_conic = vec3(conic.x, conic.y * clip_y_sign, conic.z);
+
     // 13. Quad radius (3 sigma)
     float radius_x = ceil(3.0 * sqrt(a));
     float radius_y = ceil(3.0 * sqrt(c));
 
     // 14. Position this vertex
-    vec2 pos_px = center_px + corner * vec2(radius_x, radius_y);
+    vec2 pos_px = raster_center_px + corner * vec2(radius_x, radius_y);
 
     // Gaussian PLY data is Y-up (the gaussian loader does not negate Y on
     // load, unlike the OBJ/GLTF mesh loaders which flip Y to align meshes
@@ -195,9 +204,10 @@ void main() {
     // ndc_z below), so this mapping is independent of the mesh path.
     vec2 ndc = vec2(
         2.0 * pos_px.x / viewport.x - 1.0,
-        2.0 * pos_px.y / viewport.y - 1.0
+        (2.0 * pos_px.y / viewport.y - 1.0) * clip_y_sign
     );
     float ndc_z = (proj[2][2] * t.z + proj[3][2]) / (-t.z);
+    ndc_z = mix(ndc_z, ndc_z * 0.5 + 0.5, clip_z_01);
     gl_Position = vec4(ndc, ndc_z, 1.0);
 
     // 15. View-dependent color via degree-3 SH.
@@ -262,8 +272,8 @@ void main() {
 
     frag_color = color;
     frag_opacity = opacity;
-    frag_center = center_px;
-    frag_conic = conic;
+    frag_center = raster_center_px;
+    frag_conic = raster_conic;
     frag_splat_id = splat_id;
 }
 @end

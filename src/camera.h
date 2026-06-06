@@ -29,7 +29,9 @@ struct CameraUniforms {
     // ortho_size < 1, where the ortho focal exceeds the perspective focal).
     float persp_focal;
     float ortho_focal;
-    float pad[3];
+    float clip_y_sign;  // GL: +1, WebGPU/top-left framebuffer: -1 for splat clip-space Y
+    float clip_z_01;    // GL: 0 keeps [-1,1], WebGPU: 1 remaps GL clip Z to [0,1]
+    float pad[1];
 };
 
 void camera_init(Camera* cam);

@@ -210,31 +210,31 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     audio_init(&state->audio);
     sfx_load(&state->sfx_transition, "res/transition.wav");
 
-#if defined(__EMSCRIPTEN__)
-    // Web build: WebGL2 is exposed as an OpenGL ES 3.0 context.
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-#else
+#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
     // Request a compatible GL context for sokol_gfx's GLCORE backend. 3.3
     // core is the floor for SOKOL_GLCORE; we don't need anything newer for
     // any of the generated shaders (glsl430).
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-#endif
 
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+#endif
 
     state->window = SDL_CreateWindow("gsplat", 1280, 720,
-                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+                                     SDL_WINDOW_RESIZABLE
+#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
+                                     | SDL_WINDOW_OPENGL
+#endif
+    );
     if (!state->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
+#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
     state->gl_context = SDL_GL_CreateContext(state->window);
     if (!state->gl_context) {
         fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
@@ -242,13 +242,21 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
     SDL_GL_MakeCurrent(state->window, state->gl_context);
     SDL_GL_SetSwapInterval(1); // vsync
+#endif
 
-    // sokol_gfx setup. The GL backend has its own loader so we don't need
-    // gl3w/glad. defaults must match the swapchain we'll pass into sg_pass.
+    // sokol_gfx setup. Defaults must match the swapchain we'll pass into sg_pass.
     sg_desc sgd = {};
-    sgd.environment.defaults.color_format = SG_PIXELFORMAT_RGBA8;
+    sgd.environment.defaults.color_format = renderer_default_color_format();
     sgd.environment.defaults.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
     sgd.environment.defaults.sample_count = 1;
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    int initial_w = 0, initial_h = 0;
+    SDL_GetWindowSize(state->window, &initial_w, &initial_h);
+    if (!renderer_wgpu_setup("#canvas", initial_w, initial_h, &sgd)) {
+        fprintf(stderr, "WebGPU setup failed\n");
+        return SDL_APP_FAILURE;
+    }
+#endif
     sg_setup(&sgd);
     if (!sg_isvalid()) {
         fprintf(stderr, "sg_setup failed\n");
@@ -261,7 +269,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     // translation; it expects an existing context, so it goes after setup.
     IMGUI_CHECKVERSION();
     simgui_desc_t sid = {};
-    sid.color_format = SG_PIXELFORMAT_RGBA8;
+    sid.color_format = renderer_default_color_format();
     sid.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
     sid.sample_count = 1;
     simgui_setup(&sid);
@@ -1009,6 +1017,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     // each in its own mix() branch (see comment in camera.h).
     cam_uniforms.persp_focal = (1.0f / tanf(cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
     cam_uniforms.ortho_focal = (float)win_h / (2.0f * cam.ortho_size);
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    cam_uniforms.clip_y_sign = -1.0f;
+    cam_uniforms.clip_z_01 = 1.0f;
+#else
+    cam_uniforms.clip_y_sign = 1.0f;
+    cam_uniforms.clip_z_01 = 0.0f;
+#endif
     }
 
     // Cull here; sort later after ImGui so a same-frame render-mode switch
@@ -1580,6 +1595,9 @@ GSPLAT_EXPORT void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 #endif
     if (state->simgui_setup_done) simgui_shutdown(); // destroys ImGui context
     if (state->sg_setup_done) sg_shutdown();
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    renderer_wgpu_shutdown();
+#endif
 
     if (state->gl_context) SDL_GL_DestroyContext(state->gl_context);
     if (state->window) SDL_DestroyWindow(state->window);

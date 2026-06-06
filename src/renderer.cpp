@@ -3,6 +3,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <cstdint>
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+#include <utility>
+#include <webgpu/webgpu_cpp.h>
+#endif
 #include "sokol_gfx.h"
 #define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
@@ -22,6 +27,245 @@
 
 // Forward decl (defined later in this TU).
 static void mesh_gpu_release(MeshGpu* m);
+
+sg_pixel_format renderer_default_color_format(void) {
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    return SG_PIXELFORMAT_BGRA8;
+#else
+    return SG_PIXELFORMAT_RGBA8;
+#endif
+}
+
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+struct RendererWgpuState {
+    wgpu::Instance instance;
+    wgpu::Adapter adapter;
+    wgpu::Device device;
+    wgpu::Queue queue;
+    wgpu::Surface surface;
+    wgpu::Texture depth_texture;
+    wgpu::TextureView depth_view;
+    wgpu::TextureView render_view;
+    wgpu::SurfaceTexture surface_texture;
+    int width;
+    int height;
+    bool configured;
+};
+
+static RendererWgpuState g_wgpu;
+
+static const char* renderer_wgpu_string(wgpu::StringView s) {
+    return s.data ? s.data : "";
+}
+
+static bool renderer_wgpu_configure_surface(int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+    if (!g_wgpu.device || !g_wgpu.surface) return false;
+    if (g_wgpu.configured && g_wgpu.width == width && g_wgpu.height == height) return true;
+
+    g_wgpu.render_view = nullptr;
+    g_wgpu.depth_view = nullptr;
+    g_wgpu.depth_texture = nullptr;
+
+    wgpu::SurfaceConfiguration cfg = {};
+    cfg.device = g_wgpu.device;
+    cfg.format = wgpu::TextureFormat::BGRA8Unorm;
+    cfg.usage = wgpu::TextureUsage::RenderAttachment;
+    cfg.width = (uint32_t)width;
+    cfg.height = (uint32_t)height;
+    cfg.presentMode = wgpu::PresentMode::Fifo;
+    g_wgpu.surface.Configure(&cfg);
+
+    wgpu::TextureDescriptor depth_desc = {};
+    depth_desc.usage = wgpu::TextureUsage::RenderAttachment;
+    depth_desc.dimension = wgpu::TextureDimension::e2D;
+    depth_desc.size.width = (uint32_t)width;
+    depth_desc.size.height = (uint32_t)height;
+    depth_desc.size.depthOrArrayLayers = 1;
+    depth_desc.format = wgpu::TextureFormat::Depth32FloatStencil8;
+    depth_desc.mipLevelCount = 1;
+    depth_desc.sampleCount = 1;
+    g_wgpu.depth_texture = g_wgpu.device.CreateTexture(&depth_desc);
+    if (!g_wgpu.depth_texture) {
+        fprintf(stderr, "WebGPU: failed to create depth/stencil texture\n");
+        return false;
+    }
+    g_wgpu.depth_view = g_wgpu.depth_texture.CreateView();
+    if (!g_wgpu.depth_view) {
+        fprintf(stderr, "WebGPU: failed to create depth/stencil texture view\n");
+        return false;
+    }
+
+    g_wgpu.width = width;
+    g_wgpu.height = height;
+    g_wgpu.configured = true;
+    return true;
+}
+
+bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_desc* desc) {
+    if (!desc) return false;
+
+    static constexpr wgpu::InstanceFeatureName instance_features[] = {
+        wgpu::InstanceFeatureName::TimedWaitAny,
+    };
+    wgpu::InstanceDescriptor instance_desc = {};
+    instance_desc.requiredFeatureCount = 1;
+    instance_desc.requiredFeatures = instance_features;
+    g_wgpu.instance = wgpu::CreateInstance(&instance_desc);
+    if (!g_wgpu.instance) {
+        fprintf(stderr, "WebGPU: failed to create instance\n");
+        return false;
+    }
+
+    wgpu::RequestAdapterOptions adapter_opts = {};
+    adapter_opts.featureLevel = wgpu::FeatureLevel::Core;
+    adapter_opts.powerPreference = wgpu::PowerPreference::HighPerformance;
+    g_wgpu.instance.WaitAny(
+        g_wgpu.instance.RequestAdapter(
+            &adapter_opts,
+            wgpu::CallbackMode::WaitAnyOnly,
+            [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+                if (status != wgpu::RequestAdapterStatus::Success) {
+                    fprintf(stderr, "WebGPU: requestAdapter failed: %s\n", renderer_wgpu_string(message));
+                    return;
+                }
+                g_wgpu.adapter = std::move(adapter);
+            }),
+        UINT64_MAX);
+    if (!g_wgpu.adapter) return false;
+
+    if (!g_wgpu.adapter.HasFeature(wgpu::FeatureName::Depth32FloatStencil8)) {
+        fprintf(stderr, "WebGPU: adapter does not support depth32float-stencil8\n");
+        return false;
+    }
+
+    static constexpr wgpu::FeatureName required_features[] = {
+        wgpu::FeatureName::Depth32FloatStencil8,
+    };
+    wgpu::Limits adapter_limits = {};
+    g_wgpu.adapter.GetLimits(&adapter_limits);
+    wgpu::Limits required_limits = {};
+    required_limits.maxBufferSize = adapter_limits.maxBufferSize;
+    required_limits.maxStorageBufferBindingSize = adapter_limits.maxStorageBufferBindingSize;
+    wgpu::DeviceDescriptor device_desc = {};
+    device_desc.requiredFeatureCount = 1;
+    device_desc.requiredFeatures = required_features;
+    device_desc.requiredLimits = &required_limits;
+    device_desc.SetUncapturedErrorCallback(
+        [](const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message) {
+            fprintf(stderr, "WebGPU uncaptured error (%d): %s\n", (int)type, renderer_wgpu_string(message));
+        });
+    device_desc.SetDeviceLostCallback(
+        wgpu::CallbackMode::AllowSpontaneous,
+        [](const wgpu::Device&, wgpu::DeviceLostReason reason, wgpu::StringView message) {
+            fprintf(stderr, "WebGPU device lost (%d): %s\n", (int)reason, renderer_wgpu_string(message));
+        });
+    g_wgpu.instance.WaitAny(
+        g_wgpu.adapter.RequestDevice(
+            &device_desc,
+            wgpu::CallbackMode::WaitAnyOnly,
+            [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+                if (status != wgpu::RequestDeviceStatus::Success) {
+                    fprintf(stderr, "WebGPU: requestDevice failed: %s\n", renderer_wgpu_string(message));
+                    return;
+                }
+                g_wgpu.device = std::move(device);
+                g_wgpu.queue = g_wgpu.device.GetQueue();
+            }),
+        UINT64_MAX);
+    if (!g_wgpu.device) return false;
+
+    wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {};
+    canvas_desc.selector = canvas_selector ? canvas_selector : "#canvas";
+    wgpu::SurfaceDescriptor surface_desc = {};
+    surface_desc.nextInChain = &canvas_desc;
+    g_wgpu.surface = g_wgpu.instance.CreateSurface(&surface_desc);
+    if (!g_wgpu.surface) {
+        fprintf(stderr, "WebGPU: failed to create canvas surface\n");
+        return false;
+    }
+
+    if (!renderer_wgpu_configure_surface(width, height)) return false;
+
+    desc->environment.wgpu.device = g_wgpu.device.Get();
+    desc->environment.defaults.color_format = renderer_default_color_format();
+    desc->environment.defaults.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    desc->environment.defaults.sample_count = 1;
+    return true;
+}
+
+static bool renderer_wgpu_fill_swapchain(sg_swapchain* swapchain, int width, int height) {
+    if (!swapchain) return false;
+    if (!renderer_wgpu_configure_surface(width, height)) return false;
+
+    g_wgpu.render_view = nullptr;
+    g_wgpu.surface_texture = {};
+    g_wgpu.surface.GetCurrentTexture(&g_wgpu.surface_texture);
+    if ((g_wgpu.surface_texture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) &&
+        (g_wgpu.surface_texture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal)) {
+        fprintf(stderr, "WebGPU: failed to acquire surface texture (%d)\n", (int)g_wgpu.surface_texture.status);
+        return false;
+    }
+    g_wgpu.render_view = g_wgpu.surface_texture.texture.CreateView();
+    if (!g_wgpu.render_view) {
+        fprintf(stderr, "WebGPU: failed to create surface texture view\n");
+        return false;
+    }
+
+    swapchain->width = width;
+    swapchain->height = height;
+    swapchain->sample_count = 1;
+    swapchain->color_format = renderer_default_color_format();
+    swapchain->depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    swapchain->wgpu.render_view = g_wgpu.render_view.Get();
+    swapchain->wgpu.depth_stencil_view = g_wgpu.depth_view.Get();
+    return true;
+}
+
+static void renderer_wgpu_present(void) {
+    // emdawnwebgpu intentionally doesn't support wgpuSurfacePresent(); the
+    // browser presents the current canvas texture at the requestAnimationFrame
+    // boundary. Releasing our view/reference is enough for the next frame.
+    g_wgpu.render_view = nullptr;
+    g_wgpu.surface_texture = {};
+}
+
+void renderer_wgpu_shutdown(void) {
+    g_wgpu.render_view = nullptr;
+    g_wgpu.depth_view = nullptr;
+    g_wgpu.depth_texture = nullptr;
+    g_wgpu.surface = nullptr;
+    g_wgpu.queue = nullptr;
+    g_wgpu.device = nullptr;
+    g_wgpu.adapter = nullptr;
+    g_wgpu.instance = nullptr;
+    g_wgpu = {};
+}
+#endif
+
+static bool renderer_fill_default_swapchain(sg_swapchain* swapchain, int width, int height) {
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    return renderer_wgpu_fill_swapchain(swapchain, width, height);
+#else
+    if (!swapchain) return false;
+    swapchain->width = width;
+    swapchain->height = height;
+    swapchain->sample_count = 1;
+    swapchain->color_format = renderer_default_color_format();
+    swapchain->depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    swapchain->gl.framebuffer = 0;
+    return true;
+#endif
+}
+
+static void renderer_present_default_swapchain(SDL_Window* window) {
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    (void)window;
+    renderer_wgpu_present();
+#else
+    SDL_GL_SwapWindow(window);
+#endif
+}
 
 static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
     if (!pipeline->id) return;
@@ -60,7 +304,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.depth.write_enabled = false;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
         pd.cull_mode = SG_CULLMODE_NONE;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = true;
         pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
         pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -92,7 +336,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.depth.write_enabled = true;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
         pd.cull_mode = SG_CULLMODE_NONE;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = false;
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "splat-stochastic-pipeline";
@@ -106,7 +350,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
         pd.cull_mode = SG_CULLMODE_NONE;
         pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = false;
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "stochastic-accum-pipeline";
@@ -118,7 +362,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
         pd.cull_mode = SG_CULLMODE_NONE;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = false;
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "stochastic-blit-pipeline";
@@ -144,7 +388,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.stencil.front.depth_fail_op = SG_STENCILOP_KEEP;
         pd.stencil.front.pass_op = SG_STENCILOP_KEEP;
         pd.stencil.back = pd.stencil.front;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = true;
         pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
         pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -168,7 +412,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.cull_mode = SG_CULLMODE_NONE;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
         // No depth/stencil testing.
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = true;
         pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE;
         pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -194,7 +438,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.layout.attrs[ATTR_wireframe_in_position].offset = 0;
         pd.layout.attrs[ATTR_wireframe_in_position].format = SG_VERTEXFORMAT_FLOAT3;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = true;
         pd.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_DST_ALPHA;
         pd.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE;
@@ -237,7 +481,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.stencil.front.depth_fail_op = SG_STENCILOP_KEEP;
         pd.stencil.front.pass_op = SG_STENCILOP_REPLACE;
         pd.stencil.back = pd.stencil.front;
-        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;
+        pd.colors[0].pixel_format = renderer_default_color_format();
         pd.colors[0].blend.enabled = false;
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "mesh-pipeline";
@@ -300,20 +544,6 @@ bool renderer_init(Renderer* r, SDL_Window* window) {
         r->mesh_sampler = sg_make_sampler(&sd);
     }
     {
-        // Gaussian sampler. The splat shader uses texelFetch which ignores
-        // filter/wrap state, but sokol_gfx still requires a sampler when
-        // binding a sampled texture.
-        sg_sampler_desc sd = {};
-        sd.min_filter = SG_FILTER_NEAREST;
-        sd.mag_filter = SG_FILTER_NEAREST;
-        sd.mipmap_filter = SG_FILTER_NEAREST;
-        sd.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
-        sd.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
-        sd.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
-        sd.label = "gaussian-sampler";
-        r->gaussian_sampler = sg_make_sampler(&sd);
-    }
-    {
         sg_sampler_desc sd = {};
         sd.min_filter = SG_FILTER_NEAREST;
         sd.mag_filter = SG_FILTER_NEAREST;
@@ -371,41 +601,38 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
     renderer_reset_stochastic_accumulation(r);
 
+    if (r->gaussian_buffer_view.id) {
+        sg_destroy_view(r->gaussian_buffer_view);
+        r->gaussian_buffer_view = {};
+    }
+    if (r->gaussian_buffer.id) {
+        sg_destroy_buffer(r->gaussian_buffer);
+        r->gaussian_buffer = {};
+    }
+
     uint32_t total_texels = scene->gaussian_count * GAUSSIAN_TEXELS_PER;
     uint32_t tex_w = GAUSSIAN_TEX_WIDTH;
     uint32_t tex_h = (total_texels + tex_w - 1u) / tex_w;
     r->gaussian_tex_w = tex_w;
     r->gaussian_tex_h = tex_h;
 
-    // Pack into a tight buffer sized for the full tex_w*tex_h grid (trailing
-    // slack zeroed for cleanliness).
-    uint32_t tex_buf_size = tex_w * tex_h * GAUSSIAN_BYTES_PER_TEXEL;
+    // Pack into the shader's storage-buffer struct layout.
     uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
-    uint8_t* tex_data = (uint8_t*)malloc(tex_buf_size);
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
-    memcpy(tex_data, gpu_data, payload_size);
-    if (tex_buf_size > payload_size) {
-        memset(tex_data + payload_size, 0, tex_buf_size - payload_size);
-    }
+
+    sg_buffer_desc gbd = {};
+    gbd.usage.storage_buffer = true;
+    gbd.size = payload_size;
+    gbd.data.ptr = gpu_data;
+    gbd.data.size = payload_size;
+    gbd.label = "gaussian-buffer";
+    r->gaussian_buffer = sg_make_buffer(&gbd);
     free(gpu_data);
 
-    sg_image_desc id = {};
-    id.type = SG_IMAGETYPE_2D;
-    id.width = (int)tex_w;
-    id.height = (int)tex_h;
-    id.num_slices = 1;
-    id.num_mipmaps = 1;
-    id.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    id.data.mip_levels[0].ptr = tex_data;
-    id.data.mip_levels[0].size = tex_buf_size;
-    id.label = "gaussian-tex";
-    r->gaussian_texture = sg_make_image(&id);
-    free(tex_data);
-
     sg_view_desc vd = {};
-    vd.texture.image = r->gaussian_texture;
-    vd.label = "gaussian-tex-view";
-    r->gaussian_texture_view = sg_make_view(&vd);
+    vd.storage_buffer.buffer = r->gaussian_buffer;
+    vd.label = "gaussian-buffer-view";
+    r->gaussian_buffer_view = sg_make_view(&vd);
 
     // Dynamic per-instance sorted-index buffer (one uint per gaussian).
     sg_buffer_desc bd = {};
@@ -426,8 +653,8 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     ubd.label = "splat-unsorted-visible-index-vb";
     r->unsorted_index_buffer = sg_make_buffer(&ubd);
 
-    fprintf(stderr, "Uploaded %u gaussians (gaussian_tex = %ux%u RGBA32F)\n",
-            scene->gaussian_count, tex_w, tex_h);
+    fprintf(stderr, "Uploaded %u gaussians (storage buffer = %u bytes, old texture footprint = %ux%u RGBA32F)\n",
+            scene->gaussian_count, payload_size, tex_w, tex_h);
 }
 
 // Release everything held by a MeshGpu and zero it. Safe to call on an
@@ -632,7 +859,7 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
     color_desc.height = height;
     color_desc.num_slices = 1;
     color_desc.num_mipmaps = 1;
-    color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    color_desc.pixel_format = renderer_default_color_format();
     color_desc.sample_count = 1;
 
     color_desc.label = "stochastic-sample-color";
@@ -748,7 +975,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     sg_buffer splat_id_buffer = (splat_mode == SplatRenderMode::StochasticUnsorted)
         ? r->unsorted_index_buffer
         : r->index_buffer;
-    if (scene->visible_count > 0 && r->gaussian_texture.id && splat_id_buffer.id) {
+    if (scene->visible_count > 0 && r->gaussian_buffer.id && splat_id_buffer.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
@@ -757,8 +984,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
 
         sg_bindings bnd = {};
         bnd.vertex_buffers[0] = splat_id_buffer;
-        bnd.views[VIEW_gaussian_tex] = r->gaussian_texture_view;
-        bnd.samplers[SMP_gaussian_smp] = r->gaussian_sampler;
+        bnd.views[VIEW_gaussian_buf] = r->gaussian_buffer_view;
         sg_apply_bindings(&bnd);
 
         // The CameraUniforms host struct lays out 1:1 with the generated
@@ -959,12 +1185,10 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
         pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
         pass.action.stencil.clear_value = 0;
-        pass.swapchain.width = win_w;
-        pass.swapchain.height = win_h;
-        pass.swapchain.sample_count = 1;
-        pass.swapchain.color_format = SG_PIXELFORMAT_RGBA8;
-        pass.swapchain.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-        pass.swapchain.gl.framebuffer = 0;
+        if (!renderer_fill_default_swapchain(&pass.swapchain, win_w, win_h)) {
+            fprintf(stderr, "Failed to acquire default swapchain\n");
+            return;
+        }
 
         sg_begin_pass(&pass);
         sg_apply_pipeline(r->blit_pipeline);
@@ -984,7 +1208,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         PROFILE("render commit") {
         sg_commit();
         PROFILE_GPU_COLLECT();
-        SDL_GL_SwapWindow(r->window);
+        renderer_present_default_swapchain(r->window);
         }
         return;
     }
@@ -999,13 +1223,11 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
     pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
     pass.action.stencil.clear_value = 0;
-    // SDL3-managed GL context: framebuffer 0 is the default backbuffer.
-    pass.swapchain.width = win_w;
-    pass.swapchain.height = win_h;
-    pass.swapchain.sample_count = 1;
-    pass.swapchain.color_format = SG_PIXELFORMAT_RGBA8;
-    pass.swapchain.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-    pass.swapchain.gl.framebuffer = 0;
+    // Backend-managed default surface (GL framebuffer 0 or current WebGPU canvas texture).
+    if (!renderer_fill_default_swapchain(&pass.swapchain, win_w, win_h)) {
+        fprintf(stderr, "Failed to acquire default swapchain\n");
+        return;
+    }
 
     sg_begin_pass(&pass);
     draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
@@ -1018,7 +1240,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     PROFILE("render commit") {
     sg_commit();
     PROFILE_GPU_COLLECT();
-    SDL_GL_SwapWindow(r->window);
+    renderer_present_default_swapchain(r->window);
     }
 }
 
@@ -1026,10 +1248,9 @@ void renderer_destroy(Renderer* r) {
     renderer_destroy_shader_pipelines(r);
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
-    if (r->gaussian_sampler.id)   sg_destroy_sampler(r->gaussian_sampler);
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
-    if (r->gaussian_texture_view.id) sg_destroy_view(r->gaussian_texture_view);
-    if (r->gaussian_texture.id)   sg_destroy_image(r->gaussian_texture);
+    if (r->gaussian_buffer_view.id) sg_destroy_view(r->gaussian_buffer_view);
+    if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);

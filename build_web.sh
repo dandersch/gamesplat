@@ -9,6 +9,7 @@ SHELL_FILE="${SHELL_FILE:-web/shell.html}"
 VENDOR_DIR="vendor"
 WEBP_DIR="$VENDOR_DIR/libwebp"
 WEBP_LIB="$BUILD_DIR/libwebpdecoder.a"
+EM_CACHE_DIR="${EM_CACHE_DIR:-$BUILD_DIR/emscripten_cache}"
 
 # The demo asset pack is large. Keep the known-good initial heap as the
 # default, but make it easy to tune down/up while testing browser behavior.
@@ -20,7 +21,7 @@ mkdir -p "$BUILD_DIR"
 
 echo "Generating sokol-shdc headers..."
 for name in wireframe overlay darken mesh splat accum; do
-    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es
+    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es:wgsl
 done
 
 COMMON_FLAGS=(
@@ -30,6 +31,7 @@ COMMON_FLAGS=(
     -Wextra
     -Wno-missing-field-initializers
     -Wno-unused-function
+    -DSOKOL_WGPU
     -I"$VENDOR_DIR"
     -I"$VENDOR_DIR/imgui"
     -I"$VENDOR_DIR/imgui/backends"
@@ -82,9 +84,8 @@ WEBP_DECODER_SOURCES=(
 
 EM_FLAGS=(
     -sUSE_SDL=3
-    -sFULL_ES3=1
-    -sMIN_WEBGL_VERSION=2
-    -sMAX_WEBGL_VERSION=2
+    --use-port=emdawnwebgpu
+    -sASYNCIFY=1
     -sALLOW_MEMORY_GROWTH=1
     -sINITIAL_MEMORY="$INITIAL_MEMORY"
     -sMAXIMUM_MEMORY="$MAXIMUM_MEMORY"
@@ -125,7 +126,7 @@ done
 emar rcs "$WEBP_LIB" "${WEBP_OBJS[@]}"
 
 echo "Building $OUT..."
-"$CXX" "${COMMON_FLAGS[@]}" "${EM_FLAGS[@]}" \
+"$CXX" --cache "$EM_CACHE_DIR" "${COMMON_FLAGS[@]}" "${EM_FLAGS[@]}" \
     "${SOURCES[@]}" "${PRELOAD_FLAGS[@]}" \
     "$WEBP_LIB" \
     -o "$OUT"

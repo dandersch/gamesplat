@@ -68,12 +68,10 @@ struct Renderer {
     sg_pipeline     wireframe_pipeline;
     sg_pipeline     mesh_pipeline;
     sg_sampler      overlay_sampler;
-    // Gaussian data is stored in an RGBA32F texture (16 texels per gaussian)
-    // instead of a storage buffer; this keeps the splat shader compatible with
-    // GLES3 / WebGL2 which has no SSBOs. Layout matches GpuGaussian byte-for-byte.
-    sg_image        gaussian_texture;
-    sg_view         gaussian_texture_view;
-    sg_sampler      gaussian_sampler;
+    // Gaussian data is stored in a readonly storage buffer. Layout matches
+    // GpuGaussian byte-for-byte.
+    sg_buffer       gaussian_buffer;
+    sg_view         gaussian_buffer_view;
     sg_sampler      accum_sampler;
     uint32_t        gaussian_tex_w;
     uint32_t        gaussian_tex_h;
@@ -121,6 +119,11 @@ bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
 // the embedded shader headers and the app code DLL was reloaded.
 bool renderer_reload_shaders(Renderer* r);
 void renderer_reset_stochastic_accumulation(Renderer* r);
+sg_pixel_format renderer_default_color_format(void);
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_desc* desc);
+void renderer_wgpu_shutdown(void);
+#endif
 // map_cam is reserved for the top-down overlay; the two-pass map_cam path is
 // temporarily disabled in the sokol port (see TODO in renderer.cpp).
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, const SplatEffectParams* splat_effect = NULL, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);
