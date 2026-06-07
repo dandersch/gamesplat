@@ -1,0 +1,32 @@
+#pragma once
+
+#define LOG_ENTRIES \
+LOG_ENTRY(SEVERITY,  INFO,      (1<< 0),    "[INFO ]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SEVERITY,  WARN,      (1<< 1),    "[WARN ]",     LOG_COLOR_YELLOW  )\
+LOG_ENTRY(SEVERITY,  ERROR,     (1<< 2),    "[ERROR]",     LOG_COLOR_RED     )\
+LOG_ENTRY(SUBSYSTEM, APP,       (1<< 4),    "[APP  ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, PLATFORM,  (1<< 5),    "[PLAT ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, RENDERER,  (1<< 6),    "[RENDR]",     LOG_COLOR_PURPLE  )\
+LOG_ENTRY(SUBSYSTEM, WEBGPU,    (1<< 7),    "[WGPU ]",     LOG_COLOR_PURPLE  )\
+LOG_ENTRY(SUBSYSTEM, GAUSSIAN,  (1<< 8),    "[GAUSS]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SUBSYSTEM, MESH,      (1<< 9),    "[MESH ]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SUBSYSTEM, COLMAP,    (1<<10),    "[COLMP]",     LOG_COLOR_BLUE    )\
+LOG_ENTRY(SUBSYSTEM, REFVIEW,   (1<<11),    "[REFVW]",     LOG_COLOR_BLUE    )\
+LOG_ENTRY(SUBSYSTEM, HOTSPOT,   (1<<12),    "[HOTSP]",     LOG_COLOR_YELLOW  )\
+LOG_ENTRY(SUBSYSTEM, CAMERA,    (1<<13),    "[CAM  ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, UI,        (1<<14),    "[UI   ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  INIT,      (1<<15),    "[INIT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SHUTDOWN,  (1<<16),    "[QUIT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  LOAD,      (1<<17),    "[LOAD ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  PARSE,     (1<<18),    "[PARSE]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  IO,        (1<<19),    "[IO   ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  GPU,       (1<<20),    "[GPU  ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SHADER,    (1<<21),    "[SHADR]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  RESOURCE,  (1<<22),    "[RESRC]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  FRAME,     (1<<23),    "[FRAME]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  INPUT,     (1<<24),    "[INPUT]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  NAV,       (1<<25),    "[NAV  ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  CULL,      (1<<26),    "[CULL ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SORT,      (1<<27),    "[SORT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  ANIM,      (1<<28),    "[ANIM ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  DEBUG,     (1<<29),    "[DEBUG]",     LOG_COLOR_GRAY    )
