@@ -59,16 +59,16 @@ static bool binary_model_exists(const char* dir) {
 }
 
 static void log_binary_unsupported(const char* dir) {
-    SDL_Log("COLMAP: Found binary model at %s, but only text models are supported", dir);
-    SDL_Log("COLMAP: Convert it with:");
-    SDL_Log("  colmap model_converter --input_path %s --output_path %s --output_type TXT", dir, dir);
+    LOG(WARN|COLMAP|LOAD, "Found binary model at %s, but only text models are supported", dir);
+    LOG(INFO|COLMAP|LOAD, "Convert it with:");
+    LOG(INFO|COLMAP|LOAD, "  colmap model_converter --input_path %s --output_path %s --output_type TXT", dir, dir);
 }
 
 static bool try_model_candidate(ColmapPaths* out, const char* model_dir, const char* root_dir) {
     if (text_model_exists(model_dir)) {
         copy_string(out->model_dir, sizeof(out->model_dir), model_dir);
         copy_string(out->root_dir, sizeof(out->root_dir), root_dir);
-        SDL_Log("COLMAP: model directory: %s", out->model_dir);
+        LOG(INFO|COLMAP|LOAD, "model directory: %s", out->model_dir);
         return true;
     }
     if (binary_model_exists(model_dir)) {
@@ -144,7 +144,7 @@ static void resolve_image_dir(ColmapPaths* out, const char* input_path) {
     char first_image[256];
     if (!read_first_image_name(first_image, sizeof(first_image), out->model_dir)) {
         join_path(out->image_dir, sizeof(out->image_dir), out->root_dir, "images");
-        SDL_Log("COLMAP: Could not read first image name; using image directory: %s", out->image_dir);
+        LOG(WARN|COLMAP|LOAD, "Could not read first image name; using image directory: %s", out->image_dir);
         return;
     }
 
@@ -165,13 +165,13 @@ static void resolve_image_dir(ColmapPaths* out, const char* input_path) {
     for (int i = 0; i < 6; i++) {
         if (image_exists_under(candidates[i], first_image)) {
             copy_string(out->image_dir, sizeof(out->image_dir), candidates[i]);
-            SDL_Log("COLMAP: image directory: %s", out->image_dir);
+            LOG(INFO|COLMAP|LOAD, "image directory: %s", out->image_dir);
             return;
         }
     }
 
     join_path(out->image_dir, sizeof(out->image_dir), out->root_dir, "images");
-    SDL_Log("COLMAP: Could not verify image directory using %s; using %s", first_image, out->image_dir);
+    LOG(WARN|COLMAP|LOAD, "Could not verify image directory using %s; using %s", first_image, out->image_dir);
 }
 
 static void resolve_database_path(ColmapPaths* out, const char* input_path) {
@@ -199,12 +199,12 @@ static void resolve_database_path(ColmapPaths* out, const char* input_path) {
     for (int i = 0; i < 8; i++) {
         if (file_exists(candidates[i])) {
             copy_string(out->database_path, sizeof(out->database_path), candidates[i]);
-            SDL_Log("COLMAP: database: %s", out->database_path);
+            LOG(INFO|COLMAP|LOAD, "database: %s", out->database_path);
             return;
         }
     }
 
-    SDL_Log("COLMAP: No database.db found; covisibility will fall back to distance-based neighbors");
+    LOG(WARN|COLMAP|LOAD, "No database.db found; covisibility will fall back to distance-based neighbors");
 }
 
 bool colmap_resolve_paths(ColmapPaths* out, const char* input_path) {
@@ -218,8 +218,8 @@ bool colmap_resolve_paths(ColmapPaths* out, const char* input_path) {
             join_path(candidate, sizeof(candidate), input_path, "sparse");
             if (!try_model_candidate(out, candidate, input_path)) {
                 if (!find_first_numeric_sparse_model(out, input_path)) {
-                    SDL_Log("COLMAP: Could not find supported text model under %s", input_path);
-                    SDL_Log("COLMAP: Expected images.txt and cameras.txt in one of: path, path/sparse/0, path/sparse, path/sparse/<number>");
+                    LOG(ERROR|COLMAP|LOAD, "Could not find supported text model under %s", input_path);
+                    LOG(INFO|COLMAP|LOAD, "Expected images.txt and cameras.txt in one of: path, path/sparse/0, path/sparse, path/sparse/<number>");
                     return false;
                 }
             }
@@ -280,7 +280,7 @@ bool colmap_load_images_txt(ColmapImageSet* out, const char* model_dir) {
 
     FILE* f = fopen(images_txt, "r");
     if (!f) {
-        SDL_Log("COLMAP: Could not open %s", images_txt);
+        LOG(ERROR|COLMAP|IO, "Could not open %s", images_txt);
         return false;
     }
 
@@ -293,7 +293,7 @@ bool colmap_load_images_txt(ColmapImageSet* out, const char* model_dir) {
     }
 
     if (count == 0) {
-        SDL_Log("COLMAP: No images found in %s", images_txt);
+        LOG(ERROR|COLMAP|PARSE, "No images found in %s", images_txt);
         fclose(f);
         return false;
     }
@@ -312,7 +312,7 @@ bool colmap_load_images_txt(ColmapImageSet* out, const char* model_dir) {
         int parsed = sscanf(line, "%d %f %f %f %f %f %f %f %d %255s",
                             &image_id, &qw, &qx, &qy, &qz, &tx, &ty, &tz, &camera_id, name);
         if (parsed < 10) {
-            SDL_Log("COLMAP: Failed to parse line: %s", line);
+            LOG(WARN|COLMAP|PARSE, "Failed to parse line: %s", line);
             skip_line(f);
             continue;
         }
@@ -331,7 +331,7 @@ bool colmap_load_images_txt(ColmapImageSet* out, const char* model_dir) {
     out->count = idx;
     fclose(f);
 
-    SDL_Log("COLMAP: Loaded %u camera poses from %s", out->count, images_txt);
+    LOG(INFO|COLMAP|LOAD, "Loaded %u camera poses from %s", out->count, images_txt);
     return true;
 }
 
@@ -345,13 +345,13 @@ bool colmap_load_covisibility(ColmapCovisibility* out, const char* database_path
 
 #if !defined(__EMSCRIPTEN__)
     if (!database_path || !database_path[0]) {
-        SDL_Log("COLMAP: No database path; covisibility unavailable");
+        LOG(WARN|COLMAP|LOAD, "No database path; covisibility unavailable");
         return false;
     }
 
     sqlite3* db = NULL;
     if (sqlite3_open_v2(database_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        SDL_Log("COLMAP: Could not open %s (%s)", database_path, db ? sqlite3_errmsg(db) : "unknown error");
+        LOG(ERROR|COLMAP|IO, "Could not open %s (%s)", database_path, db ? sqlite3_errmsg(db) : "unknown error");
         if (db) sqlite3_close(db);
         return false;
     }
@@ -359,7 +359,7 @@ bool colmap_load_covisibility(ColmapCovisibility* out, const char* database_path
     const char* sql = "SELECT pair_id, rows FROM two_view_geometries WHERE config = 2 AND rows > 0";
     sqlite3_stmt* stmt = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        SDL_Log("COLMAP: SQL error: %s", sqlite3_errmsg(db));
+        LOG(ERROR|COLMAP|IO, "SQL error: %s", sqlite3_errmsg(db));
         sqlite3_close(db);
         return false;
     }
@@ -385,7 +385,7 @@ bool colmap_load_covisibility(ColmapCovisibility* out, const char* database_path
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 
-    SDL_Log("COLMAP: Loaded %u covisibility edges from %s", out->count, database_path);
+    LOG(INFO|COLMAP|LOAD, "Loaded %u covisibility edges from %s", out->count, database_path);
     return true;
 #else
     (void)database_path;

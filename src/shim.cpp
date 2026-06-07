@@ -7,6 +7,10 @@
 #include <cstdlib>
 #include <sys/stat.h>
 
+#include "log_entries.h"
+#include "log.h"
+int log_verbosity_level = LOG_EVERYTHING;
+
 /*
     Minimal SDL callback hot-reload shim
     ===================================
@@ -241,13 +245,13 @@ static bool code_copy_for_loading(const CodeTimestamp* timestamp, char* out_path
 
     FILE* src = fopen(GSPLAT_CODE_PATH, "rb");
     if (!src) {
-        fprintf(stderr, "shim: fopen(%s) failed\n", GSPLAT_CODE_PATH);
+        LOG(ERROR|APP|IO, "shim: fopen(%s) failed", GSPLAT_CODE_PATH);
         return false;
     }
 
     FILE* dst = fopen(out_path, "wb");
     if (!dst) {
-        fprintf(stderr, "shim: fopen(%s) failed\n", out_path);
+        LOG(ERROR|APP|IO, "shim: fopen(%s) failed", out_path);
         fclose(src);
         return false;
     }
@@ -270,7 +274,7 @@ static bool code_copy_for_loading(const CodeTimestamp* timestamp, char* out_path
     fclose(src);
 
     if (!ok) {
-        fprintf(stderr, "shim: copy %s -> %s failed\n", GSPLAT_CODE_PATH, out_path);
+        LOG(ERROR|APP|IO, "shim: copy %s -> %s failed", GSPLAT_CODE_PATH, out_path);
         remove(out_path);
     }
     return ok;
@@ -284,7 +288,7 @@ static bool code_load(CodeApi* out, const CodeTimestamp* timestamp) {
 
     api.handle = SDL_LoadObject(api.loaded_path);
     if (!api.handle) {
-        fprintf(stderr, "shim: SDL_LoadObject(%s) failed: %s\n", api.loaded_path, SDL_GetError());
+        LOG(ERROR|APP|LOAD, "shim: SDL_LoadObject(%s) failed: %s", api.loaded_path, SDL_GetError());
         remove(api.loaded_path);
         return false;
     }
@@ -301,7 +305,7 @@ static bool code_load(CodeApi* out, const CodeTimestamp* timestamp) {
     api.simgui_state_load = (void (*)(const void*, size_t))SDL_LoadFunction(api.handle, "gsplat_simgui_state_load");
 
     if (!api.app_init || !api.app_event || !api.app_iterate || !api.app_quit) {
-        fprintf(stderr, "shim: %s is missing one or more SDL_App* exports\n", api.loaded_path);
+        LOG(ERROR|APP|LOAD, "shim: %s is missing one or more SDL_App* exports", api.loaded_path);
         SDL_UnloadObject(api.handle);
         remove(api.loaded_path);
         return false;
@@ -337,7 +341,7 @@ int main(int argc, char** argv) {
             RuntimeSnapshot snapshot = {};
             if (code.handle) {
                 if (!snapshot_capture(&code, &snapshot)) {
-                    fprintf(stderr, "shim: failed to capture runtime state before reload\n");
+                    LOG(ERROR|APP|RESOURCE, "shim: failed to capture runtime state before reload");
                     result = SDL_APP_FAILURE;
                     break;
                 }
@@ -354,7 +358,7 @@ int main(int argc, char** argv) {
                 SDL_AppResult init_result = next.app_init(&appstate, argc, argv);
                 if (init_result == SDL_APP_CONTINUE) {
                     code = next;
-                    fprintf(stderr, "shim: loaded %s from %s\n", code.loaded_path, GSPLAT_CODE_PATH);
+                    LOG(INFO|APP|LOAD, "shim: loaded %s from %s", code.loaded_path, GSPLAT_CODE_PATH);
                     has_pending_timestamp = false;
                 } else {
                     SDL_UnloadObject(next.handle);

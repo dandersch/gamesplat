@@ -199,7 +199,7 @@ void hotspot_load_for_set(RefViewSet *set) {
                             b->type = HOTSPOT_SHAPE_POLYGON;
                             has_type = true;
                           } else {
-                            SDL_Log("Hotspot: unknown shape.type \"%s\", "
+                            LOG(WARN|HOTSPOT|PARSE, "Hotspot: unknown shape.type \"%s\", "
                                     "dropping hotspot",
                                     type);
                             b->valid = false;
@@ -265,17 +265,17 @@ void hotspot_load_for_set(RefViewSet *set) {
                       if (r.error)
                         goto parse_sidecar_fail;
                       if (!has_type) {
-                        SDL_Log("Hotspot: shape missing 'type'");
+                        LOG(WARN|HOTSPOT|PARSE, "Hotspot: shape missing 'type'");
                         b->valid = false;
                       }
                       if (b->type == HOTSPOT_SHAPE_POLYGON) {
                         if (!has_points) {
-                          SDL_Log("Hotspot: polygon missing 'points'");
+                          LOG(WARN|HOTSPOT|PARSE, "Hotspot: polygon missing 'points'");
                           b->valid = false;
                         }
                         if (b->point_count < 3) {
                           if (b->valid)
-                            SDL_Log("Hotspot: polygon has %u points (need >= "
+                            LOG(WARN|HOTSPOT|PARSE, "Hotspot: polygon has %u points (need >= "
                                     "3), dropping",
                                     b->point_count);
                           b->valid = false;
@@ -309,7 +309,7 @@ void hotspot_load_for_set(RefViewSet *set) {
                             b->action_type = HOTSPOT_ACTION_INSPECT;
                             has_type = true;
                           } else {
-                            SDL_Log("Hotspot: unknown action.type \"%s\", "
+                            LOG(WARN|HOTSPOT|PARSE, "Hotspot: unknown action.type \"%s\", "
                                     "dropping hotspot",
                                     type);
                             b->valid = false;
@@ -356,14 +356,14 @@ void hotspot_load_for_set(RefViewSet *set) {
                               if (r.error)
                                 goto parse_sidecar_fail;
                               if (!has_position) {
-                                SDL_Log("Hotspot: inspect target missing "
+                                LOG(WARN|HOTSPOT|PARSE, "Hotspot: inspect target missing "
                                         "'position'");
                                 b->valid = false;
                               }
                             }
                             has_target = true;
                           } else {
-                            SDL_Log("Hotspot: action.target must be string or "
+                            LOG(WARN|HOTSPOT|PARSE, "Hotspot: action.target must be string or "
                                     "object");
                             b->valid = false;
                           }
@@ -372,11 +372,11 @@ void hotspot_load_for_set(RefViewSet *set) {
                       if (r.error)
                         goto parse_sidecar_fail;
                       if (!has_type) {
-                        SDL_Log("Hotspot: action missing 'type'");
+                        LOG(WARN|HOTSPOT|PARSE, "Hotspot: action missing 'type'");
                         b->valid = false;
                       }
                       if (!has_target) {
-                        SDL_Log("Hotspot: action missing 'target'");
+                        LOG(WARN|HOTSPOT|PARSE, "Hotspot: action missing 'target'");
                         b->valid = false;
                       }
                     }
@@ -386,7 +386,7 @@ void hotspot_load_for_set(RefViewSet *set) {
                 if (r.error)
                   goto parse_sidecar_fail;
                 if (!has_shape || !has_action) {
-                  SDL_Log("Hotspot: entry missing shape or action");
+                  LOG(WARN|HOTSPOT|PARSE, "Hotspot: entry missing shape or action");
                   b->valid = false;
                 }
               }
@@ -401,11 +401,11 @@ void hotspot_load_for_set(RefViewSet *set) {
           goto parse_sidecar_fail;
 
         if (!have_version) {
-          SDL_Log("Hotspot [%s]: missing 'version' field", sidecar);
+          LOG(ERROR|HOTSPOT|PARSE, "Hotspot [%s]: missing 'version' field", sidecar);
           goto parse_sidecar_fail;
         }
         if (version != 1) {
-          SDL_Log("Hotspot [%s]: unsupported version %d (only 1 supported)",
+          LOG(ERROR|HOTSPOT|PARSE, "Hotspot [%s]: unsupported version %d (only 1 supported)",
                   sidecar, version);
           goto parse_sidecar_fail;
         }
@@ -415,7 +415,7 @@ void hotspot_load_for_set(RefViewSet *set) {
       parse_sidecar_fail:
         if (!ok) {
           if (r.error) {
-            SDL_Log("Hotspot [%s]: parse error at byte %d: %s", sidecar,
+            LOG(ERROR|HOTSPOT|PARSE, "Hotspot [%s]: parse error at byte %d: %s", sidecar,
                     sjp_error_offset(&r), r.error ? r.error : "?");
           }
           if (builds) {
@@ -446,7 +446,7 @@ void hotspot_load_for_set(RefViewSet *set) {
 
         if (strcmp(image_field, my_base) != 0 &&
             strcmp(image_field, v->image_name) != 0) {
-          SDL_Log("Hotspot [%s]: image field \"%s\" does not match view "
+          LOG(WARN|HOTSPOT|PARSE, "Hotspot [%s]: image field \"%s\" does not match view "
                   "\"%s\", skipping",
                   sidecar, image_field, v->image_name);
           for (uint32_t i = 0; i < bcount; i++)
@@ -482,7 +482,7 @@ void hotspot_load_for_set(RefViewSet *set) {
           }
 
           if (target < 0) {
-            SDL_Log(
+            LOG(WARN|HOTSPOT|PARSE,
                 "Hotspot [%s]: warp target \"%s\" not found, dropping hotspot",
                 sidecar, b->warp_target);
             build_free(b);
@@ -519,7 +519,7 @@ void hotspot_load_for_set(RefViewSet *set) {
 
       if (fcount == 0) {
         free(finals);
-        SDL_Log("Hotspot [%s]: no valid hotspots after parse", sidecar);
+        LOG(WARN|HOTSPOT|PARSE, "Hotspot [%s]: no valid hotspots after parse", sidecar);
         continue;
       }
 
@@ -532,11 +532,11 @@ void hotspot_load_for_set(RefViewSet *set) {
 
       v->hotspots = finals;
       v->hotspot_count = fcount;
-      SDL_Log("Hotspot [%s]: loaded %u hotspot(s)", sidecar, fcount);
+      LOG(INFO|HOTSPOT|LOAD, "Hotspot [%s]: loaded %u hotspot(s)", sidecar, fcount);
       total += v->hotspot_count;
     }
   }
-  SDL_Log("Hotspot: %u hotspot(s) across %u view(s)", total, set->count);
+  LOG(INFO|HOTSPOT|LOAD, "Hotspot: %u hotspot(s) across %u view(s)", total, set->count);
 }
 
 int32_t hotspot_pick(const RefView *view, float u, float v) {

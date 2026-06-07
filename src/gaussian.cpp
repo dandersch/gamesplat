@@ -289,7 +289,7 @@ static bool parse_sog_meta(const char* buf, size_t len, SogMeta* meta) {
     return true;
 
 fail:
-    fprintf(stderr, "SOG: meta.json parse error at byte %d: %s\n", sjp_error_offset(&r), r.error ? r.error : "unknown error");
+    LOG(ERROR|GAUSSIAN|PARSE, "SOG: meta.json parse error at byte %d: %s", sjp_error_offset(&r), r.error ? r.error : "unknown error");
     return false;
 }
 
@@ -301,7 +301,7 @@ static bool validate_sog_meta_files(SogArchiveFile* files, int file_count, const
     for (int i = 0; i < (int)(sizeof(required) / sizeof(required[0])); i++) {
         SogArchiveFile* f = find_sog_archive_file(files, file_count, required[i]);
         if (!f || !f->data) {
-            fprintf(stderr, "SOG: archive missing file referenced by meta.json: %s\n", required[i]);
+            LOG(ERROR|GAUSSIAN|PARSE, "SOG: archive missing file referenced by meta.json: %s", required[i]);
             return false;
         }
     }
@@ -309,7 +309,7 @@ static bool validate_sog_meta_files(SogArchiveFile* files, int file_count, const
         for (int i = 0; i < 2; i++) {
             SogArchiveFile* f = find_sog_archive_file(files, file_count, meta->shN_files[i]);
             if (!f || !f->data) {
-                fprintf(stderr, "SOG: archive missing file referenced by meta.json: %s\n", meta->shN_files[i]);
+                LOG(ERROR|GAUSSIAN|PARSE, "SOG: archive missing file referenced by meta.json: %s", meta->shN_files[i]);
                 return false;
             }
         }
@@ -321,7 +321,7 @@ static bool load_sog_image(SogArchiveFile* files, int file_count, const char* na
     *out = {};
     SogArchiveFile* file = find_sog_archive_file(files, file_count, name);
     if (!file || !file->data) {
-        fprintf(stderr, "SOG: missing image file: %s\n", name);
+        LOG(ERROR|GAUSSIAN|LOAD, "SOG: missing image file: %s", name);
         return false;
     }
 
@@ -331,12 +331,12 @@ static bool load_sog_image(SogArchiveFile* files, int file_count, const char* na
     // loader synchronous and avoids browser color-management surprises.
     int w = 0, h = 0;
     if (!WebPGetInfo((const uint8_t*)file->data, file->size, &w, &h) || w <= 0 || h <= 0) {
-        fprintf(stderr, "SOG: invalid WebP image: %s\n", name);
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: invalid WebP image: %s", name);
         return false;
     }
     uint8_t* rgba = WebPDecodeRGBA((const uint8_t*)file->data, file->size, &w, &h);
     if (!rgba) {
-        fprintf(stderr, "SOG: failed to decode WebP image: %s\n", name);
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: failed to decode WebP image: %s", name);
         return false;
     }
     out->pixels = rgba;
@@ -369,11 +369,11 @@ static bool validate_sog_base_images(const SogMeta* meta,
         scales->width != w || scales->height != h ||
         quats->width != w || quats->height != h ||
         sh0->width != w || sh0->height != h) {
-        fprintf(stderr, "SOG: per-gaussian image dimensions do not match\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: per-gaussian image dimensions do not match");
         return false;
     }
     if ((uint64_t)meta->count > (uint64_t)w * (uint64_t)h) {
-        fprintf(stderr, "SOG: gaussian count exceeds image capacity\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: gaussian count exceeds image capacity");
         return false;
     }
     return true;
@@ -397,7 +397,7 @@ static bool decode_sog_shN(SogArchiveFile* files, int file_count, const SogMeta*
     int expected_w = 0;
     int expected_h = 0;
     if (coeff_count <= 0) {
-        fprintf(stderr, "SOG: unsupported shN band count %d\n", meta->shN_bands);
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: unsupported shN band count %d", meta->shN_bands);
         return false;
     }
 
@@ -405,15 +405,15 @@ static bool decode_sog_shN(SogArchiveFile* files, int file_count, const SogMeta*
     if (!load_sog_image(files, file_count, meta->shN_files[1], &labels)) goto done;
 
     if ((uint64_t)meta->count > (uint64_t)labels.width * (uint64_t)labels.height) {
-        fprintf(stderr, "SOG: shN label image is too small for gaussian count\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: shN label image is too small for gaussian count");
         goto done;
     }
 
     expected_w = 64 * coeff_count;
     expected_h = (meta->shN_count + 63) / 64;
     if (centroids.width < expected_w || centroids.height < expected_h) {
-        fprintf(stderr, "SOG: shN centroid image is too small (got %dx%d, need at least %dx%d)\n",
-                centroids.width, centroids.height, expected_w, expected_h);
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: shN centroid image is too small (got %dx%d, need at least %dx%d)",
+            centroids.width, centroids.height, expected_w, expected_h);
         goto done;
     }
 
@@ -421,7 +421,7 @@ static bool decode_sog_shN(SogArchiveFile* files, int file_count, const SogMeta*
         const uint8_t* label_px = labels.pixels + (size_t)i * 4;
         uint32_t label = (uint32_t)label_px[0] | ((uint32_t)label_px[1] << 8);
         if (label >= (uint32_t)meta->shN_count) {
-            fprintf(stderr, "SOG: shN label %u out of range at gaussian %u\n", label, i);
+            LOG(ERROR|GAUSSIAN|PARSE, "SOG: shN label %u out of range at gaussian %u", label, i);
             goto done;
         }
 
@@ -481,7 +481,7 @@ static bool decode_sog_sh0_scene(SogArchiveFile* files, int file_count, const So
         float c = sog_quat_component(qt[2]);
         int mode = (int)qt[3] - 252;
         if (mode < 0 || mode > 3) {
-            fprintf(stderr, "SOG: invalid quaternion mode %u at gaussian %u\n", qt[3], i);
+            LOG(ERROR|GAUSSIAN|PARSE, "SOG: invalid quaternion mode %u at gaussian %u", qt[3], i);
             free_scene(scene);
             goto done;
         }
@@ -523,7 +523,7 @@ static bool load_sog(const char* path, GaussianScene* scene) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, path, 0)) {
-        fprintf(stderr, "SOG: failed to open zip archive: %s\n", path);
+        LOG(ERROR|GAUSSIAN|IO, "SOG: failed to open zip archive: %s", path);
         return false;
     }
 
@@ -539,7 +539,7 @@ static bool load_sog(const char* path, GaussianScene* scene) {
     for (mz_uint i = 0; i < zip_file_count; i++) {
         mz_zip_archive_file_stat stat;
         if (!mz_zip_reader_file_stat(&zip, i, &stat)) {
-            fprintf(stderr, "SOG: failed to stat archive entry %u\n", i);
+            LOG(ERROR|GAUSSIAN|IO, "SOG: failed to stat archive entry %u", i);
             ok = false;
             break;
         }
@@ -550,7 +550,7 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         snprintf(files[file_count].name, sizeof(files[file_count].name), "%s", stat.m_filename);
         files[file_count].data = mz_zip_reader_extract_to_heap(&zip, i, &files[file_count].size, 0);
         if (!files[file_count].data) {
-            fprintf(stderr, "SOG: failed to extract file: %s\n", files[file_count].name);
+            LOG(ERROR|GAUSSIAN|IO, "SOG: failed to extract file: %s", files[file_count].name);
             ok = false;
             break;
         }
@@ -564,15 +564,15 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         return false;
     }
 
-    fprintf(stderr, "SOG: extracted bundled archive files from %s\n", path);
+    LOG(INFO|GAUSSIAN|LOAD, "SOG: extracted bundled archive files from %s", path);
     for (int i = 0; i < file_count; i++) {
-        if (files[i].data) fprintf(stderr, "SOG:   %s (%zu bytes)\n", files[i].name, files[i].size);
+        if (files[i].data) LOG(INFO|GAUSSIAN|LOAD, "SOG:   %s (%zu bytes)", files[i].name, files[i].size);
     }
 
     SogMeta meta;
     SogArchiveFile* meta_file = find_sog_archive_file(files, file_count, "meta.json");
     if (!meta_file || !meta_file->data) {
-        fprintf(stderr, "SOG: archive missing required file: meta.json\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "SOG: archive missing required file: meta.json");
         free_sog_archive_files(files, file_count);
         free(files);
         return false;
@@ -588,10 +588,12 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         return false;
     }
 
-    fprintf(stderr, "SOG: meta version %d, %u gaussians, shN %s",
-            meta.version, meta.count, meta.has_shN ? "present" : "absent");
-    if (meta.has_shN) fprintf(stderr, " (bands=%d, count=%d)", meta.shN_bands, meta.shN_count);
-    fprintf(stderr, "\n");
+    if (meta.has_shN) {
+        LOG(INFO|GAUSSIAN|PARSE, "SOG: meta version %d, %u gaussians, shN present (bands=%d, count=%d)",
+            meta.version, meta.count, meta.shN_bands, meta.shN_count);
+    } else {
+        LOG(INFO|GAUSSIAN|PARSE, "SOG: meta version %d, %u gaussians, shN absent", meta.version, meta.count);
+    }
 
     if (!decode_sog_sh0_scene(files, file_count, &meta, scene)) {
         free_sog_archive_files(files, file_count);
@@ -599,8 +601,8 @@ static bool load_sog(const char* path, GaussianScene* scene) {
         return false;
     }
 
-    fprintf(stderr, "SOG: decoded %u gaussians (SH degree %d)\n",
-            meta.count, meta.has_shN ? meta.shN_bands : 0);
+    LOG(INFO|GAUSSIAN|LOAD, "SOG: decoded %u gaussians (SH degree %d)",
+        meta.count, meta.has_shN ? meta.shN_bands : 0);
 
     free_sog_archive_files(files, file_count);
     free(files);
@@ -615,7 +617,7 @@ struct PlyProperty {
 
 bool load_ply(const char* path, GaussianScene* scene) {
     FILE* f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "Failed to open %s\n", path); return false; }
+    if (!f) { LOG(ERROR|GAUSSIAN|IO, "Failed to open %s", path); return false; }
 
     // Parse header
     char line[512];
@@ -635,7 +637,7 @@ bool load_ply(const char* path, GaussianScene* scene) {
 
         if (strncmp(line, "format ", 7) == 0) {
             if (strstr(line, "binary_little_endian") == NULL) {
-                fprintf(stderr, "Only binary_little_endian PLY supported\n");
+                LOG(ERROR|GAUSSIAN|PARSE, "Only binary_little_endian PLY supported");
                 fclose(f); return false;
             }
         }
@@ -676,12 +678,12 @@ bool load_ply(const char* path, GaussianScene* scene) {
     }
 
     if (!header_done || vertex_count == 0) {
-        fprintf(stderr, "Invalid PLY header\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "Invalid PLY header");
         fclose(f); return false;
     }
 
     int stride = current_offset;
-    fprintf(stderr, "PLY: %u vertices, stride %d bytes, %d properties\n", vertex_count, stride, prop_count);
+    LOG(INFO|GAUSSIAN|PARSE, "PLY: %u vertices, stride %d bytes, %d properties", vertex_count, stride, prop_count);
 
     // Find property offsets
     auto find_prop = [&](const char* name) -> int {
@@ -709,7 +711,7 @@ bool load_ply(const char* path, GaussianScene* scene) {
     }
 
     if (off_x < 0 || off_y < 0 || off_z < 0) {
-        fprintf(stderr, "Missing position properties\n");
+        LOG(ERROR|GAUSSIAN|PARSE, "Missing position properties");
         fclose(f); return false;
     }
 
@@ -719,7 +721,7 @@ bool load_ply(const char* path, GaussianScene* scene) {
     size_t read = fread(raw, stride, vertex_count, f);
     fclose(f);
     if (read != vertex_count) {
-        fprintf(stderr, "Short read: got %zu of %u vertices\n", read, vertex_count);
+        LOG(ERROR|GAUSSIAN|IO, "Short read: got %zu of %u vertices", read, vertex_count);
         free(raw); return false;
     }
 
@@ -794,9 +796,9 @@ bool load_ply(const char* path, GaussianScene* scene) {
         }
     }
 
-    fprintf(stderr, "PLY: found %d/45 f_rest_* coefficients (SH degree %s)\n",
-            rest_count,
-            rest_count >= 45 ? "3" : rest_count >= 24 ? "2" : rest_count >= 9 ? "1" : "0");
+    LOG(INFO|GAUSSIAN|PARSE, "PLY: found %d/45 f_rest_* coefficients (SH degree %s)",
+        rest_count,
+        rest_count >= 45 ? "3" : rest_count >= 24 ? "2" : rest_count >= 9 ? "1" : "0");
 
     free(raw);
 
@@ -820,7 +822,7 @@ bool load_gaussian_scene(const char* path, GaussianScene* scene) {
         return load_sog(path, scene);
     }
 
-    fprintf(stderr, "Unsupported gaussian scene format: %s\n", path);
+    LOG(ERROR|GAUSSIAN|LOAD, "Unsupported gaussian scene format: %s", path);
     return false;
 }
 

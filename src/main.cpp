@@ -20,6 +20,10 @@
 #include "profiler.h"
 #include "maths.h"
 
+#include "log_entries.h"
+#include "log.h"
+int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
+
 #include "camera.cpp"
 #include "gaussian.cpp"
 #include "mesh.cpp"
@@ -197,7 +201,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     colmap_dir  = colmap_dir  ? colmap_dir  : "res/colmap";
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        LOG(ERROR|PLATFORM|INIT, "SDL_Init failed: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
@@ -221,14 +225,14 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 #endif
     );
     if (!state->window) {
-        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        LOG(ERROR|PLATFORM|INIT, "SDL_CreateWindow failed: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
 #if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
     state->gl_context = SDL_GL_CreateContext(state->window);
     if (!state->gl_context) {
-        fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        LOG(ERROR|PLATFORM|INIT, "SDL_GL_CreateContext failed: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
     SDL_GL_MakeCurrent(state->window, state->gl_context);
@@ -244,13 +248,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     int initial_w = 0, initial_h = 0;
     SDL_GetWindowSize(state->window, &initial_w, &initial_h);
     if (!renderer_wgpu_setup("#canvas", initial_w, initial_h, &sgd)) {
-        fprintf(stderr, "WebGPU setup failed\n");
+        LOG(ERROR|WEBGPU|INIT, "WebGPU setup failed");
         return SDL_APP_FAILURE;
     }
 #endif
     sg_setup(&sgd);
     if (!sg_isvalid()) {
-        fprintf(stderr, "sg_setup failed\n");
+        LOG(ERROR|RENDERER|INIT, "sg_setup failed");
         return SDL_APP_FAILURE;
     }
     state->sg_setup_done = true;
@@ -279,7 +283,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     // Renderer (no more SDL_GPUDevice; sokol_gfx is set up globally).
     state->renderer_started = true;
     if (!renderer_init(&state->renderer, state->window)) {
-        fprintf(stderr, "Renderer init failed\n");
+        LOG(ERROR|RENDERER|INIT, "Renderer init failed");
         return SDL_APP_FAILURE;
     }
 

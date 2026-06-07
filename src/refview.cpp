@@ -18,12 +18,12 @@ bool refview_load(RefViewSet* set, const ColmapImageSet* images, const char* ima
     set->use_covisibility = false;
 
     if (!images || images->count == 0) {
-        SDL_Log("RefView: No COLMAP images to load");
+        LOG(ERROR|REFVIEW|LOAD, "No COLMAP images to load");
         return false;
     }
 
     snprintf(set->image_dir, sizeof(set->image_dir), "%s", image_dir ? image_dir : "");
-    SDL_Log("RefView: image directory: %s", set->image_dir);
+    LOG(INFO|REFVIEW|LOAD, "image directory: %s", set->image_dir);
 
     set->views = (RefView*)calloc(images->count, sizeof(RefView));
     set->count = images->count;
@@ -41,13 +41,13 @@ bool refview_load(RefViewSet* set, const ColmapImageSet* images, const char* ima
         v->pitch = image->pitch;
     }
 
-    SDL_Log("RefView: Loaded %u camera nodes", set->count);
+    LOG(INFO|REFVIEW|LOAD, "Loaded %u camera nodes", set->count);
     return true;
 }
 
 void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis) {
     if (!covis || covis->count == 0) {
-        SDL_Log("RefView: No covisibility data; using distance-based neighbors");
+        LOG(WARN|REFVIEW|NAV, "No covisibility data; using distance-based neighbors");
         return;
     }
 
@@ -90,7 +90,7 @@ void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis)
     set->covis_edge_count = edge_count;
     set->use_covisibility = true;
 
-    SDL_Log("RefView: Loaded %u covisibility edges", edge_count);
+    LOG(INFO|REFVIEW|NAV, "Loaded %u covisibility edges", edge_count);
 }
 
 struct ImageLoadTask {
@@ -126,7 +126,7 @@ void refview_load_images(RefViewSet* set) {
         int img_h = task.h;
 
         if (!pixels) {
-            SDL_Log("RefView: Could not load image %s (%s)", task.path, stbi_failure_reason());
+            LOG(WARN|REFVIEW|LOAD, "Could not load image %s (%s)", task.path, stbi_failure_reason());
             continue;
         }
 
@@ -146,7 +146,7 @@ void refview_load_images(RefViewSet* set) {
         v->texture = sg_make_image(&id);
         stbi_image_free(pixels);
         if (v->texture.id == 0) {
-            SDL_Log("RefView: Failed to create sg_image for %s", task.path);
+            LOG(ERROR|REFVIEW|GPU, "Failed to create sg_image for %s", task.path);
             continue;
         }
 
@@ -158,7 +158,7 @@ void refview_load_images(RefViewSet* set) {
         loaded++;
     }
 
-    SDL_Log("RefView: Loaded %u / %u images as sokol_gfx images", loaded, set->count);
+    LOG(INFO|REFVIEW|LOAD, "Loaded %u / %u images as sokol_gfx images", loaded, set->count);
 #else
     // Decode all images in parallel on separate threads. Uploads happen on
     // the main thread (sokol_gfx isn't thread-safe) but with all pixels
@@ -183,7 +183,7 @@ void refview_load_images(RefViewSet* set) {
         int img_h = tasks[i].h;
 
         if (!pixels) {
-            SDL_Log("RefView: Could not load image %s (%s)", tasks[i].path, stbi_failure_reason());
+            LOG(WARN|REFVIEW|LOAD, "Could not load image %s (%s)", tasks[i].path, stbi_failure_reason());
             continue;
         }
 
@@ -203,7 +203,7 @@ void refview_load_images(RefViewSet* set) {
         v->texture = sg_make_image(&id);
         stbi_image_free(pixels);
         if (v->texture.id == 0) {
-            SDL_Log("RefView: Failed to create sg_image for %s", tasks[i].path);
+            LOG(ERROR|REFVIEW|GPU, "Failed to create sg_image for %s", tasks[i].path);
             continue;
         }
 
@@ -218,7 +218,7 @@ void refview_load_images(RefViewSet* set) {
     free(threads);
     free(tasks);
 
-    SDL_Log("RefView: Loaded %u / %u images as sokol_gfx images", loaded, set->count);
+    LOG(INFO|REFVIEW|LOAD, "Loaded %u / %u images as sokol_gfx images", loaded, set->count);
 #endif
 }
 

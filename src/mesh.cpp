@@ -30,8 +30,8 @@ static bool mesh_load_obj(const char* obj_path, Mesh* mesh) {
     bool ok = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err,
                                obj_path, base_dir.empty() ? NULL : base_dir.c_str());
 
-    if (!warn.empty()) fprintf(stderr, "OBJ warning: %s\n", warn.c_str());
-    if (!err.empty())  fprintf(stderr, "OBJ error: %s\n", err.c_str());
+    if (!warn.empty()) LOG(WARN|MESH|PARSE, "OBJ warning: %s", warn.c_str());
+    if (!err.empty())  LOG(ERROR|MESH|PARSE, "OBJ error: %s", err.c_str());
     if (!ok) return false;
 
     // Load all material textures up front. material_to_texture[i] = texture_id
@@ -47,7 +47,7 @@ static bool mesh_load_obj(const char* obj_path, Mesh* mesh) {
         int w, h, channels;
         uint8_t* pixels = stbi_load(tex_path.c_str(), &w, &h, &channels, 4);
         if (!pixels) {
-            fprintf(stderr, "Could not load texture: %s (%s)\n", tex_path.c_str(), stbi_failure_reason());
+            LOG(WARN|MESH|LOAD, "Could not load texture: %s (%s)", tex_path.c_str(), stbi_failure_reason());
             continue;
         }
 
@@ -155,9 +155,9 @@ static bool mesh_load_obj(const char* obj_path, Mesh* mesh) {
         memcpy(mesh->textures, loaded_textures.data(), loaded_textures.size() * sizeof(MeshTexture));
     }
 
-    fprintf(stderr, "Loaded OBJ: %u verts, %u indices, %zu materials, %u textures, %u submeshes\n",
-            mesh->vertex_count, mesh->index_count, materials.size(),
-            mesh->texture_count, mesh->submesh_count);
+    LOG(INFO|MESH|LOAD, "Loaded OBJ: %u verts, %u indices, %zu materials, %u textures, %u submeshes",
+        mesh->vertex_count, mesh->index_count, materials.size(),
+        mesh->texture_count, mesh->submesh_count);
 
     return true;
 }
@@ -203,9 +203,9 @@ static bool gltf_load_image(const cgltf_image* img,
     }
 
     if (!pixels) {
-        fprintf(stderr, "Could not load glTF image '%s': %s\n",
-                img->uri ? img->uri : (img->name ? img->name : "<embedded>"),
-                stbi_failure_reason());
+        LOG(WARN|MESH|LOAD, "Could not load glTF image '%s': %s",
+            img->uri ? img->uri : (img->name ? img->name : "<embedded>"),
+            stbi_failure_reason());
         return false;
     }
 
@@ -226,20 +226,20 @@ static bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
 
     cgltf_result res = cgltf_parse_file(&options, gltf_path, &data);
     if (res != cgltf_result_success) {
-        fprintf(stderr, "glTF parse failed (%d): %s\n", (int)res, gltf_path);
+        LOG(ERROR|MESH|PARSE, "glTF parse failed (%d): %s", (int)res, gltf_path);
         return false;
     }
 
     res = cgltf_load_buffers(&options, data, gltf_path);
     if (res != cgltf_result_success) {
-        fprintf(stderr, "glTF buffer load failed (%d): %s\n", (int)res, gltf_path);
+        LOG(ERROR|MESH|LOAD, "glTF buffer load failed (%d): %s", (int)res, gltf_path);
         cgltf_free(data);
         return false;
     }
 
     res = cgltf_validate(data);
     if (res != cgltf_result_success) {
-        fprintf(stderr, "glTF validation failed (%d): %s\n", (int)res, gltf_path);
+        LOG(ERROR|MESH|PARSE, "glTF validation failed (%d): %s", (int)res, gltf_path);
         cgltf_free(data);
         return false;
     }
@@ -396,7 +396,7 @@ static bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
     mesh->index_count  = (uint32_t)indices.size();
 
     if (mesh->vertex_count == 0 || mesh->index_count == 0) {
-        fprintf(stderr, "glTF has no triangle data: %s\n", gltf_path);
+        LOG(ERROR|MESH|PARSE, "glTF has no triangle data: %s", gltf_path);
         // Free any textures we already loaded.
         for (auto& t : loaded_textures) free(t.rgba);
         cgltf_free(data);
@@ -419,9 +419,9 @@ static bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
         memcpy(mesh->textures, loaded_textures.data(), loaded_textures.size() * sizeof(MeshTexture));
     }
 
-    fprintf(stderr, "Loaded glTF: %u verts, %u indices, %zu materials, %u textures, %u submeshes\n",
-            mesh->vertex_count, mesh->index_count, data->materials_count,
-            mesh->texture_count, mesh->submesh_count);
+    LOG(INFO|MESH|LOAD, "Loaded glTF: %u verts, %u indices, %zu materials, %u textures, %u submeshes",
+        mesh->vertex_count, mesh->index_count, data->materials_count,
+        mesh->texture_count, mesh->submesh_count);
 
     cgltf_free(data);
     return true;
@@ -433,7 +433,7 @@ bool mesh_load(const char* path, Mesh* mesh) {
     // Find extension (case-insensitive).
     const char* dot = strrchr(path, '.');
     if (!dot || !dot[1]) {
-        fprintf(stderr, "Unrecognized mesh file extension: %s\n", path);
+        LOG(ERROR|MESH|LOAD, "Unrecognized mesh file extension: %s", path);
         return false;
     }
 
@@ -451,7 +451,7 @@ bool mesh_load(const char* path, Mesh* mesh) {
     } else if (strcmp(ext, "glb") == 0 || strcmp(ext, "gltf") == 0) {
         ok = mesh_load_gltf(path, mesh);
     } else {
-        fprintf(stderr, "Unrecognized mesh file extension: %s\n", path);
+        LOG(ERROR|MESH|LOAD, "Unrecognized mesh file extension: %s", path);
         return false;
     }
     if (!ok) return false;
@@ -472,9 +472,9 @@ bool mesh_load(const char* path, Mesh* mesh) {
             if (y > mesh->aabb_max[1]) mesh->aabb_max[1] = y;
             if (z > mesh->aabb_max[2]) mesh->aabb_max[2] = z;
         }
-        fprintf(stderr, "Mesh AABB: min(%.3f, %.3f, %.3f) max(%.3f, %.3f, %.3f)\n",
-                mesh->aabb_min[0], mesh->aabb_min[1], mesh->aabb_min[2],
-                mesh->aabb_max[0], mesh->aabb_max[1], mesh->aabb_max[2]);
+        LOG(INFO|MESH|LOAD, "Mesh AABB: min(%.3f, %.3f, %.3f) max(%.3f, %.3f, %.3f)",
+            mesh->aabb_min[0], mesh->aabb_min[1], mesh->aabb_min[2],
+            mesh->aabb_max[0], mesh->aabb_max[1], mesh->aabb_max[2]);
     }
     return true;
 }
