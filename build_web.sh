@@ -95,7 +95,6 @@ EM_FLAGS=(
 )
 
 PRELOAD_FLAGS=(
-    --preload-file res/transition.wav@res/transition.wav
     --preload-file res/export_n01.sog@res/export_n01.sog
 )
 

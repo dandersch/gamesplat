@@ -29,7 +29,6 @@
 #include "hotspot.cpp"
 #include "colmap.cpp"
 #include "refview.cpp"
-#include "audio.cpp"
 
 #if defined(_MSC_VER)
 #define GSPLAT_EXPORT extern "C" __declspec(dllexport)
@@ -106,8 +105,6 @@ struct AppState {
     bool           renderer_started;
     ImGuiContext*  imgui_context;
 
-    AudioState    audio;
-    Sfx           sfx_transition;
     Renderer      renderer;
     GaussianScene scene;
     bool          scene_loaded;
@@ -200,15 +197,10 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     //mesh_path   = mesh_path   ? mesh_path   : "res/cyberpunk_guy.glb";
     colmap_dir  = colmap_dir  ? colmap_dir  : "res/colmap";
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
     }
-
-    // Audio is non-fatal: if init fails (no device, etc.) sfx_play becomes a
-    // no-op via the AudioState::ready flag and the rest of the app keeps running.
-    audio_init(&state->audio);
-    sfx_load(&state->sfx_transition, "res/transition.wav");
 
 #if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
     // Request a compatible GL context for sokol_gfx's GLCORE backend. 3.3
@@ -395,7 +387,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     SDL_Window* window = state->window;
     Mesh& object = state->object;
     Examine& examine = state->examine;
-    Sfx& sfx_transition = state->sfx_transition;
     const char* object_path = state->object_path;
     bool& refviews_loaded = state->refviews_loaded;
     bool& map_view_active = state->map_view_active;
@@ -407,7 +398,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     float& node_half_size = state->node_half_size;
     float& mouse_dx = state->mouse_dx;
     float& mouse_dy = state->mouse_dy;
-    AudioState& audio = state->audio;
 
     ImGui_ImplSDL3_ProcessEvent(event);
 
@@ -536,7 +526,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             if (hotspot_idx >= 0) {
                 const Hotspot* h = &refviews.views[hotspot_view].hotspots[hotspot_idx];
                 if (h->action.type == HOTSPOT_ACTION_WARP) {
-                    sfx_play(&audio, &sfx_transition, 1.2f);
                     int32_t warp_target = h->action.warp.target_view;
                     RefView* tv = &refviews.views[warp_target];
                     float dx = tv->position[0] - cam.position[0];
@@ -555,7 +544,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                     refviews.start_pitch = cam.pitch;
                     break;
                 } else if (h->action.type == HOTSPOT_ACTION_INSPECT) {
-                    sfx_play(&audio, &sfx_transition, 1.2f);
                     const HotspotActionInspect* it = &h->action.inspect;
                     float dx = it->position[0] - cam.position[0];
                     float dy = it->position[1] - cam.position[1];
@@ -627,7 +615,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 // Start examine: capture rest pose, compute target,
                 // snapshot camera basis + distance for orbit/zoom,
                 // begin LERP_IN. AABB radius = half-diagonal.
-                sfx_play(&audio, &sfx_transition, 1.2f);
                 examine.rest  = renderer.object_transform;
                 examine.start = renderer.object_transform;
                 examine.aabb_center_local[0] = (object.aabb_min[0] + object.aabb_max[0]) * 0.5f;
@@ -674,7 +661,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 examine.t = 0.0f;
                 examine.state = Examine::LERP_IN;
             } else if (best_hit >= 0) {
-                sfx_play(&audio, &sfx_transition, 1.2f);
                 uint32_t view_idx = neighbor_indices[best_hit];
                 RefView* tv = &refviews.views[view_idx];
                 float dx = tv->position[0] - cam.position[0];
@@ -1601,9 +1587,6 @@ GSPLAT_EXPORT void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 
     if (state->gl_context) SDL_GL_DestroyContext(state->gl_context);
     if (state->window) SDL_DestroyWindow(state->window);
-
-    sfx_free(&state->sfx_transition);
-    audio_shutdown(&state->audio);
 
     delete state;
 }
