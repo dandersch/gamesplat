@@ -134,6 +134,51 @@ bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_
         UINT64_MAX);
     if (!g_wgpu.adapter) return false;
 
+    // Report which adapter we actually got. On Linux, Chromium frequently hands
+    // back a *software* WebGPU adapter (SwiftShader / adapterType == CPU) unless
+    // hardware WebGPU is explicitly enabled (e.g. --enable-features=Vulkan
+    // --enable-unsafe-webgpu --ignore-gpu-blocklist). A CPU adapter software-
+    // rasterizes the (heavily overdrawn) splats and pegs the CPU -> ~0.2fps,
+    // even though the WebGL path got hardware acceleration. Log loudly so this
+    // failure mode is obvious instead of silently "working" but unusable.
+    {
+        wgpu::AdapterInfo info = {};
+        g_wgpu.adapter.GetInfo(&info);
+        auto type_name = [](wgpu::AdapterType t) -> const char* {
+            switch (t) {
+                case wgpu::AdapterType::DiscreteGPU:   return "DiscreteGPU";
+                case wgpu::AdapterType::IntegratedGPU: return "IntegratedGPU";
+                case wgpu::AdapterType::CPU:           return "CPU (software!)";
+                default:                               return "Unknown";
+            }
+        };
+        auto backend_name = [](wgpu::BackendType t) -> const char* {
+            switch (t) {
+                case wgpu::BackendType::Vulkan:   return "Vulkan";
+                case wgpu::BackendType::Metal:    return "Metal";
+                case wgpu::BackendType::D3D11:    return "D3D11";
+                case wgpu::BackendType::D3D12:    return "D3D12";
+                case wgpu::BackendType::OpenGL:   return "OpenGL";
+                case wgpu::BackendType::OpenGLES: return "OpenGLES";
+                case wgpu::BackendType::WebGPU:   return "WebGPU";
+                case wgpu::BackendType::Null:     return "Null";
+                default:                          return "Unknown";
+            }
+        };
+        fprintf(stderr,
+                "WebGPU adapter: type=%s backend=%s vendor='%s' architecture='%s' device='%s' description='%s'\n",
+                type_name(info.adapterType), backend_name(info.backendType),
+                renderer_wgpu_string(info.vendor), renderer_wgpu_string(info.architecture),
+                renderer_wgpu_string(info.device), renderer_wgpu_string(info.description));
+        if (info.adapterType == wgpu::AdapterType::CPU) {
+            fprintf(stderr,
+                    "WebGPU WARNING: got a SOFTWARE (CPU) adapter. Splats will be CPU-rasterized "
+                    "and performance will be terrible (~100x slower). Enable hardware WebGPU in the "
+                    "browser (Linux Chromium: --enable-features=Vulkan --enable-unsafe-webgpu "
+                    "--ignore-gpu-blocklist) or check chrome://gpu.\n");
+        }
+    }
+
     if (!g_wgpu.adapter.HasFeature(wgpu::FeatureName::Depth32FloatStencil8)) {
         fprintf(stderr, "WebGPU: adapter does not support depth32float-stencil8\n");
         return false;
@@ -174,6 +219,19 @@ bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_
             }),
         UINT64_MAX);
     if (!g_wgpu.device) return false;
+
+    // Log the limits the DEVICE actually received (not the adapter's). If these
+    // come back as the WebGPU defaults (maxBufferSize 256MB / maxStorageBuffer-
+    // BindingSize 128MB) then requiredLimits wasn't honored; if they're large
+    // then a failing big allocation is a genuine out-of-memory.
+    {
+        wgpu::Limits dev_limits = {};
+        g_wgpu.device.GetLimits(&dev_limits);
+        fprintf(stderr,
+                "WebGPU device limits: maxBufferSize=%llu MB, maxStorageBufferBindingSize=%llu MB\n",
+                (unsigned long long)(dev_limits.maxBufferSize / (1024 * 1024)),
+                (unsigned long long)(dev_limits.maxStorageBufferBindingSize / (1024 * 1024)));
+    }
 
     wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {};
     canvas_desc.selector = canvas_selector ? canvas_selector : "#canvas";
@@ -620,6 +678,16 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
 
+    // Firefox/Linux WebGPU currently reports 1GB buffer limits but can OOM on
+    // app-like setups with a 128MB storage buffer, so large gaussian scenes may
+    // fail here until the per-gaussian GPU footprint is reduced.
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    fprintf(stderr, "gaussian-buffer: allocating %u bytes (%.1f MB) as a single storage buffer\n",
+            payload_size, (double)payload_size / (1024.0 * 1024.0));
+    g_wgpu.device.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
+    g_wgpu.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+#endif
+
     sg_buffer_desc gbd = {};
     gbd.usage.storage_buffer = true;
     gbd.size = payload_size;
@@ -628,6 +696,40 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     gbd.label = "gaussian-buffer";
     r->gaussian_buffer = sg_make_buffer(&gbd);
     free(gpu_data);
+
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    // Synchronously drain the error scopes so we know exactly which allocation
+    // failed and with what message (uncaptured errors are otherwise async and
+    // hard to correlate).
+    g_wgpu.instance.WaitAny(
+        g_wgpu.device.PopErrorScope(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView message) {
+                if (type != wgpu::ErrorType::NoError) {
+                    fprintf(stderr, "gaussian-buffer VALIDATION error (%d): %s\n",
+                            (int)type, renderer_wgpu_string(message));
+                }
+            }),
+        UINT64_MAX);
+    g_wgpu.instance.WaitAny(
+        g_wgpu.device.PopErrorScope(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView message) {
+                if (type != wgpu::ErrorType::NoError) {
+                    fprintf(stderr, "gaussian-buffer OUT-OF-MEMORY (%d): %s\n",
+                            (int)type, renderer_wgpu_string(message));
+                } else {
+                    fprintf(stderr, "gaussian-buffer: allocated OK\n");
+                }
+            }),
+        UINT64_MAX);
+#endif
+
+    if (sg_query_buffer_state(r->gaussian_buffer) != SG_RESOURCESTATE_VALID) {
+        fprintf(stderr, "gaussian-buffer: allocation failed; splat drawing disabled\n");
+        r->gaussian_count = 0;
+        return;
+    }
 
     sg_view_desc vd = {};
     vd.storage_buffer.buffer = r->gaussian_buffer;
