@@ -1,5 +1,11 @@
 // sj.h - v0.4 - rxi 2025
 // public domain - no warranty implied, use at your own risk
+//
+// Local changes from upstream:
+// - Made reader/value slices and error strings const-correct so the header can
+//   be compiled as C++ and can read immutable input buffers/string literals.
+// - Replaced C99 designated compound literals in the implementation with
+//   aggregate initialization accepted by both C99 and C++.
 
 #ifndef SJ_H
 #define SJ_H
@@ -8,20 +14,20 @@
 #include <stdbool.h>
 
 typedef struct {
-    char *data, *cur, *end;
+    const char *data, *cur, *end;
     int depth;
-    char *error;
+    const char *error;
 } sj_Reader;
 
 typedef struct {
     int type;
-    char *start, *end;
+    const char *start, *end;
     int depth;
 } sj_Value;
 
 enum { SJ_ERROR, SJ_END, SJ_ARRAY, SJ_OBJECT, SJ_NUMBER, SJ_STRING, SJ_BOOL, SJ_NULL };
 
-sj_Reader sj_reader(char *data, size_t len);
+sj_Reader sj_reader(const char *data, size_t len);
 sj_Value sj_read(sj_Reader *r);
 bool sj_iter_array(sj_Reader *r, sj_Value arr, sj_Value *val);
 bool sj_iter_object(sj_Reader *r, sj_Value obj, sj_Value *key, sj_Value *val);
