@@ -25,7 +25,6 @@
 #include "mesh.cpp"
 #include "renderer.cpp"
 #include "examine.cpp"
-#include "json_mini.cpp"
 #include "hotspot.cpp"
 #include "colmap.cpp"
 #include "refview.cpp"

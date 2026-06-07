@@ -1,7 +1,7 @@
 #include "gaussian.h"
 #include "maths.h"
 #include "miniz.h"
-#include "json_mini.h"
+#include "sj.h"
 #include <webp/decode.h>
 #include <cstdio>
 #include <cstdlib>
@@ -103,139 +103,137 @@ static SogArchiveFile* find_sog_archive_file(SogArchiveFile* files, int count, c
     return NULL;
 }
 
-static bool parse_sog_float_array(Json* j, float* out, int expected) {
-    if (!json_expect_char(j, '[')) return false;
-    for (int i = 0; i < expected; i++) {
-        if (i > 0 && !json_expect_char(j, ',')) return false;
-        if (!json_parse_float(j, &out[i])) return false;
+static bool parse_sog_float_array(sj_Reader* r, sj_Value arr, float* out, int expected) {
+    if (!sjp_expect_array(r, arr)) return false;
+    int count = 0;
+    sj_Value val;
+    while (sj_iter_array(r, arr, &val)) {
+        if (count >= expected) {
+            sjp_set_error(r, "array too long");
+            return false;
+        }
+        if (!sjp_parse_float(r, val, &out[count])) return false;
+        count++;
     }
-    return json_expect_char(j, ']');
+    if (r->error) return false;
+    if (count != expected) {
+        sjp_set_error(r, "array length mismatch");
+        return false;
+    }
+    return true;
 }
 
-static bool parse_sog_string_array(Json* j, char out[][128], int expected) {
-    if (!json_expect_char(j, '[')) return false;
-    for (int i = 0; i < expected; i++) {
-        if (i > 0 && !json_expect_char(j, ',')) return false;
-        if (!json_parse_string(j, out[i], 128)) return false;
+static bool parse_sog_string_array(sj_Reader* r, sj_Value arr, char out[][128], int expected) {
+    if (!sjp_expect_array(r, arr)) return false;
+    int count = 0;
+    sj_Value val;
+    while (sj_iter_array(r, arr, &val)) {
+        if (count >= expected) {
+            sjp_set_error(r, "array too long");
+            return false;
+        }
+        if (!sjp_copy_string(r, val, out[count], 128)) return false;
+        count++;
     }
-    return json_expect_char(j, ']');
+    if (r->error) return false;
+    if (count != expected) {
+        sjp_set_error(r, "array length mismatch");
+        return false;
+    }
+    return true;
 }
 
-static bool parse_sog_means(Json* j, SogMeta* meta) {
+static bool parse_sog_means(sj_Reader* r, sj_Value obj, SogMeta* meta) {
     bool has_mins = false, has_maxs = false, has_files = false;
-    if (!json_expect_char(j, '{')) return false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "mins") == 0) {
-                if (!parse_sog_float_array(j, meta->means_mins, 3)) return false;
-                has_mins = true;
-            } else if (strcmp(key, "maxs") == 0) {
-                if (!parse_sog_float_array(j, meta->means_maxs, 3)) return false;
-                has_maxs = true;
-            } else if (strcmp(key, "files") == 0) {
-                if (!parse_sog_string_array(j, meta->means_files, 2)) return false;
-                has_files = true;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    if (!sjp_expect_object(r, obj)) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "mins")) {
+            if (!parse_sog_float_array(r, val, meta->means_mins, 3)) return false;
+            has_mins = true;
+        } else if (sjp_eq(key, "maxs")) {
+            if (!parse_sog_float_array(r, val, meta->means_maxs, 3)) return false;
+            has_maxs = true;
+        } else if (sjp_eq(key, "files")) {
+            if (!parse_sog_string_array(r, val, meta->means_files, 2)) return false;
+            has_files = true;
+        }
     }
-    if (!has_mins || !has_maxs || !has_files) json_set_error(j, "SOG means missing required field");
-    return j->ok;
+    if (r->error) return false;
+    if (!has_mins || !has_maxs || !has_files) sjp_set_error(r, "SOG means missing required field");
+    return !r->error;
 }
 
-static bool parse_sog_codebook_file(Json* j, float* codebook, char file[128], const char* label) {
+static bool parse_sog_codebook_file(sj_Reader* r, sj_Value obj, float* codebook, char file[128], const char* label) {
     bool has_codebook = false, has_files = false;
     char files[1][128] = {};
-    if (!json_expect_char(j, '{')) return false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "codebook") == 0) {
-                if (!parse_sog_float_array(j, codebook, 256)) return false;
-                has_codebook = true;
-            } else if (strcmp(key, "files") == 0) {
-                if (!parse_sog_string_array(j, files, 1)) return false;
-                snprintf(file, 128, "%s", files[0]);
-                has_files = true;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    if (!sjp_expect_object(r, obj)) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "codebook")) {
+            if (!parse_sog_float_array(r, val, codebook, 256)) return false;
+            has_codebook = true;
+        } else if (sjp_eq(key, "files")) {
+            if (!parse_sog_string_array(r, val, files, 1)) return false;
+            snprintf(file, 128, "%s", files[0]);
+            has_files = true;
+        }
     }
+    if (r->error) return false;
     if (!has_codebook || !has_files) {
         static char msg[96];
         snprintf(msg, sizeof(msg), "SOG %s missing required field", label);
-        json_set_error(j, msg);
+        sjp_set_error(r, msg);
     }
-    return j->ok;
+    return !r->error;
 }
 
-static bool parse_sog_quats(Json* j, SogMeta* meta) {
+static bool parse_sog_quats(sj_Reader* r, sj_Value obj, SogMeta* meta) {
     bool has_files = false;
     char files[1][128] = {};
-    if (!json_expect_char(j, '{')) return false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "files") == 0) {
-                if (!parse_sog_string_array(j, files, 1)) return false;
-                snprintf(meta->quats_file, sizeof(meta->quats_file), "%s", files[0]);
-                has_files = true;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    if (!sjp_expect_object(r, obj)) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "files")) {
+            if (!parse_sog_string_array(r, val, files, 1)) return false;
+            snprintf(meta->quats_file, sizeof(meta->quats_file), "%s", files[0]);
+            has_files = true;
+        }
     }
-    if (!has_files) json_set_error(j, "SOG quats missing files");
-    return j->ok;
+    if (r->error) return false;
+    if (!has_files) sjp_set_error(r, "SOG quats missing files");
+    return !r->error;
 }
 
-static bool parse_sog_shN(Json* j, SogMeta* meta) {
+static bool parse_sog_shN(sj_Reader* r, sj_Value obj, SogMeta* meta) {
     bool has_count = false, has_bands = false, has_codebook = false, has_files = false;
-    if (!json_expect_char(j, '{')) return false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "count") == 0) {
-                if (!json_parse_int(j, &meta->shN_count)) return false;
-                has_count = true;
-            } else if (strcmp(key, "bands") == 0) {
-                if (!json_parse_int(j, &meta->shN_bands)) return false;
-                has_bands = true;
-            } else if (strcmp(key, "codebook") == 0) {
-                if (!parse_sog_float_array(j, meta->shN_codebook, 256)) return false;
-                has_codebook = true;
-            } else if (strcmp(key, "files") == 0) {
-                if (!parse_sog_string_array(j, meta->shN_files, 2)) return false;
-                has_files = true;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    if (!sjp_expect_object(r, obj)) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "count")) {
+            if (!sjp_parse_int(r, val, &meta->shN_count)) return false;
+            has_count = true;
+        } else if (sjp_eq(key, "bands")) {
+            if (!sjp_parse_int(r, val, &meta->shN_bands)) return false;
+            has_bands = true;
+        } else if (sjp_eq(key, "codebook")) {
+            if (!parse_sog_float_array(r, val, meta->shN_codebook, 256)) return false;
+            has_codebook = true;
+        } else if (sjp_eq(key, "files")) {
+            if (!parse_sog_string_array(r, val, meta->shN_files, 2)) return false;
+            has_files = true;
+        }
     }
-    if (!has_count || !has_bands || !has_codebook || !has_files) json_set_error(j, "SOG shN missing required field");
-    if (j->ok && (meta->shN_count <= 0 || meta->shN_count > 65536)) json_set_error(j, "SOG shN count out of range");
-    if (j->ok && (meta->shN_bands < 1 || meta->shN_bands > 3)) json_set_error(j, "SOG shN bands out of range");
-    if (j->ok) meta->has_shN = true;
-    return j->ok;
+    if (r->error) return false;
+    if (!has_count || !has_bands || !has_codebook || !has_files) sjp_set_error(r, "SOG shN missing required field");
+    if (!r->error && (meta->shN_count <= 0 || meta->shN_count > 65536)) sjp_set_error(r, "SOG shN count out of range");
+    if (!r->error && (meta->shN_bands < 1 || meta->shN_bands > 3)) sjp_set_error(r, "SOG shN bands out of range");
+    if (!r->error) meta->has_shN = true;
+    return !r->error;
 }
 
 static bool parse_sog_meta(const char* buf, size_t len, SogMeta* meta) {
@@ -243,60 +241,55 @@ static bool parse_sog_meta(const char* buf, size_t len, SogMeta* meta) {
     bool has_version = false, has_count = false, has_means = false;
     bool has_scales = false, has_quats = false, has_sh0 = false;
 
-    Json j;
-    json_init(&j, buf, len);
-    if (!json_expect_char(&j, '{')) goto fail;
-    if (!json_try_char(&j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(&j, key, sizeof(key))) goto fail;
-            if (!json_expect_char(&j, ':')) goto fail;
-            if (strcmp(key, "version") == 0) {
-                if (!json_parse_int(&j, &meta->version)) goto fail;
-                has_version = true;
-            } else if (strcmp(key, "count") == 0) {
-                int count = 0;
-                if (!json_parse_int(&j, &count)) goto fail;
-                if (count <= 0) { json_set_error(&j, "SOG count out of range"); goto fail; }
-                meta->count = (uint32_t)count;
-                has_count = true;
-            } else if (strcmp(key, "antialias") == 0) {
-                if (!json_parse_bool(&j, &meta->antialias)) goto fail;
-                meta->has_antialias = true;
-            } else if (strcmp(key, "means") == 0) {
-                if (!parse_sog_means(&j, meta)) goto fail;
-                has_means = true;
-            } else if (strcmp(key, "scales") == 0) {
-                if (!parse_sog_codebook_file(&j, meta->scales_codebook, meta->scales_file, "scales")) goto fail;
-                has_scales = true;
-            } else if (strcmp(key, "quats") == 0) {
-                if (!parse_sog_quats(&j, meta)) goto fail;
-                has_quats = true;
-            } else if (strcmp(key, "sh0") == 0) {
-                if (!parse_sog_codebook_file(&j, meta->sh0_codebook, meta->sh0_file, "sh0")) goto fail;
-                has_sh0 = true;
-            } else if (strcmp(key, "shN") == 0) {
-                if (!parse_sog_shN(&j, meta)) goto fail;
-            } else {
-                json_skip_value(&j);
-                if (!j.ok) goto fail;
-            }
-        } while (json_try_char(&j, ','));
-        if (!json_expect_char(&j, '}')) goto fail;
+    sj_Reader r = sj_reader(buf, len);
+    sj_Value root = sj_read(&r);
+    if (!sjp_expect_object(&r, root)) goto fail;
+
+    sj_Value key, val;
+    while (sj_iter_object(&r, root, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(&r, "expected string"); goto fail; }
+        if (sjp_eq(key, "version")) {
+            if (!sjp_parse_int(&r, val, &meta->version)) goto fail;
+            has_version = true;
+        } else if (sjp_eq(key, "count")) {
+            int count = 0;
+            if (!sjp_parse_int(&r, val, &count)) goto fail;
+            if (count <= 0) { sjp_set_error(&r, "SOG count out of range"); goto fail; }
+            meta->count = (uint32_t)count;
+            has_count = true;
+        } else if (sjp_eq(key, "antialias")) {
+            if (!sjp_parse_bool(&r, val, &meta->antialias)) goto fail;
+            meta->has_antialias = true;
+        } else if (sjp_eq(key, "means")) {
+            if (!parse_sog_means(&r, val, meta)) goto fail;
+            has_means = true;
+        } else if (sjp_eq(key, "scales")) {
+            if (!parse_sog_codebook_file(&r, val, meta->scales_codebook, meta->scales_file, "scales")) goto fail;
+            has_scales = true;
+        } else if (sjp_eq(key, "quats")) {
+            if (!parse_sog_quats(&r, val, meta)) goto fail;
+            has_quats = true;
+        } else if (sjp_eq(key, "sh0")) {
+            if (!parse_sog_codebook_file(&r, val, meta->sh0_codebook, meta->sh0_file, "sh0")) goto fail;
+            has_sh0 = true;
+        } else if (sjp_eq(key, "shN")) {
+            if (!parse_sog_shN(&r, val, meta)) goto fail;
+        }
     }
+    if (r.error) goto fail;
 
     if (!has_version || !has_count || !has_means || !has_scales || !has_quats || !has_sh0) {
-        json_set_error(&j, "SOG meta missing required top-level field");
+        sjp_set_error(&r, "SOG meta missing required top-level field");
         goto fail;
     }
     if (meta->version != 2) {
-        json_set_error(&j, "unsupported SOG version");
+        sjp_set_error(&r, "unsupported SOG version");
         goto fail;
     }
     return true;
 
 fail:
-    fprintf(stderr, "SOG: meta.json parse error at byte %d: %s\n", j.err_offset, j.err_msg ? j.err_msg : "unknown error");
+    fprintf(stderr, "SOG: meta.json parse error at byte %d: %s\n", sjp_error_offset(&r), r.error ? r.error : "unknown error");
     return false;
 }
 

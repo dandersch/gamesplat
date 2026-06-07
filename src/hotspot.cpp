@@ -1,6 +1,6 @@
 #include "hotspot.h"
 #include "refview.h"
-#include "json_mini.h"
+#include "sj.h"
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -79,55 +79,63 @@ static void build_push_point(HotspotBuild* b, float u, float v) {
 
 // ---- parsing --------------------------------------------------------------
 
-static bool parse_polygon_points(Json* j, HotspotBuild* b) {
-    if (!json_expect_char(j, '[')) return false;
-    if (json_try_char(j, ']')) return true;
-    do {
-        if (!json_expect_char(j, '[')) return false;
+static bool parse_polygon_points(sj_Reader* r, sj_Value arr, HotspotBuild* b) {
+    if (!sjp_expect_array(r, arr)) return false;
+    sj_Value point;
+    while (sj_iter_array(r, arr, &point)) {
+        if (!sjp_expect_array(r, point)) return false;
         float u, v;
-        if (!json_parse_float(j, &u)) return false;
-        if (!json_expect_char(j, ',')) return false;
-        if (!json_parse_float(j, &v)) return false;
-        if (!json_expect_char(j, ']')) return false;
+        int count = 0;
+        sj_Value coord;
+        while (sj_iter_array(r, point, &coord)) {
+            if (count == 0) {
+                if (!sjp_parse_float(r, coord, &u)) return false;
+            } else if (count == 1) {
+                if (!sjp_parse_float(r, coord, &v)) return false;
+            } else {
+                sjp_set_error(r, "array too long");
+                return false;
+            }
+            count++;
+        }
+        if (r->error) return false;
+        if (count != 2) {
+            sjp_set_error(r, "array length mismatch");
+            return false;
+        }
         if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
             // Mark hotspot invalid but keep parsing the rest of the file.
             b->valid = false;
         }
         build_push_point(b, u, v);
-    } while (json_try_char(j, ','));
-    return json_expect_char(j, ']');
+    }
+    return !r->error;
 }
 
-static bool parse_shape(Json* j, HotspotBuild* b) {
-    if (!json_expect_char(j, '{')) return false;
+static bool parse_shape(sj_Reader* r, sj_Value obj, HotspotBuild* b) {
+    if (!sjp_expect_object(r, obj)) return false;
     bool has_type = false;
     bool has_points = false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "type") == 0) {
-                char val[32];
-                if (!json_parse_string(j, val, sizeof(val))) return false;
-                if (strcmp(val, "polygon") == 0) {
-                    b->type = HOTSPOT_SHAPE_POLYGON;
-                    has_type = true;
-                } else {
-                    SDL_Log("Hotspot: unknown shape.type \"%s\", dropping hotspot", val);
-                    b->valid = false;
-                    has_type = true; // pretend, so we don't double-log
-                }
-            } else if (strcmp(key, "points") == 0) {
-                if (!parse_polygon_points(j, b)) return false;
-                has_points = true;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "type")) {
+            char type[32];
+            if (!sjp_copy_string(r, val, type, sizeof(type))) return false;
+            if (strcmp(type, "polygon") == 0) {
+                b->type = HOTSPOT_SHAPE_POLYGON;
+                has_type = true;
             } else {
-                json_skip_value(j);
+                SDL_Log("Hotspot: unknown shape.type \"%s\", dropping hotspot", type);
+                b->valid = false;
+                has_type = true; // pretend, so we don't double-log
             }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+        } else if (sjp_eq(key, "points")) {
+            if (!parse_polygon_points(r, val, b)) return false;
+            has_points = true;
+        }
     }
+    if (r->error) return false;
     if (!has_type) { SDL_Log("Hotspot: shape missing 'type'"); b->valid = false; }
     if (b->type == HOTSPOT_SHAPE_POLYGON) {
         if (!has_points) { SDL_Log("Hotspot: polygon missing 'points'"); b->valid = false; }
@@ -139,36 +147,24 @@ static bool parse_shape(Json* j, HotspotBuild* b) {
     return true;
 }
 
-static bool parse_inspect_target(Json* j, HotspotBuild* b) {
-    if (!json_expect_char(j, '{')) return false;
+static bool parse_inspect_target(sj_Reader* r, sj_Value obj, HotspotBuild* b) {
+    if (!sjp_expect_object(r, obj)) return false;
     bool has_position = false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "position") == 0) {
-                if (!json_expect_char(j, '[')) return false;
-                if (!json_parse_float(j, &b->insp_position[0])) return false;
-                if (!json_expect_char(j, ',')) return false;
-                if (!json_parse_float(j, &b->insp_position[1])) return false;
-                if (!json_expect_char(j, ',')) return false;
-                if (!json_parse_float(j, &b->insp_position[2])) return false;
-                if (!json_expect_char(j, ']')) return false;
-                has_position = true;
-            } else if (strcmp(key, "yaw") == 0) {
-                if (!json_parse_float(j, &b->insp_yaw)) return false;
-            } else if (strcmp(key, "pitch") == 0) {
-                if (!json_parse_float(j, &b->insp_pitch)) return false;
-            } else if (strcmp(key, "ortho_size") == 0) {
-                if (!json_parse_float(j, &b->insp_ortho_size)) return false;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "position")) {
+            if (!sjp_parse_float3(r, val, b->insp_position)) return false;
+            has_position = true;
+        } else if (sjp_eq(key, "yaw")) {
+            if (!sjp_parse_float(r, val, &b->insp_yaw)) return false;
+        } else if (sjp_eq(key, "pitch")) {
+            if (!sjp_parse_float(r, val, &b->insp_pitch)) return false;
+        } else if (sjp_eq(key, "ortho_size")) {
+            if (!sjp_parse_float(r, val, &b->insp_ortho_size)) return false;
+        }
     }
+    if (r->error) return false;
     if (!has_position) {
         SDL_Log("Hotspot: inspect target missing 'position'");
         b->valid = false;
@@ -176,80 +172,65 @@ static bool parse_inspect_target(Json* j, HotspotBuild* b) {
     return true;
 }
 
-static bool parse_action(Json* j, HotspotBuild* b) {
-    if (!json_expect_char(j, '{')) return false;
+static bool parse_action(sj_Reader* r, sj_Value obj, HotspotBuild* b) {
+    if (!sjp_expect_object(r, obj)) return false;
     bool has_type = false;
     bool has_target = false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "type") == 0) {
-                char val[32];
-                if (!json_parse_string(j, val, sizeof(val))) return false;
-                if (strcmp(val, "warp") == 0) {
-                    b->action_type = HOTSPOT_ACTION_WARP;
-                    has_type = true;
-                } else if (strcmp(val, "inspect") == 0) {
-                    b->action_type = HOTSPOT_ACTION_INSPECT;
-                    has_type = true;
-                } else {
-                    SDL_Log("Hotspot: unknown action.type \"%s\", dropping hotspot", val);
-                    b->valid = false;
-                    has_type = true;
-                }
-            } else if (strcmp(key, "target") == 0) {
-                // Dispatch on next non-ws char: string -> warp target,
-                // object -> inspect target.
-                if (json_peek_char(j, '"')) {
-                    if (!json_parse_string(j, b->warp_target, sizeof(b->warp_target))) return false;
-                    has_target = true;
-                } else if (json_peek_char(j, '{')) {
-                    if (!parse_inspect_target(j, b)) return false;
-                    has_target = true;
-                } else {
-                    SDL_Log("Hotspot: action.target must be string or object");
-                    b->valid = false;
-                    json_skip_value(j);
-                }
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "type")) {
+            char type[32];
+            if (!sjp_copy_string(r, val, type, sizeof(type))) return false;
+            if (strcmp(type, "warp") == 0) {
+                b->action_type = HOTSPOT_ACTION_WARP;
+                has_type = true;
+            } else if (strcmp(type, "inspect") == 0) {
+                b->action_type = HOTSPOT_ACTION_INSPECT;
+                has_type = true;
             } else {
-                json_skip_value(j);
+                SDL_Log("Hotspot: unknown action.type \"%s\", dropping hotspot", type);
+                b->valid = false;
+                has_type = true;
             }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+        } else if (sjp_eq(key, "target")) {
+            if (val.type == SJ_STRING) {
+                if (!sjp_copy_string(r, val, b->warp_target, sizeof(b->warp_target))) return false;
+                has_target = true;
+            } else if (val.type == SJ_OBJECT) {
+                if (!parse_inspect_target(r, val, b)) return false;
+                has_target = true;
+            } else {
+                SDL_Log("Hotspot: action.target must be string or object");
+                b->valid = false;
+            }
+        }
     }
+    if (r->error) return false;
     if (!has_type) { SDL_Log("Hotspot: action missing 'type'"); b->valid = false; }
     if (!has_target) { SDL_Log("Hotspot: action missing 'target'"); b->valid = false; }
     return true;
 }
 
-static bool parse_hotspot(Json* j, HotspotBuild* b) {
+static bool parse_hotspot(sj_Reader* r, sj_Value obj, HotspotBuild* b) {
     *b = {};
     b->valid = true;
     b->insp_ortho_size = 1.0f;
-    if (!json_expect_char(j, '{')) return false;
+    if (!sjp_expect_object(r, obj)) return false;
     bool has_shape = false;
     bool has_action = false;
-    if (!json_try_char(j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(j, key, sizeof(key))) return false;
-            if (!json_expect_char(j, ':')) return false;
-            if (strcmp(key, "shape") == 0) {
-                if (!parse_shape(j, b)) return false;
-                has_shape = true;
-            } else if (strcmp(key, "action") == 0) {
-                if (!parse_action(j, b)) return false;
-                has_action = true;
-            } else {
-                json_skip_value(j);
-            }
-            if (!j->ok) return false;
-        } while (json_try_char(j, ','));
-        if (!json_expect_char(j, '}')) return false;
+    sj_Value key, val;
+    while (sj_iter_object(r, obj, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(r, "expected string"); return false; }
+        if (sjp_eq(key, "shape")) {
+            if (!parse_shape(r, val, b)) return false;
+            has_shape = true;
+        } else if (sjp_eq(key, "action")) {
+            if (!parse_action(r, val, b)) return false;
+            has_action = true;
+        }
     }
+    if (r->error) return false;
     if (!has_shape || !has_action) {
         SDL_Log("Hotspot: entry missing shape or action"); b->valid = false;
     }
@@ -274,43 +255,33 @@ static bool parse_sidecar(const char* buf, size_t len,
     int version = 0;
     bool have_version = false;
 
-    Json j;
-    json_init(&j, buf, len);
+    sj_Reader r = sj_reader(buf, len);
+    sj_Value root = sj_read(&r);
+    if (!sjp_expect_object(&r, root)) goto fail;
 
-    if (!json_expect_char(&j, '{')) goto fail;
-
-    if (!json_try_char(&j, '}')) {
-        do {
-            char key[64];
-            if (!json_parse_string(&j, key, sizeof(key))) goto fail;
-            if (!json_expect_char(&j, ':')) goto fail;
-
-            if (strcmp(key, "version") == 0) {
-                if (!json_parse_int(&j, &version)) goto fail;
-                have_version = true;
-            } else if (strcmp(key, "image") == 0) {
-                json_parse_string(&j, image_field_out, image_field_size);
-                if (!j.ok) goto fail;
-            } else if (strcmp(key, "hotspots") == 0) {
-                if (!json_expect_char(&j, '[')) goto fail;
-                if (!json_try_char(&j, ']')) {
-                    do {
-                        if (bcount == bcap) {
-                            bcap = bcap ? bcap * 2 : 8;
-                            builds = (HotspotBuild*)realloc(builds, bcap * sizeof(HotspotBuild));
-                        }
-                        if (!parse_hotspot(&j, &builds[bcount])) goto fail;
-                        bcount++;
-                    } while (json_try_char(&j, ','));
-                    if (!json_expect_char(&j, ']')) goto fail;
+    sj_Value key, val;
+    while (sj_iter_object(&r, root, &key, &val)) {
+        if (key.type != SJ_STRING) { sjp_set_error(&r, "expected string"); goto fail; }
+        if (sjp_eq(key, "version")) {
+            if (!sjp_parse_int(&r, val, &version)) goto fail;
+            have_version = true;
+        } else if (sjp_eq(key, "image")) {
+            if (!sjp_copy_string(&r, val, image_field_out, image_field_size)) goto fail;
+        } else if (sjp_eq(key, "hotspots")) {
+            if (!sjp_expect_array(&r, val)) goto fail;
+            sj_Value item;
+            while (sj_iter_array(&r, val, &item)) {
+                if (bcount == bcap) {
+                    bcap = bcap ? bcap * 2 : 8;
+                    builds = (HotspotBuild*)realloc(builds, bcap * sizeof(HotspotBuild));
                 }
-            } else {
-                json_skip_value(&j);
-                if (!j.ok) goto fail;
+                if (!parse_hotspot(&r, item, &builds[bcount])) goto fail;
+                bcount++;
             }
-        } while (json_try_char(&j, ','));
-        if (!json_expect_char(&j, '}')) goto fail;
+            if (r.error) goto fail;
+        }
     }
+    if (r.error) goto fail;
 
     if (!have_version) {
         SDL_Log("Hotspot [%s]: missing 'version' field", sidecar_path);
@@ -326,9 +297,9 @@ static bool parse_sidecar(const char* buf, size_t len,
     return true;
 
 fail:
-    if (!j.ok) {
+    if (r.error) {
         SDL_Log("Hotspot [%s]: parse error at byte %d: %s",
-                sidecar_path, j.err_offset, j.err_msg ? j.err_msg : "?");
+                sidecar_path, sjp_error_offset(&r), r.error ? r.error : "?");
     }
     if (builds) {
         for (uint32_t i = 0; i < bcount; i++) build_free(&builds[i]);

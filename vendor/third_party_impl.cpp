@@ -14,6 +14,9 @@
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
 
+#define SJ_IMPL
+#include "sj.h"
+
 // --- sokol_gfx + sokol_imgui ---------------------------------------------
 // Keep the native build on the desktop GL backend and switch only the
 // Emscripten build to WebGL2/GLES3. The generated shader headers carry both
