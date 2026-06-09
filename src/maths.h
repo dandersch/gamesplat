@@ -64,6 +64,10 @@ static inline float math_lerp(float a, float b, float t) {
     return a + (b - a) * t;
 }
 
+static inline float math_sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
 static inline float math_smoothstep01(float t) {
     t = math_clamp(t, 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);

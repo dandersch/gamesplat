@@ -51,14 +51,8 @@ struct GaussianScene {
     uint32_t*  scratch_keys2;
 };
 
-// Load PLY, populate scene. Returns false on failure.
-bool load_ply(const char* path, GaussianScene* scene);
+bool load_gaussian_scene(const char* path, GaussianScene* scene); // dispatches by file extension (.ply / .sog)
 
-// Load a gaussian scene by file extension. Currently dispatches .ply to the
-// existing loader and recognizes bundled .sog archives for the SOG loader.
-bool load_gaussian_scene(const char* path, GaussianScene* scene);
-
-// Free scene data
 void free_scene(GaussianScene* scene);
 
 // Pack gaussians into GpuGaussian layout. Caller frees returned pointer.
