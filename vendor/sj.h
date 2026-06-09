@@ -145,6 +145,52 @@ static inline bool sjp_parse_float3(sj_Reader *r, sj_Value arr, float out[3]) {
     return true;
 }
 
+static inline bool sjp_parse_float_array(sj_Reader *r, sj_Value arr, float *out, int expected) {
+    if (arr.type != SJ_ARRAY) {
+        sjp_set_error(r, "expected array");
+        return false;
+    }
+    int count = 0;
+    sj_Value val;
+    while (sj_iter_array(r, arr, &val)) {
+        if (count >= expected) {
+            sjp_set_error(r, "array too long");
+            return false;
+        }
+        if (!sjp_parse_float(r, val, &out[count])) return false;
+        count++;
+    }
+    if (r->error) return false;
+    if (count != expected) {
+        sjp_set_error(r, "array length mismatch");
+        return false;
+    }
+    return true;
+}
+
+static inline bool sjp_parse_string_array(sj_Reader *r, sj_Value arr, char *out, size_t string_size, int expected) {
+    if (arr.type != SJ_ARRAY) {
+        sjp_set_error(r, "expected array");
+        return false;
+    }
+    int count = 0;
+    sj_Value val;
+    while (sj_iter_array(r, arr, &val)) {
+        if (count >= expected) {
+            sjp_set_error(r, "array too long");
+            return false;
+        }
+        if (!sjp_copy_string(r, val, out + (size_t)count * string_size, string_size)) return false;
+        count++;
+    }
+    if (r->error) return false;
+    if (count != expected) {
+        sjp_set_error(r, "array length mismatch");
+        return false;
+    }
+    return true;
+}
+
 static inline bool sjp_expect_object(sj_Reader *r, sj_Value val) {
     if (val.type == SJ_OBJECT) return true;
     sjp_set_error(r, "expected object");

@@ -9,8 +9,7 @@
 #include <cmath>
 #include <cctype>
 
-#include "sog.h"
-#include "ply.h"
+#include "gaussian_loader.h"
 
 static bool str_ends_with_ci(const char* s, const char* suffix) {
     size_t sl = strlen(s);
@@ -25,10 +24,10 @@ static bool str_ends_with_ci(const char* s, const char* suffix) {
 
 bool load_gaussian_scene(const char* path, GaussianScene* scene) {
     if (str_ends_with_ci(path, ".ply")) {
-        return load_ply(path, scene);
+        return gaussian_load_ply(path, scene);
     }
     if (str_ends_with_ci(path, ".sog")) {
-        return load_sog(path, scene);
+        return gaussian_load_sog(path, scene);
     }
 
     LOG(ERROR|GAUSSIAN|LOAD, "Unsupported gaussian scene format: %s", path);

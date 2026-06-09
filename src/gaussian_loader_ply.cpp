@@ -1,8 +1,8 @@
-#pragma once
-
+#include "gaussian_loader.h"
+#include <cstdint>
+#include <cstdio>
 #include "maths.h"
-
-// .ply parser & loader
+#include "gaussian.h"
 
 struct PlyProperty {
     char name[64];
@@ -10,7 +10,7 @@ struct PlyProperty {
     int  offset;    // byte offset within vertex
 };
 
-static bool load_ply(const char* path, GaussianScene* scene) {
+bool gaussian_load_ply(const char* path, GaussianScene* scene) {
     FILE* f = fopen(path, "rb");
     if (!f) { LOG(ERROR|GAUSSIAN|IO, "Failed to open %s", path); return false; }
 

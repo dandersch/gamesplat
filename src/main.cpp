@@ -32,6 +32,8 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 #include "hotspot.cpp"
 #include "colmap.cpp"
 #include "refview.cpp"
+#include "gaussian_loader_sog.cpp"
+#include "gaussian_loader_ply.cpp"
 
 #if defined(_MSC_VER)
 #define GSPLAT_EXPORT extern "C" __declspec(dllexport)
