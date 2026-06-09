@@ -21,14 +21,16 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 
 #include "camera.cpp"
 #include "gaussian.cpp"
+#include "gaussian_loader_sog.cpp"
+#include "gaussian_loader_ply.cpp"
 #include "mesh.cpp"
+#include "mesh_loader_obj.cpp"
+#include "mesh_loader_gltf.cpp"
 #include "renderer.cpp"
 #include "examine.cpp"
 #include "hotspot.cpp"
 #include "colmap.cpp"
 #include "refview.cpp"
-#include "gaussian_loader_sog.cpp"
-#include "gaussian_loader_ply.cpp"
 
 #if defined(_MSC_VER)
 #define GSPLAT_EXPORT extern "C" __declspec(dllexport)

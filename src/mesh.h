@@ -27,6 +27,7 @@ struct Mesh {
     float        aabb_max[3];
 };
 
+// TODO utils.h / maths.h
 // Transform an axis-aligned local AABB by a column-major model matrix and
 // return the world-space AABB enclosing the 8 transformed corners.
 void mesh_aabb_world(const float local_min[3], const float local_max[3],
