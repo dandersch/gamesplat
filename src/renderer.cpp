@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#include <SDL3/SDL.h>
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
@@ -523,7 +524,7 @@ static bool mesh_gpu_upload(const Mesh* mesh, MeshGpu* out) {
     // Copy submesh metadata.
     out->submesh_count = mesh->submesh_count;
     if (mesh->submesh_count > 0) {
-        out->submeshes = (MeshSubmesh*)malloc(mesh->submesh_count * sizeof(MeshSubmesh));
+        out->submeshes = (MeshSubmesh*)SDL_malloc(mesh->submesh_count * sizeof(MeshSubmesh));
         memcpy(out->submeshes, mesh->submeshes, mesh->submesh_count * sizeof(MeshSubmesh));
     }
 

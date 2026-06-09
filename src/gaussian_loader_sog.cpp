@@ -384,12 +384,12 @@ parse_sog_meta_done:
     {
         scene->gaussian_count = sog_meta->count;
         scene->gaussians = (Gaussian*)calloc(sog_meta->count, sizeof(Gaussian));
-        scene->visible_indices  = (uint32_t*)malloc(sog_meta->count * sizeof(uint32_t));
-        scene->visible_depths   = (float*)malloc(sog_meta->count * sizeof(float));
-        scene->sorted_indices   = (uint32_t*)malloc(sog_meta->count * sizeof(uint32_t));
-        scene->scratch_indices  = (uint32_t*)malloc(sog_meta->count * sizeof(uint32_t));
-        scene->scratch_keys     = (uint32_t*)malloc(sog_meta->count * sizeof(uint32_t));
-        scene->scratch_keys2    = (uint32_t*)malloc(sog_meta->count * sizeof(uint32_t));
+        scene->visible_indices  = (uint32_t*)SDL_malloc(sog_meta->count * sizeof(uint32_t));
+        scene->visible_depths   = (float*)SDL_malloc(sog_meta->count * sizeof(float));
+        scene->sorted_indices   = (uint32_t*)SDL_malloc(sog_meta->count * sizeof(uint32_t));
+        scene->scratch_indices  = (uint32_t*)SDL_malloc(sog_meta->count * sizeof(uint32_t));
+        scene->scratch_keys     = (uint32_t*)SDL_malloc(sog_meta->count * sizeof(uint32_t));
+        scene->scratch_keys2    = (uint32_t*)SDL_malloc(sog_meta->count * sizeof(uint32_t));
         scene->visible_count    = 0;
 
         if (!scene->gaussians || !scene->visible_indices || !scene->visible_depths ||

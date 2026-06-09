@@ -369,7 +369,7 @@ bool colmap_load_covisibility(ColmapCovisibility* out, const char* database_path
     }
 
     uint32_t edge_cap = 64;
-    out->edges = (ColmapCovisEdge*)malloc(edge_cap * sizeof(ColmapCovisEdge));
+    out->edges = (ColmapCovisEdge*)SDL_malloc(edge_cap * sizeof(ColmapCovisEdge));
 
     const int64_t MAX_ID = 2147483647LL;
     while (sqlite3_step(stmt) == SQLITE_ROW) {

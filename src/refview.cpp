@@ -3,7 +3,6 @@
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
 #include <cmath>
 #include "stb_image.h"
 #include "sokol_gfx.h"
@@ -57,7 +56,7 @@ void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis)
         if (set->views[i].colmap_id > max_colmap_id)
             max_colmap_id = set->views[i].colmap_id;
     }
-    int* id_to_idx = (int*)malloc((max_colmap_id + 1) * sizeof(int));
+    int* id_to_idx = (int*)SDL_malloc((max_colmap_id + 1) * sizeof(int));
     memset(id_to_idx, -1, (max_colmap_id + 1) * sizeof(int));
     for (uint32_t i = 0; i < set->count; i++) {
         id_to_idx[set->views[i].colmap_id] = (int)i;
@@ -66,7 +65,7 @@ void refview_load_covisibility(RefViewSet* set, const ColmapCovisibility* covis)
     // First pass: count edges
     uint32_t edge_cap = 64;
     uint32_t edge_count = 0;
-    CovisEdge* edges = (CovisEdge*)malloc(edge_cap * sizeof(CovisEdge));
+    CovisEdge* edges = (CovisEdge*)SDL_malloc(edge_cap * sizeof(CovisEdge));
 
     for (uint32_t i = 0; i < covis->count; i++) {
         int id1 = covis->edges[i].image_id_a;

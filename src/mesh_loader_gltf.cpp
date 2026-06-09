@@ -50,7 +50,7 @@ static bool gltf_load_image(const cgltf_image* img, const std::string& gltf_dir,
     out_tex->w = (uint32_t)w;
     out_tex->h = (uint32_t)h;
     uint32_t tex_size = (uint32_t)(w * h * 4);
-    out_tex->rgba = (uint8_t*)malloc(tex_size);
+    out_tex->rgba = (uint8_t*)SDL_malloc(tex_size);
     memcpy(out_tex->rgba, pixels, tex_size);
     stbi_image_free(pixels);
     return true;
@@ -241,19 +241,19 @@ bool mesh_load_gltf(const char* gltf_path, Mesh* mesh) {
         return false;
     }
 
-    mesh->vertices = (float*)malloc(verts.size() * sizeof(float));
+    mesh->vertices = (float*)SDL_malloc(verts.size() * sizeof(float));
     memcpy(mesh->vertices, verts.data(), verts.size() * sizeof(float));
 
-    mesh->indices = (uint32_t*)malloc(indices.size() * sizeof(uint32_t));
+    mesh->indices = (uint32_t*)SDL_malloc(indices.size() * sizeof(uint32_t));
     memcpy(mesh->indices, indices.data(), indices.size() * sizeof(uint32_t));
 
     mesh->submesh_count = (uint32_t)submeshes.size();
-    mesh->submeshes = (MeshSubmesh*)malloc(submeshes.size() * sizeof(MeshSubmesh));
+    mesh->submeshes = (MeshSubmesh*)SDL_malloc(submeshes.size() * sizeof(MeshSubmesh));
     memcpy(mesh->submeshes, submeshes.data(), submeshes.size() * sizeof(MeshSubmesh));
 
     mesh->texture_count = (uint32_t)loaded_textures.size();
     if (!loaded_textures.empty()) {
-        mesh->textures = (MeshTexture*)malloc(loaded_textures.size() * sizeof(MeshTexture));
+        mesh->textures = (MeshTexture*)SDL_malloc(loaded_textures.size() * sizeof(MeshTexture));
         memcpy(mesh->textures, loaded_textures.data(), loaded_textures.size() * sizeof(MeshTexture));
     }
 

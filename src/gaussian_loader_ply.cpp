@@ -1,6 +1,7 @@
 #include "gaussian_loader.h"
 #include <cstdint>
 #include <cstdio>
+#include <SDL3/SDL.h>
 #include "maths.h"
 #include "gaussian.h"
 
@@ -111,7 +112,7 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
     }
 
     // Read all vertex data
-    uint8_t* raw = (uint8_t*)malloc((size_t)vertex_count * stride);
+    uint8_t* raw = (uint8_t*)SDL_malloc((size_t)vertex_count * stride);
     if (!raw) { fclose(f); return false; }
     size_t read = fread(raw, stride, vertex_count, f);
     fclose(f);
@@ -122,7 +123,7 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
 
     // Allocate scene
     scene->gaussian_count = vertex_count;
-    scene->gaussians = (Gaussian*)malloc(vertex_count * sizeof(Gaussian));
+    scene->gaussians = (Gaussian*)SDL_malloc(vertex_count * sizeof(Gaussian));
 
     for (uint32_t i = 0; i < vertex_count; i++) {
         uint8_t* v = raw + (size_t)i * stride;
@@ -198,12 +199,12 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
     free(raw);
 
     // Allocate scratch buffers
-    scene->visible_indices  = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
-    scene->visible_depths   = (float*)malloc(vertex_count * sizeof(float));
-    scene->sorted_indices   = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
-    scene->scratch_indices  = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
-    scene->scratch_keys     = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
-    scene->scratch_keys2    = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
+    scene->visible_indices  = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
+    scene->visible_depths   = (float*)SDL_malloc(vertex_count * sizeof(float));
+    scene->sorted_indices   = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
+    scene->scratch_indices  = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
+    scene->scratch_keys     = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
+    scene->scratch_keys2    = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
     scene->visible_count    = 0;
 
     return true;
