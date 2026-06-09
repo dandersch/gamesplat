@@ -1,21 +1,15 @@
-#if defined(COMPILE_AS_DLL)
-#define SDL_MAIN_USE_CALLBACKS 0
-#else
-#define SDL_MAIN_USE_CALLBACKS 1
-#include <SDL3/SDL_main.h>
-#endif
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
 
+#include "sokol_app.h"
 #include "sokol_gfx.h"
-#define SOKOL_IMGUI_NO_SOKOL_APP
+#include "sokol_log.h"
 #include "imgui.h"
 #include "sokol_imgui.h"
 #if defined(ENABLE_PROFILER)
 #include "sokol_gfx_imgui.h"
 #endif
-#include "imgui_impl_sdl3.h"
 
 #include "profiler.h"
 #include "maths.h"
@@ -40,6 +34,9 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 #else
 #define GSPLAT_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
+
+static int g_argc = 0;
+static char** g_argv = NULL;
 
 static void compute_gaussian_scene_radius_from_center(const GaussianScene* scene, const float center[3], float* radius) {
     if (!scene || scene->gaussian_count == 0) {
@@ -78,12 +75,9 @@ struct AppState {
     const char* mesh_path;
     const char* object_path;
 
-    SDL_Window*    window;
-    SDL_GLContext  gl_context;
     bool           sg_setup_done;
     bool           simgui_setup_done;
     bool           sgimgui_setup_done;
-    bool           imgui_sdl3_initialized;
     bool           renderer_started;
     ImGuiContext*  imgui_context;
 
@@ -97,8 +91,6 @@ struct AppState {
 
     Camera cam;
     bool   keys[9]; // W A S D Space LCtrl LShift E Q
-    uint64_t last_time;
-    uint64_t freq;
     float    refview_max_alpha;
     float    node_half_size;
     bool     show_node_boxes;
@@ -131,37 +123,55 @@ struct AppState {
     // Object examine mode (--object). Disabled until the user clicks the mesh.
     Examine examine;
 
-    // Accumulated by SDL_AppEvent and consumed once per SDL_AppIterate.
+    // Accumulated by app_event and consumed once per app_frame.
     float mouse_dx;
     float mouse_dy;
 };
 
-GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-    if (*appstate) {
-        AppState* state = (AppState*)*appstate;
-        if (state->imgui_context) {
-            ImGui::SetCurrentContext(state->imgui_context);
-        }
-        if (state->renderer_started) {
-            renderer_reload_shaders(&state->renderer);
-        }
-        if (state->scene_loaded) {
-            compute_gaussian_scene_radius_from_center(&state->scene, g_splat_effect_center, &g_splat_effect_radius);
-        }
-        state->last_time = SDL_GetPerformanceCounter();
-        state->freq = SDL_GetPerformanceFrequency();
-        return SDL_APP_CONTINUE;
+static AppState* g_state = NULL;
+
+static sg_pixel_format app_sg_pixel_format(sapp_pixel_format fmt) {
+    switch (fmt) {
+        case SAPP_PIXELFORMAT_NONE:          return SG_PIXELFORMAT_NONE;
+        case SAPP_PIXELFORMAT_RGBA8:         return SG_PIXELFORMAT_RGBA8;
+        case SAPP_PIXELFORMAT_SRGB8A8:       return SG_PIXELFORMAT_SRGB8A8;
+        case SAPP_PIXELFORMAT_BGRA8:         return SG_PIXELFORMAT_BGRA8;
+        case SAPP_PIXELFORMAT_SBGRA8:        return SG_PIXELFORMAT_BGRA8;
+        case SAPP_PIXELFORMAT_DEPTH:         return SG_PIXELFORMAT_DEPTH;
+        case SAPP_PIXELFORMAT_DEPTH_STENCIL: return SG_PIXELFORMAT_DEPTH_STENCIL;
+        default:                             return SG_PIXELFORMAT_RGBA8;
     }
+}
 
+static sg_environment app_sg_environment(void) {
+    sapp_environment src = sapp_get_environment();
+    sg_environment dst = {};
+    dst.defaults.color_format = app_sg_pixel_format(src.defaults.color_format);
+    dst.defaults.depth_format = app_sg_pixel_format(src.defaults.depth_format);
+    dst.defaults.sample_count = src.defaults.sample_count;
+    dst.metal.device = src.metal.device;
+    dst.d3d11.device = src.d3d11.device;
+    dst.d3d11.device_context = src.d3d11.device_context;
+    dst.wgpu.device = src.wgpu.device;
+    dst.vulkan.instance = src.vulkan.instance;
+    dst.vulkan.physical_device = src.vulkan.physical_device;
+    dst.vulkan.device = src.vulkan.device;
+    dst.vulkan.queue = src.vulkan.queue;
+    dst.vulkan.queue_family_index = src.vulkan.queue_family_index;
+    return dst;
+}
+
+static void app_init(void) {
     AppState* state = new AppState();
-    *appstate = state;
+    g_state = state;
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--colmap") == 0 && i + 1 < argc) {
+    for (int i = 1; i < g_argc; i++) {
+        char** argv = g_argv;
+        if (strcmp(argv[i], "--colmap") == 0 && i + 1 < g_argc) {
             state->colmap_dir = argv[++i];
-        } else if (strcmp(argv[i], "--mesh") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--mesh") == 0 && i + 1 < g_argc) {
             state->mesh_path = argv[++i];
-        } else if (strcmp(argv[i], "--object") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--object") == 0 && i + 1 < g_argc) {
             state->object_path = argv[++i];
         } else if (!state->ply_path) {
             state->ply_path = argv[i];
@@ -174,68 +184,19 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     //state->mesh_path   = state->mesh_path   ? state->mesh_path   : "res/cyberpunk_guy.glb";
     state->colmap_dir  = state->colmap_dir  ? state->colmap_dir  : "res/colmap";
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        LOG(ERROR|PLATFORM|INIT, "SDL_Init failed: %s", SDL_GetError());
-        return SDL_APP_FAILURE;
-    }
-
-#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
-    // Request a compatible GL context for sokol_gfx's GLCORE backend. 3.3
-    // core is the floor for SOKOL_GLCORE; we don't need anything newer for
-    // any of the generated shaders (glsl430).
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-#endif
-
-    state->window = SDL_CreateWindow("gsplat", 1280, 720,
-                                     SDL_WINDOW_RESIZABLE
-#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
-                                     | SDL_WINDOW_OPENGL
-#endif
-    );
-    if (!state->window) {
-        LOG(ERROR|PLATFORM|INIT, "SDL_CreateWindow failed: %s", SDL_GetError());
-        return SDL_APP_FAILURE;
-    }
-
-#if !defined(__EMSCRIPTEN__) || !defined(SOKOL_WGPU)
-    state->gl_context = SDL_GL_CreateContext(state->window);
-    if (!state->gl_context) {
-        LOG(ERROR|PLATFORM|INIT, "SDL_GL_CreateContext failed: %s", SDL_GetError());
-        return SDL_APP_FAILURE;
-    }
-    SDL_GL_MakeCurrent(state->window, state->gl_context);
-    SDL_GL_SetSwapInterval(1); // vsync
-#endif
-
-    // sokol_gfx setup. Defaults must match the swapchain we'll pass into sg_pass.
     sg_desc sgd = {};
-    sgd.environment.defaults.color_format = renderer_default_color_format();
-    sgd.environment.defaults.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-    sgd.environment.defaults.sample_count = 1;
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    int initial_w = 0, initial_h = 0;
-    SDL_GetWindowSize(state->window, &initial_w, &initial_h);
-    if (!renderer_wgpu_setup("#canvas", initial_w, initial_h, &sgd)) {
-        LOG(ERROR|WEBGPU|INIT, "WebGPU setup failed");
-        return SDL_APP_FAILURE;
-    }
-#endif
+    sgd.environment = app_sg_environment();
+    sgd.logger.func = slog_func;
     sg_setup(&sgd);
     if (!sg_isvalid()) {
         LOG(ERROR|RENDERER|INIT, "sg_setup failed");
-        return SDL_APP_FAILURE;
+        sapp_quit();
+        return;
     }
     state->sg_setup_done = true;
 
     // sokol_imgui creates the ImGui context itself, so we don't call
-    // ImGui::CreateContext(). ImGui_ImplSDL3 stays in the loop for event
-    // translation; it expects an existing context, so it goes after setup.
+    // ImGui::CreateContext().
     IMGUI_CHECKVERSION();
     simgui_desc_t sid = {};
     sid.color_format = renderer_default_color_format();
@@ -251,14 +212,12 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     state->sgimgui_setup_done = true;
 #endif
 
-    ImGui_ImplSDL3_InitForOther(state->window);
-    state->imgui_sdl3_initialized = true;
-
     // Renderer (no more SDL_GPUDevice; sokol_gfx is set up globally).
     state->renderer_started = true;
-    if (!renderer_init(&state->renderer, state->window)) {
+    if (!renderer_init(&state->renderer)) {
         LOG(ERROR|RENDERER|INIT, "Renderer init failed");
-        return SDL_APP_FAILURE;
+        sapp_quit();
+        return;
     }
 
     // Scene
@@ -326,11 +285,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     // Camera
     camera_init(&state->cam);
-    SDL_SetWindowRelativeMouseMode(state->window, true); // start in camera mode
+    sapp_lock_mouse(true); // start in camera mode
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
 
-    state->last_time = SDL_GetPerformanceCounter();
-    state->freq = SDL_GetPerformanceFrequency();
     state->refview_max_alpha = 0.5f;
     state->node_half_size = 0.5f;
     state->show_node_boxes = true;
@@ -349,39 +306,39 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     state->map_cam.ortho_blend  = 1.0f;
     state->map_cam.ortho_size   = 5.0f;
 
-    return SDL_APP_CONTINUE;
+    return;
 }
 
-GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
-    AppState* state = (AppState*)appstate;
-    if (!state) return SDL_APP_FAILURE;
-    SDL_Event& ev = *event;
+static void app_event(const sapp_event* ev) {
+    AppState* state = g_state;
+    if (!state || !ev) return;
 
-    ImGui_ImplSDL3_ProcessEvent(event);
+    simgui_handle_event(ev);
 
-    switch (ev.type) {
-    case SDL_EVENT_QUIT:
-        return SDL_APP_SUCCESS;
-    case SDL_EVENT_KEY_DOWN:
-    case SDL_EVENT_KEY_UP: {
-        bool down = (ev.type == SDL_EVENT_KEY_DOWN);
-        switch (ev.key.scancode) {
-            case SDL_SCANCODE_W: state->keys[0] = down; break;
-            case SDL_SCANCODE_A: state->keys[1] = down; break;
-            case SDL_SCANCODE_S: state->keys[2] = down; break;
-            case SDL_SCANCODE_D: state->keys[3] = down; break;
-            case SDL_SCANCODE_SPACE: state->keys[4] = down; break;
-            case SDL_SCANCODE_LCTRL: state->keys[5] = down; break;
-            case SDL_SCANCODE_LSHIFT: state->keys[6] = down; break;
-            case SDL_SCANCODE_E: state->keys[7] = down; break;
-            case SDL_SCANCODE_Q: state->keys[8] = down; break;
-            case SDL_SCANCODE_ESCAPE: if (down) return SDL_APP_SUCCESS; break;
+    switch (ev->type) {
+    case SAPP_EVENTTYPE_QUIT_REQUESTED:
+        sapp_quit();
+        return;
+    case SAPP_EVENTTYPE_KEY_DOWN:
+    case SAPP_EVENTTYPE_KEY_UP: {
+        bool down = (ev->type == SAPP_EVENTTYPE_KEY_DOWN);
+        switch (ev->key_code) {
+            case SAPP_KEYCODE_W: state->keys[0] = down; break;
+            case SAPP_KEYCODE_A: state->keys[1] = down; break;
+            case SAPP_KEYCODE_S: state->keys[2] = down; break;
+            case SAPP_KEYCODE_D: state->keys[3] = down; break;
+            case SAPP_KEYCODE_SPACE: state->keys[4] = down; break;
+            case SAPP_KEYCODE_LEFT_CONTROL: state->keys[5] = down; break;
+            case SAPP_KEYCODE_LEFT_SHIFT: state->keys[6] = down; break;
+            case SAPP_KEYCODE_E: state->keys[7] = down; break;
+            case SAPP_KEYCODE_Q: state->keys[8] = down; break;
+            case SAPP_KEYCODE_ESCAPE: if (down) sapp_quit(); break;
             default: break;
         }
         break;
     }
-    case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        if (ev.button.button == SDL_BUTTON_RIGHT && state->examine.state != Examine::OFF) {
+    case SAPP_EVENTTYPE_MOUSE_DOWN:
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT && state->examine.state != Examine::OFF) {
             // While examining, right-click exits. Cancels any in-flight
             // lerp by retargeting from the current pose back to `rest`.
             if (state->examine.state == Examine::ACTIVE) {
@@ -399,7 +356,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             // Do NOT toggle cam.camera_mode or map overlay.
             break;
         }
-        if (ev.button.button == SDL_BUTTON_RIGHT) {
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT) {
             if (state->refviews_loaded && state->refviews.in_inspect) {
                 // Exit inspect: lerp position back to where we clicked
                 // the hotspot from, drop ortho, re-enter FPS controls.
@@ -426,11 +383,11 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 state->refviews.in_inspect = false;
                 state->cam.orthographic = false;
                 state->cam.camera_mode = true;
-                SDL_SetWindowRelativeMouseMode(state->window, true);
+                sapp_lock_mouse(true);
                 ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
             } else {
                 state->cam.camera_mode = !state->cam.camera_mode;
-                SDL_SetWindowRelativeMouseMode(state->window, state->cam.camera_mode);
+                sapp_lock_mouse(state->cam.camera_mode);
                 ImGuiIO& io = ImGui::GetIO();
                 if (state->cam.camera_mode) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
                 else                 io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
@@ -440,13 +397,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 state->map_view_active = !state->map_view_active;
             }
         }
-        if (ev.button.button == SDL_BUTTON_LEFT && state->map_view_active &&
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && state->map_view_active &&
             !ImGui::GetIO().WantCaptureMouse) {
             // Begin panning the top-down map.
             state->map_dragging = true;
             break;
         }
-        if (ev.button.button == SDL_BUTTON_LEFT && state->cam.camera_mode &&
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && state->cam.camera_mode &&
             state->examine.state == Examine::OFF && !state->map_view_active) {
             // Ray from screen center (crosshair) into scene
             float forward[3];
@@ -534,7 +491,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                     // Switch to cursor mode (point & click); right-click
                     // will exit inspect and restore FPS controls.
                     state->cam.camera_mode = false;
-                    SDL_SetWindowRelativeMouseMode(state->window, false);
+                    sapp_lock_mouse(false);
                     ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
                     break;
                 }
@@ -637,13 +594,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             }
         }
         break;
-    case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (ev.button.button == SDL_BUTTON_LEFT) state->map_dragging = false;
+    case SAPP_EVENTTYPE_MOUSE_UP:
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) state->map_dragging = false;
         break;
-    case SDL_EVENT_MOUSE_MOTION:
+    case SAPP_EVENTTYPE_MOUSE_MOVE:
         if (state->cam.camera_mode) {
-            state->mouse_dx += ev.motion.xrel;
-            state->mouse_dy += ev.motion.yrel;
+            state->mouse_dx += ev->mouse_dx;
+            state->mouse_dy += ev->mouse_dy;
         }
         if (state->map_dragging && state->map_view_active) {
             // Pan along the map camera's own right/up basis (which lies
@@ -651,8 +608,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             // camera-local axes rather than world XZ so that dragging
             // still tracks screen-space movement if the map is rotated
             // about the world up axis.
-            int ww, wh;
-            SDL_GetWindowSize(state->window, &ww, &wh);
+            int wh = sapp_height();
             float fwd[3], right[3], up[3];
             float wup[3] = {0.0f, 1.0f, 0.0f};
             camera_get_forward(&state->map_cam, fwd);
@@ -670,20 +626,20 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             // strafe direction), so the signs here are flipped from
             // what a textbook drag-pan would suggest.
             float wpp = (2.0f * state->map_cam.ortho_size) / (float)wh;
-            float dr =  ev.motion.xrel * wpp;
-            float du = -ev.motion.yrel * wpp;
+            float dr =  ev->mouse_dx * wpp;
+            float du = -ev->mouse_dy * wpp;
             state->map_cam.position[0] += dr * right[0] + du * up[0];
             state->map_cam.position[1] += dr * right[1] + du * up[1];
             state->map_cam.position[2] += dr * right[2] + du * up[2];
         }
         break;
-    case SDL_EVENT_MOUSE_WHEEL:
+    case SAPP_EVENTTYPE_MOUSE_SCROLL:
         if (!ImGui::GetIO().WantCaptureMouse) {
             if (state->examine.state != Examine::OFF) {
                 // Zoom while examining: scale the AABB-fit distance.
                 // Clamped so the object can't be shoved into the
                 // camera or flown off to infinity.
-                float factor = (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
+                float factor = (ev->scroll_y > 0) ? (1.0f / 1.1f) : 1.1f;
                 state->examine.distance_scale *= factor;
                 if (state->examine.distance_scale < EXAMINE_ZOOM_MIN) state->examine.distance_scale = EXAMINE_ZOOM_MIN;
                 if (state->examine.distance_scale > EXAMINE_ZOOM_MAX) state->examine.distance_scale = EXAMINE_ZOOM_MAX;
@@ -693,19 +649,19 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 // Zoom toward the cursor: scale ortho_size, then shift
                 // map_cam.position so the world point under the cursor
                 // before the zoom remains under the cursor after.
-                float factor = (ev.wheel.y > 0) ? (1.0f / 1.2f) : 1.2f;
+                float factor = (ev->scroll_y > 0) ? (1.0f / 1.2f) : 1.2f;
                 float new_size = state->map_cam.ortho_size * factor;
                 if (new_size < 0.05f) { factor = 0.05f / state->map_cam.ortho_size; new_size = 0.05f; }
                 if (new_size > 50.0f) { factor = 50.0f  / state->map_cam.ortho_size; new_size = 50.0f;  }
 
-                int ww, wh;
-                SDL_GetWindowSize(state->window, &ww, &wh);
+                int ww = sapp_width();
+                int wh = sapp_height();
                 float aspect_m = (float)ww / (float)wh;
                 float half_h = state->map_cam.ortho_size;
                 float half_w = half_h * aspect_m;
 
-                float mx = ev.wheel.mouse_x;
-                float my = ev.wheel.mouse_y;
+                float mx = ev->mouse_x;
+                float my = ev->mouse_y;
                 float off_r = (2.0f * mx / (float)ww - 1.0f) * half_w;
                 float off_u = (1.0f - 2.0f * my / (float)wh) * half_h;
 
@@ -733,36 +689,34 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             } else if (state->cam.camera_mode) {
                 // FPS camera: wheel zooms by adjusting FOV.
                 // Wheel up -> FOV down (zoom in), wheel down -> FOV up (zoom out).
-                state->cam.fov_y *= (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
+                state->cam.fov_y *= (ev->scroll_y > 0) ? (1.0f / 1.1f) : 1.1f;
                 float min_fov = 10.0f * (3.14159265358979f / 180.0f);
                 float max_fov = 120.0f * (3.14159265358979f / 180.0f);
                 if (state->cam.fov_y < min_fov) state->cam.fov_y = min_fov;
                 if (state->cam.fov_y > max_fov) state->cam.fov_y = max_fov;
             } else {
-                state->cam.move_speed *= (ev.wheel.y > 0) ? 1.2f : (1.0f / 1.2f);
+                state->cam.move_speed *= (ev->scroll_y > 0) ? 1.2f : (1.0f / 1.2f);
                 if (state->cam.move_speed < 0.1f) state->cam.move_speed = 0.1f;
                 if (state->cam.move_speed > 100.0f) state->cam.move_speed = 100.0f;
             }
         }
         break;
+    default:
+        break;
     }
-
-
-    return SDL_APP_CONTINUE;
+    return;
 }
 
-GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
-    AppState* state = (AppState*)appstate;
-    if (!state) return SDL_APP_FAILURE;
+static void app_frame(void) {
+    AppState* state = g_state;
+    if (!state) return;
 
     PROFILE_FRAME();
-    PROFILE_BEGIN("SDL_AppIterate");
+    PROFILE_BEGIN("app_frame");
 
     const uint32_t max_neighbors = MAX_NEIGHBORS;
 
-    uint64_t now = SDL_GetPerformanceCounter();
-    float dt = (float)(now - state->last_time) / (float)state->freq;
-    state->last_time = now;
+    float dt = (float)sapp_frame_duration();
     g_app_time += dt;
     if (g_splat_effect_duration <= 0.0f) g_splat_effect_duration = 2.25f;
     if (g_splat_effect_strength <= 0.0f) g_splat_effect_strength = 0.08f;
@@ -894,8 +848,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, 0);
     }
 
-    // Get window size
-    SDL_GetWindowSize(state->window, &win_w, &win_h);
+    // Get framebuffer size
+    win_w = sapp_width();
+    win_h = sapp_height();
     aspect = (float)win_w / (float)win_h;
 
     // Animate ortho blend toward target. Skipped while an inspect lerp is
@@ -934,13 +889,13 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     // each in its own mix() branch (see comment in camera.h).
     cam_uniforms.persp_focal = (1.0f / tanf(state->cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
     cam_uniforms.ortho_focal = (float)win_h / (2.0f * state->cam.ortho_size);
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    cam_uniforms.clip_y_sign = -1.0f;
-    cam_uniforms.clip_z_01 = 1.0f;
-#else
-    cam_uniforms.clip_y_sign = 1.0f;
-    cam_uniforms.clip_z_01 = 0.0f;
-#endif
+    if (sg_query_backend() == SG_BACKEND_WGPU) {
+        cam_uniforms.clip_y_sign = -1.0f;
+        cam_uniforms.clip_z_01 = 1.0f;
+    } else {
+        cam_uniforms.clip_y_sign = 1.0f;
+        cam_uniforms.clip_z_01 = 0.0f;
+    }
     }
 
     // Cull here; sort later after ImGui so a same-frame render-mode switch
@@ -953,10 +908,8 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     PROFILE("imgui") {
     // ImGui frame. simgui_new_frame calls ImGui::NewFrame internally and
-    // sets DisplaySize/DeltaTime. ImGui_ImplSDL3_NewFrame still runs before
-    // it to forward mouse/keyboard state into ImGui IO.
-    ImGui_ImplSDL3_NewFrame();
-    simgui_new_frame({ win_w, win_h, dt, 1.0f });
+    // sets DisplaySize/DeltaTime.
+    simgui_new_frame({ win_w, win_h, dt, sapp_dpi_scale() });
 
     ImGui::Begin("Info");
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
@@ -1487,12 +1440,11 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
 
     PROFILE_END();
-    return SDL_APP_CONTINUE;
+    return;
 }
 
-GSPLAT_EXPORT void SDL_AppQuit(void *appstate, SDL_AppResult result) {
-    (void)result;
-    AppState* state = (AppState*)appstate;
+static void app_cleanup(void) {
+    AppState* state = g_state;
     if (!state) return;
 
     // Tear down GPU resources before sg_shutdown (refview images, renderer
@@ -1506,18 +1458,31 @@ GSPLAT_EXPORT void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     }
     if (state->renderer_started) renderer_destroy(&state->renderer);
 
-    if (state->imgui_sdl3_initialized) ImGui_ImplSDL3_Shutdown();
 #if defined(ENABLE_PROFILER)
     if (state->sgimgui_setup_done) sgimgui_shutdown();
 #endif
     if (state->simgui_setup_done) simgui_shutdown(); // destroys ImGui context
     if (state->sg_setup_done) sg_shutdown();
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    renderer_wgpu_shutdown();
-#endif
-
-    if (state->gl_context) SDL_GL_DestroyContext(state->gl_context);
-    if (state->window) SDL_DestroyWindow(state->window);
 
     delete state;
+    g_state = NULL;
+}
+
+sapp_desc sokol_main(int argc, char* argv[]) {
+    g_argc = argc;
+    g_argv = argv;
+
+    sapp_desc desc = {};
+    desc.init_cb = app_init;
+    desc.frame_cb = app_frame;
+    desc.cleanup_cb = app_cleanup;
+    desc.event_cb = app_event;
+    desc.width = 1280;
+    desc.height = 720;
+    desc.sample_count = 1;
+    desc.swap_interval = 1;
+    desc.window_title = "gsplat";
+    desc.logger.func = slog_func;
+    desc.html5.canvas_selector = "#canvas";
+    return desc;
 }

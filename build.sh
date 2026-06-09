@@ -3,9 +3,11 @@ set -e
 
 CXX="${CXX:-g++}"
 CXXFLAGS="-O2 -std=c++17 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-function"
-# sokol_gfx's GLCORE backend needs an OpenGL context plus the libdl/pthread
-# deps for its built-in GL loader.
-LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -ldl -lpthread -lwebp"
+# sokol_app's GLCORE backend needs the Linux windowing/OpenGL libraries plus
+# libdl/pthread deps for sokol's built-in GL loader. SDL is still linked for
+# utility calls (logging, file loading, threading), but no longer owns the
+# window or event loop.
+LDFLAGS="-lSDL3 -lsqlite3 -lm -lGL -lX11 -lXi -lXcursor -ldl -lpthread -lwebp"
 OUT="gsplat"
 ENABLE_PROFILER="${ENABLE_PROFILER:-0}"
 HOTRELOAD="${HOTRELOAD:-0}"
@@ -62,15 +64,13 @@ for name in wireframe overlay darken mesh splat accum; do
     ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es:wgsl
 done
 
-# Build imgui static lib if missing. imgui_impl_sdlgpu3.cpp is no longer part
-# of the build — sokol_imgui handles ImGui rendering. We keep imgui_impl_sdl3
-# for translating SDL events into ImGui IO state.
+# Build imgui static lib if missing. sokol_imgui handles ImGui rendering and,
+# with sokol_app, ImGui event translation too.
 if [ ! -f "$IMGUI_LIB" ]; then
     echo "Building imgui..."
     IMGUI_OBJS=()
     for src in "$IMGUI_DIR"/imgui.cpp "$IMGUI_DIR"/imgui_draw.cpp \
-               "$IMGUI_DIR"/imgui_tables.cpp "$IMGUI_DIR"/imgui_widgets.cpp \
-               "$IMGUI_DIR"/backends/imgui_impl_sdl3.cpp; do
+               "$IMGUI_DIR"/imgui_tables.cpp "$IMGUI_DIR"/imgui_widgets.cpp; do
         rel="${src#$VENDOR_DIR/}"
         obj="$OBJ_DIR/${rel%.cpp}.o"
         mkdir -p "$(dirname "$obj")"
@@ -98,7 +98,7 @@ fi
 if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/miniz.c" -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
     echo "Building vendor single-header impls..."
     objs=("$OBJ_DIR/third_party_impl.o" "$OBJ_DIR/miniz.o")
-    $CXX $CXXFLAGS "${PIC_FLAGS[@]}" "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
+    $CXX $CXXFLAGS "${PIC_FLAGS[@]}" "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I. -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"
     $CXX -O2 -Wall -Wextra -Wno-unused-function "${PIC_FLAGS[@]}" -I"$VENDOR_DIR" -x c -c "$VENDOR_DIR/miniz.c" -o "${objs[1]}"
     ar rcs "$THIRDPARTY_LIB" "${objs[@]}"
     rm "${objs[@]}"

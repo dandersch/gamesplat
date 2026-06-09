@@ -1,5 +1,4 @@
 #pragma once
-#include <SDL3/SDL.h>
 #include "sokol_gfx.h"
 #include "gaussian.h"
 #include "camera.h"
@@ -57,7 +56,6 @@ struct MeshGpu {
 };
 
 struct Renderer {
-    SDL_Window*     window;
     SplatRenderMode splat_render_mode;
     sg_pipeline     splat_pipeline;
     sg_pipeline     splat_stochastic_pipeline;
@@ -108,7 +106,7 @@ struct Renderer {
     bool            stochastic_accumulation_enabled;
 };
 
-bool renderer_init(Renderer* r, SDL_Window* window);
+bool renderer_init(Renderer* r);
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene);
 bool renderer_upload_mesh(Renderer* r, const Mesh* mesh);
 // Upload a second, static mesh that is drawn alongside the primary mesh with
@@ -120,10 +118,6 @@ bool renderer_upload_object_mesh(Renderer* r, const Mesh* mesh);
 bool renderer_reload_shaders(Renderer* r);
 void renderer_reset_stochastic_accumulation(Renderer* r);
 sg_pixel_format renderer_default_color_format(void);
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_desc* desc);
-void renderer_wgpu_shutdown(void);
-#endif
 // map_cam is reserved for the top-down overlay; the two-pass map_cam path is
 // temporarily disabled in the sokol port (see TODO in renderer.cpp).
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam, const OverlayParams* overlay, const NodeRenderParams* nodes, const SplatEffectParams* splat_effect = NULL, float wireframe_occlusion = 1.0f, const CameraUniforms* map_cam = NULL);

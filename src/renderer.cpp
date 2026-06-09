@@ -4,12 +4,8 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-#include <utility>
-#include <webgpu/webgpu_cpp.h>
-#endif
+#include "sokol_app.h"
 #include "sokol_gfx.h"
-#define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
 #include "sokol_imgui.h"
 #include "profiler.h"
@@ -25,302 +21,54 @@
 #include "shaders/splat.glsl.h"
 #include "shaders/accum.glsl.h"
 
-// Forward decl (defined later in this TU).
-static void mesh_gpu_release(MeshGpu* m);
-
 sg_pixel_format renderer_default_color_format(void) {
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    return SG_PIXELFORMAT_BGRA8;
-#else
+    if (sg_isvalid()) {
+        return sg_query_desc().environment.defaults.color_format;
+    }
     return SG_PIXELFORMAT_RGBA8;
-#endif
 }
 
-// TODO move to webgpu.h
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-struct RendererWgpuState {
-    wgpu::Instance instance;
-    wgpu::Adapter adapter;
-    wgpu::Device device;
-    wgpu::Queue queue;
-    wgpu::Surface surface;
-    wgpu::Texture depth_texture;
-    wgpu::TextureView depth_view;
-    wgpu::TextureView render_view;
-    wgpu::SurfaceTexture surface_texture;
-    int width;
-    int height;
-    bool configured;
-};
-
-static RendererWgpuState g_wgpu;
-
-static const char* renderer_wgpu_string(wgpu::StringView s) {
-    return s.data ? s.data : "";
+static sg_pixel_format renderer_sg_pixel_format(sapp_pixel_format fmt) {
+    switch (fmt) {
+        case SAPP_PIXELFORMAT_NONE:          return SG_PIXELFORMAT_NONE;
+        case SAPP_PIXELFORMAT_RGBA8:         return SG_PIXELFORMAT_RGBA8;
+        case SAPP_PIXELFORMAT_SRGB8A8:       return SG_PIXELFORMAT_SRGB8A8;
+        case SAPP_PIXELFORMAT_BGRA8:         return SG_PIXELFORMAT_BGRA8;
+        case SAPP_PIXELFORMAT_SBGRA8:        return SG_PIXELFORMAT_BGRA8;
+        case SAPP_PIXELFORMAT_DEPTH:         return SG_PIXELFORMAT_DEPTH;
+        case SAPP_PIXELFORMAT_DEPTH_STENCIL: return SG_PIXELFORMAT_DEPTH_STENCIL;
+        default:                             return SG_PIXELFORMAT_RGBA8;
+    }
 }
 
-static bool renderer_wgpu_configure_surface(int width, int height) {
-    if (width <= 0 || height <= 0) return false;
-    if (!g_wgpu.device || !g_wgpu.surface) return false;
-    if (g_wgpu.configured && g_wgpu.width == width && g_wgpu.height == height) return true;
-
-    g_wgpu.render_view = nullptr;
-    g_wgpu.depth_view = nullptr;
-    g_wgpu.depth_texture = nullptr;
-
-    wgpu::SurfaceConfiguration cfg = {};
-    cfg.device = g_wgpu.device;
-    cfg.format = wgpu::TextureFormat::BGRA8Unorm;
-    cfg.usage = wgpu::TextureUsage::RenderAttachment;
-    cfg.width = (uint32_t)width;
-    cfg.height = (uint32_t)height;
-    cfg.presentMode = wgpu::PresentMode::Fifo;
-    g_wgpu.surface.Configure(&cfg);
-
-    wgpu::TextureDescriptor depth_desc = {};
-    depth_desc.usage = wgpu::TextureUsage::RenderAttachment;
-    depth_desc.dimension = wgpu::TextureDimension::e2D;
-    depth_desc.size.width = (uint32_t)width;
-    depth_desc.size.height = (uint32_t)height;
-    depth_desc.size.depthOrArrayLayers = 1;
-    depth_desc.format = wgpu::TextureFormat::Depth32FloatStencil8;
-    depth_desc.mipLevelCount = 1;
-    depth_desc.sampleCount = 1;
-    g_wgpu.depth_texture = g_wgpu.device.CreateTexture(&depth_desc);
-    if (!g_wgpu.depth_texture) {
-        LOG(ERROR|WEBGPU|RESOURCE, "failed to create depth/stencil texture");
-        return false;
-    }
-    g_wgpu.depth_view = g_wgpu.depth_texture.CreateView();
-    if (!g_wgpu.depth_view) {
-        LOG(ERROR|WEBGPU|RESOURCE, "failed to create depth/stencil texture view");
-        return false;
-    }
-
-    g_wgpu.width = width;
-    g_wgpu.height = height;
-    g_wgpu.configured = true;
-    return true;
-}
-
-bool renderer_wgpu_setup(const char* canvas_selector, int width, int height, sg_desc* desc) {
-    if (!desc) return false;
-
-    static constexpr wgpu::InstanceFeatureName instance_features[] = {
-        wgpu::InstanceFeatureName::TimedWaitAny,
-    };
-    wgpu::InstanceDescriptor instance_desc = {};
-    instance_desc.requiredFeatureCount = 1;
-    instance_desc.requiredFeatures = instance_features;
-    g_wgpu.instance = wgpu::CreateInstance(&instance_desc);
-    if (!g_wgpu.instance) {
-        LOG(ERROR|WEBGPU|INIT, "failed to create instance");
-        return false;
-    }
-
-    wgpu::RequestAdapterOptions adapter_opts = {};
-    adapter_opts.featureLevel = wgpu::FeatureLevel::Core;
-    adapter_opts.powerPreference = wgpu::PowerPreference::HighPerformance;
-    g_wgpu.instance.WaitAny(
-        g_wgpu.instance.RequestAdapter(
-            &adapter_opts,
-            wgpu::CallbackMode::WaitAnyOnly,
-            [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-                if (status != wgpu::RequestAdapterStatus::Success) {
-                    LOG(ERROR|WEBGPU|INIT, "requestAdapter failed: %s", renderer_wgpu_string(message));
-                    return;
-                }
-                g_wgpu.adapter = std::move(adapter);
-            }),
-        UINT64_MAX);
-    if (!g_wgpu.adapter) return false;
-
-    // Report which adapter we actually got. On Linux, Chromium frequently hands
-    // back a *software* WebGPU adapter (SwiftShader / adapterType == CPU) unless
-    // hardware WebGPU is explicitly enabled (e.g. --enable-features=Vulkan
-    // --enable-unsafe-webgpu --ignore-gpu-blocklist). A CPU adapter software-
-    // rasterizes the (heavily overdrawn) splats and pegs the CPU -> ~0.2fps,
-    // even though the WebGL path got hardware acceleration. Log loudly so this
-    // failure mode is obvious instead of silently "working" but unusable.
-    {
-        wgpu::AdapterInfo info = {};
-        g_wgpu.adapter.GetInfo(&info);
-        auto type_name = [](wgpu::AdapterType t) -> const char* {
-            switch (t) {
-                case wgpu::AdapterType::DiscreteGPU:   return "DiscreteGPU";
-                case wgpu::AdapterType::IntegratedGPU: return "IntegratedGPU";
-                case wgpu::AdapterType::CPU:           return "CPU (software!)";
-                default:                               return "Unknown";
-            }
-        };
-        auto backend_name = [](wgpu::BackendType t) -> const char* {
-            switch (t) {
-                case wgpu::BackendType::Vulkan:   return "Vulkan";
-                case wgpu::BackendType::Metal:    return "Metal";
-                case wgpu::BackendType::D3D11:    return "D3D11";
-                case wgpu::BackendType::D3D12:    return "D3D12";
-                case wgpu::BackendType::OpenGL:   return "OpenGL";
-                case wgpu::BackendType::OpenGLES: return "OpenGLES";
-                case wgpu::BackendType::WebGPU:   return "WebGPU";
-                case wgpu::BackendType::Null:     return "Null";
-                default:                          return "Unknown";
-            }
-        };
-        LOG(INFO|WEBGPU|INIT,
-            "adapter: type=%s backend=%s vendor='%s' architecture='%s' device='%s' description='%s'",
-            type_name(info.adapterType), backend_name(info.backendType),
-            renderer_wgpu_string(info.vendor), renderer_wgpu_string(info.architecture),
-            renderer_wgpu_string(info.device), renderer_wgpu_string(info.description));
-        if (info.adapterType == wgpu::AdapterType::CPU) {
-            LOG(WARN|WEBGPU|GPU,
-                "got a SOFTWARE (CPU) adapter. Splats will be CPU-rasterized and performance will be terrible (~100x slower). Enable hardware WebGPU in the browser (Linux Chromium: --enable-features=Vulkan --enable-unsafe-webgpu --ignore-gpu-blocklist) or check chrome://gpu.");
-        }
-    }
-
-    if (!g_wgpu.adapter.HasFeature(wgpu::FeatureName::Depth32FloatStencil8)) {
-        LOG(ERROR|WEBGPU|INIT, "adapter does not support depth32float-stencil8");
-        return false;
-    }
-
-    static constexpr wgpu::FeatureName required_features[] = {
-        wgpu::FeatureName::Depth32FloatStencil8,
-    };
-    wgpu::Limits adapter_limits = {};
-    g_wgpu.adapter.GetLimits(&adapter_limits);
-    wgpu::Limits required_limits = {};
-    required_limits.maxBufferSize = adapter_limits.maxBufferSize;
-    required_limits.maxStorageBufferBindingSize = adapter_limits.maxStorageBufferBindingSize;
-    wgpu::DeviceDescriptor device_desc = {};
-    device_desc.requiredFeatureCount = 1;
-    device_desc.requiredFeatures = required_features;
-    device_desc.requiredLimits = &required_limits;
-    device_desc.SetUncapturedErrorCallback(
-        [](const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message) {
-            LOG(ERROR|WEBGPU|GPU, "uncaptured error (%d): %s", (int)type, renderer_wgpu_string(message));
-        });
-    device_desc.SetDeviceLostCallback(
-        wgpu::CallbackMode::AllowSpontaneous,
-        [](const wgpu::Device&, wgpu::DeviceLostReason reason, wgpu::StringView message) {
-            LOG(ERROR|WEBGPU|GPU, "device lost (%d): %s", (int)reason, renderer_wgpu_string(message));
-        });
-    g_wgpu.instance.WaitAny(
-        g_wgpu.adapter.RequestDevice(
-            &device_desc,
-            wgpu::CallbackMode::WaitAnyOnly,
-            [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
-                if (status != wgpu::RequestDeviceStatus::Success) {
-                    LOG(ERROR|WEBGPU|INIT, "requestDevice failed: %s", renderer_wgpu_string(message));
-                    return;
-                }
-                g_wgpu.device = std::move(device);
-                g_wgpu.queue = g_wgpu.device.GetQueue();
-            }),
-        UINT64_MAX);
-    if (!g_wgpu.device) return false;
-
-    // Log the limits the DEVICE actually received (not the adapter's). If these
-    // come back as the WebGPU defaults (maxBufferSize 256MB / maxStorageBuffer-
-    // BindingSize 128MB) then requiredLimits wasn't honored; if they're large
-    // then a failing big allocation is a genuine out-of-memory.
-    {
-        wgpu::Limits dev_limits = {};
-        g_wgpu.device.GetLimits(&dev_limits);
-        LOG(INFO|WEBGPU|GPU,
-            "device limits: maxBufferSize=%llu MB, maxStorageBufferBindingSize=%llu MB",
-            (unsigned long long)(dev_limits.maxBufferSize / (1024 * 1024)),
-            (unsigned long long)(dev_limits.maxStorageBufferBindingSize / (1024 * 1024)));
-    }
-
-    wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {};
-    canvas_desc.selector = canvas_selector ? canvas_selector : "#canvas";
-    wgpu::SurfaceDescriptor surface_desc = {};
-    surface_desc.nextInChain = &canvas_desc;
-    g_wgpu.surface = g_wgpu.instance.CreateSurface(&surface_desc);
-    if (!g_wgpu.surface) {
-        LOG(ERROR|WEBGPU|INIT, "failed to create canvas surface");
-        return false;
-    }
-
-    if (!renderer_wgpu_configure_surface(width, height)) return false;
-
-    desc->environment.wgpu.device = g_wgpu.device.Get();
-    desc->environment.defaults.color_format = renderer_default_color_format();
-    desc->environment.defaults.depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-    desc->environment.defaults.sample_count = 1;
-    return true;
-}
-
-static bool renderer_wgpu_fill_swapchain(sg_swapchain* swapchain, int width, int height) {
-    if (!swapchain) return false;
-    if (!renderer_wgpu_configure_surface(width, height)) return false;
-
-    g_wgpu.render_view = nullptr;
-    g_wgpu.surface_texture = {};
-    g_wgpu.surface.GetCurrentTexture(&g_wgpu.surface_texture);
-    if ((g_wgpu.surface_texture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) &&
-        (g_wgpu.surface_texture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal)) {
-        LOG(ERROR|WEBGPU|FRAME, "failed to acquire surface texture (%d)", (int)g_wgpu.surface_texture.status);
-        return false;
-    }
-    g_wgpu.render_view = g_wgpu.surface_texture.texture.CreateView();
-    if (!g_wgpu.render_view) {
-        LOG(ERROR|WEBGPU|RESOURCE, "failed to create surface texture view");
-        return false;
-    }
-
-    swapchain->width = width;
-    swapchain->height = height;
-    swapchain->sample_count = 1;
-    swapchain->color_format = renderer_default_color_format();
-    swapchain->depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-    swapchain->wgpu.render_view = g_wgpu.render_view.Get();
-    swapchain->wgpu.depth_stencil_view = g_wgpu.depth_view.Get();
-    return true;
-}
-
-static void renderer_wgpu_present(void) {
-    // emdawnwebgpu intentionally doesn't support wgpuSurfacePresent(); the
-    // browser presents the current canvas texture at the requestAnimationFrame
-    // boundary. Releasing our view/reference is enough for the next frame.
-    g_wgpu.render_view = nullptr;
-    g_wgpu.surface_texture = {};
-}
-
-void renderer_wgpu_shutdown(void) {
-    g_wgpu.render_view = nullptr;
-    g_wgpu.depth_view = nullptr;
-    g_wgpu.depth_texture = nullptr;
-    g_wgpu.surface = nullptr;
-    g_wgpu.queue = nullptr;
-    g_wgpu.device = nullptr;
-    g_wgpu.adapter = nullptr;
-    g_wgpu.instance = nullptr;
-    g_wgpu = {};
-}
-#endif
-
-static bool renderer_fill_default_swapchain(sg_swapchain* swapchain, int width, int height) {
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    return renderer_wgpu_fill_swapchain(swapchain, width, height);
-#else
-    if (!swapchain) return false;
-    swapchain->width = width;
-    swapchain->height = height;
-    swapchain->sample_count = 1;
-    swapchain->color_format = renderer_default_color_format();
-    swapchain->depth_format = SG_PIXELFORMAT_DEPTH_STENCIL;
-    swapchain->gl.framebuffer = 0;
-    return true;
-#endif
-}
-
-static void renderer_present_default_swapchain(SDL_Window* window) {
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    (void)window;
-    renderer_wgpu_present();
-#else
-    SDL_GL_SwapWindow(window);
-#endif
+static sg_swapchain renderer_default_swapchain(void) {
+    sapp_swapchain src = sapp_get_swapchain();
+    sg_swapchain dst = {};
+    dst.invalid = src.invalid;
+    dst.width = src.width;
+    dst.height = src.height;
+    dst.sample_count = src.sample_count;
+    dst.color_format = renderer_sg_pixel_format(src.color_format);
+    dst.depth_format = renderer_sg_pixel_format(src.depth_format);
+    dst.metal.current_drawable = src.metal.current_drawable;
+    dst.metal.depth_stencil_texture = src.metal.depth_stencil_texture;
+    dst.metal.msaa_color_texture = src.metal.msaa_color_texture;
+    dst.d3d11.render_view = src.d3d11.render_view;
+    dst.d3d11.resolve_view = src.d3d11.resolve_view;
+    dst.d3d11.depth_stencil_view = src.d3d11.depth_stencil_view;
+    dst.wgpu.render_view = src.wgpu.render_view;
+    dst.wgpu.resolve_view = src.wgpu.resolve_view;
+    dst.wgpu.depth_stencil_view = src.wgpu.depth_stencil_view;
+    dst.vulkan.render_image = src.vulkan.render_image;
+    dst.vulkan.render_view = src.vulkan.render_view;
+    dst.vulkan.resolve_image = src.vulkan.resolve_image;
+    dst.vulkan.resolve_view = src.vulkan.resolve_view;
+    dst.vulkan.depth_stencil_image = src.vulkan.depth_stencil_image;
+    dst.vulkan.depth_stencil_view = src.vulkan.depth_stencil_view;
+    dst.vulkan.render_finished_semaphore = src.vulkan.render_finished_semaphore;
+    dst.vulkan.present_complete_semaphore = src.vulkan.present_complete_semaphore;
+    dst.gl.framebuffer = src.gl.framebuffer;
+    return dst;
 }
 
 static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
@@ -562,9 +310,8 @@ bool renderer_reload_shaders(Renderer* r) {
     return ok;
 }
 
-bool renderer_init(Renderer* r, SDL_Window* window) {
+bool renderer_init(Renderer* r) {
     memset(r, 0, sizeof(*r));
-    r->window = window;
     r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
     r->stochastic_samples_per_frame = 1;
     r->stochastic_accumulation_enabled = true;
@@ -676,15 +423,8 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
 
-    // Firefox/Linux WebGPU currently reports 1GB buffer limits but can OOM on
-    // app-like setups with a 128MB storage buffer, so large gaussian scenes may
-    // fail here until the per-gaussian GPU footprint is reduced.
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
     LOG(INFO|GAUSSIAN|GPU, "gaussian-buffer: allocating %u bytes (%.1f MB) as a single storage buffer",
         payload_size, (double)payload_size / (1024.0 * 1024.0));
-    g_wgpu.device.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
-    g_wgpu.device.PushErrorScope(wgpu::ErrorFilter::Validation);
-#endif
 
     sg_buffer_desc gbd = {};
     gbd.usage.storage_buffer = true;
@@ -694,34 +434,6 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     gbd.label = "gaussian-buffer";
     r->gaussian_buffer = sg_make_buffer(&gbd);
     free(gpu_data);
-
-#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
-    // Synchronously drain the error scopes so we know exactly which allocation
-    // failed and with what message (uncaptured errors are otherwise async and
-    // hard to correlate).
-    g_wgpu.instance.WaitAny(
-        g_wgpu.device.PopErrorScope(
-            wgpu::CallbackMode::WaitAnyOnly,
-            [](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView message) {
-                if (type != wgpu::ErrorType::NoError) {
-                    LOG(ERROR|GAUSSIAN|GPU, "gaussian-buffer VALIDATION error (%d): %s",
-                        (int)type, renderer_wgpu_string(message));
-                }
-            }),
-        UINT64_MAX);
-    g_wgpu.instance.WaitAny(
-        g_wgpu.device.PopErrorScope(
-            wgpu::CallbackMode::WaitAnyOnly,
-            [](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView message) {
-                if (type != wgpu::ErrorType::NoError) {
-                    LOG(ERROR|GAUSSIAN|GPU, "gaussian-buffer OUT-OF-MEMORY (%d): %s",
-                        (int)type, renderer_wgpu_string(message));
-                } else {
-                    LOG(INFO|GAUSSIAN|GPU, "gaussian-buffer: allocated OK");
-                }
-            }),
-        UINT64_MAX);
-#endif
 
     if (sg_query_buffer_state(r->gaussian_buffer) != SG_RESOURCESTATE_VALID) {
         LOG(ERROR|GAUSSIAN|GPU, "gaussian-buffer: allocation failed; splat drawing disabled");
@@ -1050,7 +762,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     };
 
     PROFILE("render mesh pass") {
-    PROFILE_GPU("mesh pass") {
+    PROFILE_GPU_BEGIN("mesh pass");
     // Primary animated mesh.
     {
         float model[16];
@@ -1068,7 +780,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         math_mat4_mul(vp, obj_model, obj_mvp);
         draw_mesh_slot(&r->object_gpu, obj_mvp);
     }
-    }
+    PROFILE_GPU_END();
     }
 
     // Splats
@@ -1192,8 +904,8 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         }
     }
 
-    int win_w = 0, win_h = 0;
-    SDL_GetWindowSize(r->window, &win_w, &win_h);
+    int win_w = sapp_width();
+    int win_h = sapp_height();
 
     if (stochastic) {
         if (!renderer_ensure_stochastic_targets(r, win_w, win_h)) {
@@ -1285,10 +997,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
         pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
         pass.action.stencil.clear_value = 0;
-        if (!renderer_fill_default_swapchain(&pass.swapchain, win_w, win_h)) {
-            LOG(ERROR|RENDERER|FRAME, "Failed to acquire default swapchain");
-            return;
-        }
+        pass.swapchain = renderer_default_swapchain();
 
         sg_begin_pass(&pass);
         sg_apply_pipeline(r->blit_pipeline);
@@ -1308,7 +1017,6 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         PROFILE("render commit") {
         sg_commit();
         PROFILE_GPU_COLLECT();
-        renderer_present_default_swapchain(r->window);
         }
         return;
     }
@@ -1324,10 +1032,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
     pass.action.stencil.clear_value = 0;
     // Backend-managed default surface (GL framebuffer 0 or current WebGPU canvas texture).
-    if (!renderer_fill_default_swapchain(&pass.swapchain, win_w, win_h)) {
-        LOG(ERROR|RENDERER|FRAME, "Failed to acquire default swapchain");
-        return;
-    }
+    pass.swapchain = renderer_default_swapchain();
 
     sg_begin_pass(&pass);
     draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
@@ -1340,7 +1045,6 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     PROFILE("render commit") {
     sg_commit();
     PROFILE_GPU_COLLECT();
-    renderer_present_default_swapchain(r->window);
     }
 }
 

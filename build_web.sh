@@ -111,7 +111,6 @@ SOURCES=(
     "$VENDOR_DIR/imgui/imgui_draw.cpp"
     "$VENDOR_DIR/imgui/imgui_tables.cpp"
     "$VENDOR_DIR/imgui/imgui_widgets.cpp"
-    "$VENDOR_DIR/imgui/backends/imgui_impl_sdl3.cpp"
 )
 
 echo "Building libwebp decoder..."

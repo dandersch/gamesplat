@@ -17,51 +17,57 @@
 #define SJ_IMPL
 #include "sj.h"
 
-// --- sokol_gfx + sokol_imgui ---------------------------------------------
+// --- sokol_app + sokol_gfx + sokol_imgui ----------------------------------
 // Keep the native build on the desktop GL backend and switch only the
-// Emscripten build to WebGL2/GLES3. The generated shader headers carry both
-// glsl430 and glsl300es variants.
+// Emscripten build to WebGPU. The generated shader headers carry both
+// glsl430 and wgsl variants.
 #define SOKOL_IMPL
 #if defined(ENABLE_PROFILER)
-#define SOKOL_TRACE_HOOKS
+  #define SOKOL_TRACE_HOOKS
 #endif
 #if defined(__EMSCRIPTEN__)
-#if !defined(SOKOL_WGPU)
-#define SOKOL_WGPU
-#endif
+  #if !defined(SOKOL_WGPU)
+    #define SOKOL_WGPU
+  #endif
 #else
-#if !defined(SOKOL_GLCORE)
-#define SOKOL_GLCORE
+  #if !defined(SOKOL_GLCORE)
+    #define SOKOL_GLCORE
+  #endif
 #endif
-#endif
+
+_Pragma ("GCC diagnostic push")
+_Pragma ("GCC diagnostic ignored \"-Wunused-but-set-variable\"")
+#include "sokol_app.h"
+_Pragma ("GCC diagnostic pop")
 #include "sokol_gfx.h"
+#include "sokol_log.h"
 
 // sokol_imgui.h is the ImGui rendering backend (NOT to be confused with
 // sokol_gfx_imgui.h, which is a debug inspector). We compile as C++ so it
-// talks to the ImGui C++ API directly. SOKOL_IMGUI_NO_SOKOL_APP drops the
-// sokol_app dependency since we use SDL3 for windowing/input.
+// talks to the ImGui C++ API directly. sokol_app forwards input events to
+// sokol_imgui via simgui_handle_event().
 #define SOKOL_IMGUI_IMPL
-#define SOKOL_IMGUI_NO_SOKOL_APP
 #include "imgui.h"
 #include "sokol_imgui.h"
 #if defined(ENABLE_PROFILER)
-#define SOKOL_GFX_IMGUI_IMPL
-#include "sokol_gfx_imgui.h"
+  #define SOKOL_GFX_IMGUI_IMPL
+  #include "sokol_gfx_imgui.h"
 #endif
 
 // Pull the sokol-shdc generated shader headers into the same TU as
 // sokol_gfx.h so the *_shader_desc() / SLOT_* / uniform-block-struct symbols
 // are linkable from renderer.cpp.
-#include "../shaders/wireframe.glsl.h"
-#include "../shaders/overlay.glsl.h"
-#include "../shaders/darken.glsl.h"
-#include "../shaders/mesh.glsl.h"
-#include "../shaders/splat.glsl.h"
+#include "shaders/wireframe.glsl.h"
+#include "shaders/overlay.glsl.h"
+#include "shaders/darken.glsl.h"
+#include "shaders/mesh.glsl.h"
+#include "shaders/splat.glsl.h"
+#include "shaders/accum.glsl.h"
 
 #if defined(_MSC_VER)
-#define GSPLAT_HOTRELOAD_EXPORT extern "C" __declspec(dllexport)
+  #define GSPLAT_HOTRELOAD_EXPORT extern "C" __declspec(dllexport)
 #else
-#define GSPLAT_HOTRELOAD_EXPORT extern "C" __attribute__((visibility("default")))
+  #define GSPLAT_HOTRELOAD_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
 // POC hot-reload hooks for preserving the private file-scope state owned by

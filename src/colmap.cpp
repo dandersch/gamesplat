@@ -1,5 +1,4 @@
 #include "colmap.h"
-#include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -11,6 +10,7 @@
 #include <sqlite3.h>
 #endif
 
+// TODO utils.h / strings.h
 static bool file_exists(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
@@ -18,10 +18,12 @@ static bool file_exists(const char* path) {
     return true;
 }
 
+// TODO strings.h
 static void copy_string(char* dst, size_t dst_size, const char* src) {
     snprintf(dst, dst_size, "%s", src ? src : "");
 }
 
+// TODO utils.h / strings.h
 static void join_path(char* dst, size_t dst_size, const char* a, const char* b) {
     copy_string(dst, dst_size, a);
     size_t len = strlen(dst);
@@ -34,6 +36,7 @@ static void join_path(char* dst, size_t dst_size, const char* a, const char* b) 
     }
 }
 
+// TODO utils.h / strings.h
 static bool is_numeric_name(const char* name) {
     if (!name || !name[0]) return false;
     for (const char* p = name; *p; p++) {
@@ -231,6 +234,7 @@ bool colmap_resolve_paths(ColmapPaths* out, const char* input_path) {
     return true;
 }
 
+// TODO utils.h / strings.h
 // Skip the rest of the current line (handles arbitrarily long POINTS2D lines)
 static void skip_line(FILE* f) {
     int c;
