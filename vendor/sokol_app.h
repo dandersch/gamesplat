@@ -4149,6 +4149,18 @@ _SOKOL_PRIVATE void _sapp_wgpu_create_device_and_swapchain(void) {
     requiredLimits.maxSampledTexturesPerShaderStage = adapterLimits.maxSampledTexturesPerShaderStage;
     requiredLimits.maxStorageBuffersPerShaderStage = adapterLimits.maxStorageBuffersPerShaderStage;
     requiredLimits.maxStorageTexturesPerShaderStage = adapterLimits.maxStorageTexturesPerShaderStage;
+    /*
+        gamesplat vendor patch: the WebGPU default device limits are deliberately
+        conservative (currently maxBufferSize=256MB and
+        maxStorageBufferBindingSize=128MB). Our gaussian scene data is uploaded as
+        a single large storage buffer, and browsers such as Chromium will reject
+        that buffer unless the higher adapter-supported limits are explicitly
+        requested during device creation. This mirrors the existing sokol_app.h
+        behavior above for other adapter limits, but extends it to the large
+        buffer limits needed by this renderer.
+    */
+    requiredLimits.maxStorageBufferBindingSize = adapterLimits.maxStorageBufferBindingSize;
+    requiredLimits.maxBufferSize = adapterLimits.maxBufferSize;
 
     _SAPP_STRUCT(WGPURequestDeviceCallbackInfo, cb_info);
     cb_info.mode = _sapp_wgpu_callbackmode();
