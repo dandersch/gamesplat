@@ -32,6 +32,7 @@ COMMON_FLAGS=(
     -Wno-missing-field-initializers
     -Wno-unused-function
     -DSOKOL_WGPU
+    -I.
     -I"$VENDOR_DIR"
     -I"$VENDOR_DIR/imgui"
     -I"$VENDOR_DIR/imgui/backends"

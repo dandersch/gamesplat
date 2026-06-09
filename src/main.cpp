@@ -41,29 +41,6 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 #define GSPLAT_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-// Slab-style ray vs axis-aligned box intersection. On hit, returns true and
-// writes the near intersection distance to *out_t (clamped to >= 0 so that
-// the camera being inside the box still counts as a hit at t = 0).
-static bool ray_aabb(const float origin[3], const float dir[3],
-                     const float bmin[3], const float bmax[3], float* out_t) {
-    float tmin = -1e30f, tmax = 1e30f;
-    for (int axis = 0; axis < 3; axis++) {
-        float o = origin[axis], d = dir[axis];
-        if (fabsf(d) < 1e-8f) {
-            if (o < bmin[axis] || o > bmax[axis]) return false;
-        } else {
-            float t1 = (bmin[axis] - o) / d, t2 = (bmax[axis] - o) / d;
-            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-            if (t1 > tmin) tmin = t1;
-            if (t2 < tmax) tmax = t2;
-            if (tmin > tmax) return false;
-        }
-    }
-    if (tmax < 0.0f) return false;
-    *out_t = tmin > 0.0f ? tmin : 0.0f;
-    return true;
-}
-
 static void compute_gaussian_scene_radius_from_center(const GaussianScene* scene, const float center[3], float* radius) {
     if (!scene || scene->gaussian_count == 0) {
         *radius = 1.0f;
@@ -179,28 +156,23 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     AppState* state = new AppState();
     *appstate = state;
 
-    const char*& ply_path = state->ply_path;
-    const char*& colmap_dir = state->colmap_dir;
-    const char*& mesh_path = state->mesh_path;
-    const char*& object_path = state->object_path;
-
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--colmap") == 0 && i + 1 < argc) {
-            colmap_dir = argv[++i];
+            state->colmap_dir = argv[++i];
         } else if (strcmp(argv[i], "--mesh") == 0 && i + 1 < argc) {
-            mesh_path = argv[++i];
+            state->mesh_path = argv[++i];
         } else if (strcmp(argv[i], "--object") == 0 && i + 1 < argc) {
-            object_path = argv[++i];
-        } else if (!ply_path) {
-            ply_path = argv[i];
+            state->object_path = argv[++i];
+        } else if (!state->ply_path) {
+            state->ply_path = argv[i];
         }
     }
 
     // set defaults (used primarily by web build since it has no cli)
-    ply_path    = ply_path    ? ply_path    : "res/export_n01.sog";
-    //object_path = object_path ? object_path : "res/priest.glb";
-    //mesh_path   = mesh_path   ? mesh_path   : "res/cyberpunk_guy.glb";
-    colmap_dir  = colmap_dir  ? colmap_dir  : "res/colmap";
+    state->ply_path    = state->ply_path    ? state->ply_path    : "res/export_n01.sog";
+    //state->object_path = state->object_path ? state->object_path : "res/priest.glb";
+    //state->mesh_path   = state->mesh_path   ? state->mesh_path   : "res/cyberpunk_guy.glb";
+    state->colmap_dir  = state->colmap_dir  ? state->colmap_dir  : "res/colmap";
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         LOG(ERROR|PLATFORM|INIT, "SDL_Init failed: %s", SDL_GetError());
@@ -290,9 +262,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     // Scene
-    if (ply_path) {
+    if (state->ply_path) {
         PROFILE("load gaussian scene") {
-        state->scene_loaded = load_gaussian_scene(ply_path, &state->scene);
+        state->scene_loaded = load_gaussian_scene(state->ply_path, &state->scene);
         }
         if (state->scene_loaded) {
             compute_gaussian_scene_radius_from_center(&state->scene, g_splat_effect_center, &g_splat_effect_radius);
@@ -303,9 +275,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     // Mesh
-    if (mesh_path) {
+    if (state->mesh_path) {
         PROFILE("load mesh") {
-        if (mesh_load(mesh_path, &state->mesh)) {
+        if (mesh_load(state->mesh_path, &state->mesh)) {
             PROFILE("upload mesh") {
             renderer_upload_mesh(&state->renderer, &state->mesh);
             }
@@ -314,9 +286,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     // Static scene object (no animation, identity transform)
-    if (object_path) {
+    if (state->object_path) {
         PROFILE("load object mesh") {
-        if (mesh_load(object_path, &state->object)) {
+        if (mesh_load(state->object_path, &state->object)) {
             PROFILE("upload object mesh") {
             renderer_upload_object_mesh(&state->renderer, &state->object);
             }
@@ -326,12 +298,12 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     // Reference views
     state->refviews.selected = -1;
-    if (colmap_dir) {
+    if (state->colmap_dir) {
         ColmapPaths colmap_paths = {};
         ColmapImageSet colmap_images = {};
         ColmapCovisibility colmap_covis = {};
         PROFILE("load reference views") {
-        state->refviews_loaded = colmap_resolve_paths(&colmap_paths, colmap_dir)
+        state->refviews_loaded = colmap_resolve_paths(&colmap_paths, state->colmap_dir)
                               && colmap_load_images_txt(&colmap_images, colmap_paths.model_dir)
                               && refview_load(&state->refviews, &colmap_images, colmap_paths.image_dir);
         }
@@ -385,25 +357,6 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     if (!state) return SDL_APP_FAILURE;
     SDL_Event& ev = *event;
 
-    Renderer& renderer = state->renderer;
-    RefViewSet& refviews = state->refviews;
-    Camera& cam = state->cam;
-    Camera& map_cam = state->map_cam;
-    SDL_Window* window = state->window;
-    Mesh& object = state->object;
-    Examine& examine = state->examine;
-    const char* object_path = state->object_path;
-    bool& refviews_loaded = state->refviews_loaded;
-    bool& map_view_active = state->map_view_active;
-    bool& map_dragging = state->map_dragging;
-    bool* keys = state->keys;
-    float* neighbor_positions = state->neighbor_positions;
-    uint32_t* neighbor_indices = state->neighbor_indices;
-    uint32_t& neighbor_count = state->neighbor_count;
-    float& node_half_size = state->node_half_size;
-    float& mouse_dx = state->mouse_dx;
-    float& mouse_dy = state->mouse_dy;
-
     ImGui_ImplSDL3_ProcessEvent(event);
 
     switch (ev.type) {
@@ -413,103 +366,103 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     case SDL_EVENT_KEY_UP: {
         bool down = (ev.type == SDL_EVENT_KEY_DOWN);
         switch (ev.key.scancode) {
-            case SDL_SCANCODE_W: keys[0] = down; break;
-            case SDL_SCANCODE_A: keys[1] = down; break;
-            case SDL_SCANCODE_S: keys[2] = down; break;
-            case SDL_SCANCODE_D: keys[3] = down; break;
-            case SDL_SCANCODE_SPACE: keys[4] = down; break;
-            case SDL_SCANCODE_LCTRL: keys[5] = down; break;
-            case SDL_SCANCODE_LSHIFT: keys[6] = down; break;
-            case SDL_SCANCODE_E: keys[7] = down; break;
-            case SDL_SCANCODE_Q: keys[8] = down; break;
+            case SDL_SCANCODE_W: state->keys[0] = down; break;
+            case SDL_SCANCODE_A: state->keys[1] = down; break;
+            case SDL_SCANCODE_S: state->keys[2] = down; break;
+            case SDL_SCANCODE_D: state->keys[3] = down; break;
+            case SDL_SCANCODE_SPACE: state->keys[4] = down; break;
+            case SDL_SCANCODE_LCTRL: state->keys[5] = down; break;
+            case SDL_SCANCODE_LSHIFT: state->keys[6] = down; break;
+            case SDL_SCANCODE_E: state->keys[7] = down; break;
+            case SDL_SCANCODE_Q: state->keys[8] = down; break;
             case SDL_SCANCODE_ESCAPE: if (down) return SDL_APP_SUCCESS; break;
             default: break;
         }
         break;
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        if (ev.button.button == SDL_BUTTON_RIGHT && examine.state != Examine::OFF) {
+        if (ev.button.button == SDL_BUTTON_RIGHT && state->examine.state != Examine::OFF) {
             // While examining, right-click exits. Cancels any in-flight
             // lerp by retargeting from the current pose back to `rest`.
-            if (examine.state == Examine::ACTIVE) {
-                examine.start = renderer.object_transform;
-                examine.target = examine.rest;
-                examine.t = 0.0f;
-                examine.state = Examine::LERP_OUT;
-            } else if (examine.state == Examine::LERP_IN) {
+            if (state->examine.state == Examine::ACTIVE) {
+                state->examine.start = state->renderer.object_transform;
+                state->examine.target = state->examine.rest;
+                state->examine.t = 0.0f;
+                state->examine.state = Examine::LERP_OUT;
+            } else if (state->examine.state == Examine::LERP_IN) {
                 // Mid-entry: swap direction so the easing stays smooth.
-                examine.start = renderer.object_transform;
-                examine.target = examine.rest;
-                examine.t = 0.0f;
-                examine.state = Examine::LERP_OUT;
+                state->examine.start = state->renderer.object_transform;
+                state->examine.target = state->examine.rest;
+                state->examine.t = 0.0f;
+                state->examine.state = Examine::LERP_OUT;
             }
             // Do NOT toggle cam.camera_mode or map overlay.
             break;
         }
         if (ev.button.button == SDL_BUTTON_RIGHT) {
-            if (refviews_loaded && refviews.in_inspect) {
+            if (state->refviews_loaded && state->refviews.in_inspect) {
                 // Exit inspect: lerp position back to where we clicked
                 // the hotspot from, drop ortho, re-enter FPS controls.
                 // Yaw/pitch are not lerped (see refview_update); the
                 // user can look around during the return.
-                refviews.inspect_target_pos[0] = refviews.inspect_return_pos[0];
-                refviews.inspect_target_pos[1] = refviews.inspect_return_pos[1];
-                refviews.inspect_target_pos[2] = refviews.inspect_return_pos[2];
-                float dx = refviews.inspect_return_pos[0] - cam.position[0];
-                float dy = refviews.inspect_return_pos[1] - cam.position[1];
-                float dz = refviews.inspect_return_pos[2] - cam.position[2];
+                state->refviews.inspect_target_pos[0] = state->refviews.inspect_return_pos[0];
+                state->refviews.inspect_target_pos[1] = state->refviews.inspect_return_pos[1];
+                state->refviews.inspect_target_pos[2] = state->refviews.inspect_return_pos[2];
+                float dx = state->refviews.inspect_return_pos[0] - state->cam.position[0];
+                float dy = state->refviews.inspect_return_pos[1] - state->cam.position[1];
+                float dz = state->refviews.inspect_return_pos[2] - state->cam.position[2];
                 float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                refviews.selected = -1;
-                refviews.inspect_mode = true;
-                refviews.inspect_return = true;
-                refviews.lerping = true;
-                refviews.lerp_t = 0.0f;
-                refviews.lerp_duration = (dist > 1e-6f) ? dist / refviews.lerp_speed : 0.1f;
-                refviews.start_pos[0] = cam.position[0];
-                refviews.start_pos[1] = cam.position[1];
-                refviews.start_pos[2] = cam.position[2];
-                refviews.start_yaw = cam.yaw;
-                refviews.start_pitch = cam.pitch;
-                refviews.in_inspect = false;
-                cam.orthographic = false;
-                cam.camera_mode = true;
-                SDL_SetWindowRelativeMouseMode(window, true);
+                state->refviews.selected = -1;
+                state->refviews.inspect_mode = true;
+                state->refviews.inspect_return = true;
+                state->refviews.lerping = true;
+                state->refviews.lerp_t = 0.0f;
+                state->refviews.lerp_duration = (dist > 1e-6f) ? dist / state->refviews.lerp_speed : 0.1f;
+                state->refviews.start_pos[0] = state->cam.position[0];
+                state->refviews.start_pos[1] = state->cam.position[1];
+                state->refviews.start_pos[2] = state->cam.position[2];
+                state->refviews.start_yaw = state->cam.yaw;
+                state->refviews.start_pitch = state->cam.pitch;
+                state->refviews.in_inspect = false;
+                state->cam.orthographic = false;
+                state->cam.camera_mode = true;
+                SDL_SetWindowRelativeMouseMode(state->window, true);
                 ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
             } else {
-                cam.camera_mode = !cam.camera_mode;
-                SDL_SetWindowRelativeMouseMode(window, cam.camera_mode);
+                state->cam.camera_mode = !state->cam.camera_mode;
+                SDL_SetWindowRelativeMouseMode(state->window, state->cam.camera_mode);
                 ImGuiIO& io = ImGui::GetIO();
-                if (cam.camera_mode) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+                if (state->cam.camera_mode) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
                 else                 io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
 
                 // Toggle the top-down map overlay on top of the
                 // existing camera-mode toggle.
-                map_view_active = !map_view_active;
+                state->map_view_active = !state->map_view_active;
             }
         }
-        if (ev.button.button == SDL_BUTTON_LEFT && map_view_active &&
+        if (ev.button.button == SDL_BUTTON_LEFT && state->map_view_active &&
             !ImGui::GetIO().WantCaptureMouse) {
             // Begin panning the top-down map.
-            map_dragging = true;
+            state->map_dragging = true;
             break;
         }
-        if (ev.button.button == SDL_BUTTON_LEFT && cam.camera_mode &&
-            examine.state == Examine::OFF && !map_view_active) {
+        if (ev.button.button == SDL_BUTTON_LEFT && state->cam.camera_mode &&
+            state->examine.state == Examine::OFF && !state->map_view_active) {
             // Ray from screen center (crosshair) into scene
             float forward[3];
-            camera_get_forward(&cam, forward);
+            camera_get_forward(&state->cam, forward);
 
             // 1. Hotspot pick on the currently-overlaid view (if any).
             //    Hotspots take precedence over object/neighbor clicks.
             int  hotspot_view  = -1;
             int32_t hotspot_idx = -1;
-            if (refviews_loaded && !refviews.lerping && refviews.current_node >= 0) {
-                RefView* cv = &refviews.views[refviews.current_node];
+            if (state->refviews_loaded && !state->refviews.lerping && state->refviews.current_node >= 0) {
+                RefView* cv = &state->refviews.views[state->refviews.current_node];
                 if (cv->hotspot_count > 0) {
                     // Gate on overlay-visible distance (matches fade_dist=0.1 used below).
-                    float dx0 = cam.position[0] - cv->position[0];
-                    float dy0 = cam.position[1] - cv->position[1];
-                    float dz0 = cam.position[2] - cv->position[2];
+                    float dx0 = state->cam.position[0] - cv->position[0];
+                    float dy0 = state->cam.position[1] - cv->position[1];
+                    float dz0 = state->cam.position[2] - cv->position[2];
                     float d2  = dx0*dx0 + dy0*dy0 + dz0*dz0;
                     if (d2 < 0.01f) {
                         // World forward -> ref-camera frame (matches overlay shader).
@@ -523,65 +476,65 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                         float ry_c = ry < -1.0f ? -1.0f : (ry > 1.0f ? 1.0f : ry);
                         float v = -asinf(ry_c) / PI + 0.5f;
                         hotspot_idx = hotspot_pick(cv, u, v);
-                        if (hotspot_idx >= 0) hotspot_view = refviews.current_node;
+                        if (hotspot_idx >= 0) hotspot_view = state->refviews.current_node;
                     }
                 }
             }
 
             if (hotspot_idx >= 0) {
-                const Hotspot* h = &refviews.views[hotspot_view].hotspots[hotspot_idx];
+                const Hotspot* h = &state->refviews.views[hotspot_view].hotspots[hotspot_idx];
                 if (h->action.type == HOTSPOT_ACTION_WARP) {
                     int32_t warp_target = h->action.warp.target_view;
-                    RefView* tv = &refviews.views[warp_target];
-                    float dx = tv->position[0] - cam.position[0];
-                    float dy = tv->position[1] - cam.position[1];
-                    float dz = tv->position[2] - cam.position[2];
+                    RefView* tv = &state->refviews.views[warp_target];
+                    float dx = tv->position[0] - state->cam.position[0];
+                    float dy = tv->position[1] - state->cam.position[1];
+                    float dz = tv->position[2] - state->cam.position[2];
                     float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                    refviews.selected = warp_target;
-                    refviews.inspect_mode = false;
-                    refviews.lerping = true;
-                    refviews.lerp_t = 0.0f;
-                    refviews.lerp_duration = (dist > 1e-6f) ? dist / refviews.lerp_speed : 0.1f;
-                    refviews.start_pos[0] = cam.position[0];
-                    refviews.start_pos[1] = cam.position[1];
-                    refviews.start_pos[2] = cam.position[2];
-                    refviews.start_yaw = cam.yaw;
-                    refviews.start_pitch = cam.pitch;
+                    state->refviews.selected = warp_target;
+                    state->refviews.inspect_mode = false;
+                    state->refviews.lerping = true;
+                    state->refviews.lerp_t = 0.0f;
+                    state->refviews.lerp_duration = (dist > 1e-6f) ? dist / state->refviews.lerp_speed : 0.1f;
+                    state->refviews.start_pos[0] = state->cam.position[0];
+                    state->refviews.start_pos[1] = state->cam.position[1];
+                    state->refviews.start_pos[2] = state->cam.position[2];
+                    state->refviews.start_yaw = state->cam.yaw;
+                    state->refviews.start_pitch = state->cam.pitch;
                     break;
                 } else if (h->action.type == HOTSPOT_ACTION_INSPECT) {
                     const HotspotActionInspect* it = &h->action.inspect;
-                    float dx = it->position[0] - cam.position[0];
-                    float dy = it->position[1] - cam.position[1];
-                    float dz = it->position[2] - cam.position[2];
+                    float dx = it->position[0] - state->cam.position[0];
+                    float dy = it->position[1] - state->cam.position[1];
+                    float dz = it->position[2] - state->cam.position[2];
                     float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                    refviews.selected = -1;
-                    refviews.inspect_mode = true;
-                    refviews.inspect_return = false;
-                    refviews.inspect_target_pos[0] = it->position[0];
-                    refviews.inspect_target_pos[1] = it->position[1];
-                    refviews.inspect_target_pos[2] = it->position[2];
-                    refviews.inspect_target_yaw   = it->yaw;
-                    refviews.inspect_target_pitch = it->pitch;
-                    refviews.lerping = true;
-                    refviews.lerp_t = 0.0f;
-                    refviews.lerp_duration = (dist > 1e-6f) ? dist / refviews.lerp_speed : 0.1f;
-                    refviews.start_pos[0] = cam.position[0];
-                    refviews.start_pos[1] = cam.position[1];
-                    refviews.start_pos[2] = cam.position[2];
-                    refviews.start_yaw = cam.yaw;
-                    refviews.start_pitch = cam.pitch;
+                    state->refviews.selected = -1;
+                    state->refviews.inspect_mode = true;
+                    state->refviews.inspect_return = false;
+                    state->refviews.inspect_target_pos[0] = it->position[0];
+                    state->refviews.inspect_target_pos[1] = it->position[1];
+                    state->refviews.inspect_target_pos[2] = it->position[2];
+                    state->refviews.inspect_target_yaw   = it->yaw;
+                    state->refviews.inspect_target_pitch = it->pitch;
+                    state->refviews.lerping = true;
+                    state->refviews.lerp_t = 0.0f;
+                    state->refviews.lerp_duration = (dist > 1e-6f) ? dist / state->refviews.lerp_speed : 0.1f;
+                    state->refviews.start_pos[0] = state->cam.position[0];
+                    state->refviews.start_pos[1] = state->cam.position[1];
+                    state->refviews.start_pos[2] = state->cam.position[2];
+                    state->refviews.start_yaw = state->cam.yaw;
+                    state->refviews.start_pitch = state->cam.pitch;
                     // Remember where to lerp back to on right-click exit.
-                    refviews.inspect_return_pos[0] = cam.position[0];
-                    refviews.inspect_return_pos[1] = cam.position[1];
-                    refviews.inspect_return_pos[2] = cam.position[2];
-                    refviews.in_inspect = true;
+                    state->refviews.inspect_return_pos[0] = state->cam.position[0];
+                    state->refviews.inspect_return_pos[1] = state->cam.position[1];
+                    state->refviews.inspect_return_pos[2] = state->cam.position[2];
+                    state->refviews.in_inspect = true;
                     // Drive the existing ortho_blend transition.
-                    cam.orthographic = true;
-                    cam.ortho_size   = it->ortho_size;
+                    state->cam.orthographic = true;
+                    state->cam.ortho_size   = it->ortho_size;
                     // Switch to cursor mode (point & click); right-click
                     // will exit inspect and restore FPS controls.
-                    cam.camera_mode = false;
-                    SDL_SetWindowRelativeMouseMode(window, false);
+                    state->cam.camera_mode = false;
+                    SDL_SetWindowRelativeMouseMode(state->window, false);
                     ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
                     break;
                 }
@@ -591,25 +544,25 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             //    neighbor-node pick. Closer hit wins; object > node by
             //    depth. Hotspot above already short-circuited if hit.
             float object_t = 1e30f;
-            if (object_path) {
+            if (state->object_path) {
                 float obj_model[16];
-                mat4_from_transform(renderer.object_transform, obj_model);
+                mat4_from_transform(state->renderer.object_transform, obj_model);
                 float obmin[3], obmax[3];
-                mesh_aabb_world(object.aabb_min, object.aabb_max, obj_model, obmin, obmax);
+                mesh_aabb_world(state->object.aabb_min, state->object.aabb_max, obj_model, obmin, obmax);
                 float t;
-                if (ray_aabb(cam.position, forward, obmin, obmax, &t)) object_t = t;
+                if (math_ray_aabb(state->cam.position, forward, obmin, obmax, &t)) object_t = t;
             }
 
             float node_t = 1e30f;
             int best_hit = -1;
-            if (refviews_loaded && !refviews.lerping) {
-                for (uint32_t ni = 0; ni < neighbor_count; ni++) {
-                    const float* c = &neighbor_positions[ni*3];
-                    float hs = node_half_size;
+            if (state->refviews_loaded && !state->refviews.lerping) {
+                for (uint32_t ni = 0; ni < state->neighbor_count; ni++) {
+                    const float* c = &state->neighbor_positions[ni*3];
+                    float hs = state->node_half_size;
                     float bmin[3] = { c[0]-hs, c[1]-hs, c[2]-hs };
                     float bmax[3] = { c[0]+hs, c[1]+hs, c[2]+hs };
                     float t;
-                    if (ray_aabb(cam.position, forward, bmin, bmax, &t) && t < node_t) {
+                    if (math_ray_aabb(state->cam.position, forward, bmin, bmax, &t) && t < node_t) {
                         node_t = t;
                         best_hit = (int)ni;
                     }
@@ -620,89 +573,89 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 // Start examine: capture rest pose, compute target,
                 // snapshot camera basis + distance for orbit/zoom,
                 // begin LERP_IN. AABB radius = half-diagonal.
-                examine.rest  = renderer.object_transform;
-                examine.start = renderer.object_transform;
-                examine.aabb_center_local[0] = (object.aabb_min[0] + object.aabb_max[0]) * 0.5f;
-                examine.aabb_center_local[1] = (object.aabb_min[1] + object.aabb_max[1]) * 0.5f;
-                examine.aabb_center_local[2] = (object.aabb_min[2] + object.aabb_max[2]) * 0.5f;
-                float ex = object.aabb_max[0] - object.aabb_min[0];
-                float ey = object.aabb_max[1] - object.aabb_min[1];
-                float ez = object.aabb_max[2] - object.aabb_min[2];
-                examine.aabb_radius = 0.5f * sqrtf(ex*ex + ey*ey + ez*ez);
-                examine_compute_target(cam, examine.aabb_center_local,
-                                       examine.aabb_radius, examine.rest,
-                                       &examine.target);
+                state->examine.rest  = state->renderer.object_transform;
+                state->examine.start = state->renderer.object_transform;
+                state->examine.aabb_center_local[0] = (state->object.aabb_min[0] + state->object.aabb_max[0]) * 0.5f;
+                state->examine.aabb_center_local[1] = (state->object.aabb_min[1] + state->object.aabb_max[1]) * 0.5f;
+                state->examine.aabb_center_local[2] = (state->object.aabb_min[2] + state->object.aabb_max[2]) * 0.5f;
+                float ex = state->object.aabb_max[0] - state->object.aabb_min[0];
+                float ey = state->object.aabb_max[1] - state->object.aabb_min[1];
+                float ez = state->object.aabb_max[2] - state->object.aabb_min[2];
+                state->examine.aabb_radius = 0.5f * sqrtf(ex*ex + ey*ey + ez*ez);
+                examine_compute_target(state->cam, state->examine.aabb_center_local,
+                                       state->examine.aabb_radius, state->examine.rest,
+                                       &state->examine.target);
 
                 // Snapshot camera basis at examine entry. Reused each
                 // frame while ACTIVE so zoom + pitch axes stay stable.
-                camera_get_forward(&cam, examine.cam_fwd_entry);
+                camera_get_forward(&state->cam, state->examine.cam_fwd_entry);
                 float wu[3] = { 0.0f, 1.0f, 0.0f };
-                examine.cam_right_entry[0] = wu[1]*examine.cam_fwd_entry[2] - wu[2]*examine.cam_fwd_entry[1];
-                examine.cam_right_entry[1] = wu[2]*examine.cam_fwd_entry[0] - wu[0]*examine.cam_fwd_entry[2];
-                examine.cam_right_entry[2] = wu[0]*examine.cam_fwd_entry[1] - wu[1]*examine.cam_fwd_entry[0];
-                float rl = sqrtf(examine.cam_right_entry[0]*examine.cam_right_entry[0]
-                               + examine.cam_right_entry[1]*examine.cam_right_entry[1]
-                               + examine.cam_right_entry[2]*examine.cam_right_entry[2]);
+                state->examine.cam_right_entry[0] = wu[1]*state->examine.cam_fwd_entry[2] - wu[2]*state->examine.cam_fwd_entry[1];
+                state->examine.cam_right_entry[1] = wu[2]*state->examine.cam_fwd_entry[0] - wu[0]*state->examine.cam_fwd_entry[2];
+                state->examine.cam_right_entry[2] = wu[0]*state->examine.cam_fwd_entry[1] - wu[1]*state->examine.cam_fwd_entry[0];
+                float rl = sqrtf(state->examine.cam_right_entry[0]*state->examine.cam_right_entry[0]
+                               + state->examine.cam_right_entry[1]*state->examine.cam_right_entry[1]
+                               + state->examine.cam_right_entry[2]*state->examine.cam_right_entry[2]);
                 if (rl > 1e-8f) {
-                    examine.cam_right_entry[0] /= rl;
-                    examine.cam_right_entry[1] /= rl;
-                    examine.cam_right_entry[2] /= rl;
+                    state->examine.cam_right_entry[0] /= rl;
+                    state->examine.cam_right_entry[1] /= rl;
+                    state->examine.cam_right_entry[2] /= rl;
                 }
 
                 // Recompute dist with the same formula compute_target
                 // used (kept in sync; if you change one, change both).
-                float r = examine.aabb_radius * examine.rest.scale;
+                float r = state->examine.aabb_radius * state->examine.rest.scale;
                 if (r < 1e-4f) r = 1e-4f;
-                examine.dist_base = r / tanf(cam.fov_y * 0.5f) / 0.8f;
-                if (examine.dist_base < r * 1.5f) examine.dist_base = r * 1.5f;
+                state->examine.dist_base = r / tanf(state->cam.fov_y * 0.5f) / 0.8f;
+                if (state->examine.dist_base < r * 1.5f) state->examine.dist_base = r * 1.5f;
 
-                examine.base_rotation_euler[0] = examine.target.rotation_euler[0];
-                examine.base_rotation_euler[1] = examine.target.rotation_euler[1];
-                examine.base_rotation_euler[2] = examine.target.rotation_euler[2];
-                examine.orbit_yaw      = 0.0f;
-                examine.orbit_pitch    = 0.0f;
-                examine.distance_scale = 1.0f;
+                state->examine.base_rotation_euler[0] = state->examine.target.rotation_euler[0];
+                state->examine.base_rotation_euler[1] = state->examine.target.rotation_euler[1];
+                state->examine.base_rotation_euler[2] = state->examine.target.rotation_euler[2];
+                state->examine.orbit_yaw      = 0.0f;
+                state->examine.orbit_pitch    = 0.0f;
+                state->examine.distance_scale = 1.0f;
 
-                examine.t = 0.0f;
-                examine.state = Examine::LERP_IN;
+                state->examine.t = 0.0f;
+                state->examine.state = Examine::LERP_IN;
             } else if (best_hit >= 0) {
-                uint32_t view_idx = neighbor_indices[best_hit];
-                RefView* tv = &refviews.views[view_idx];
-                float dx = tv->position[0] - cam.position[0];
-                float dy = tv->position[1] - cam.position[1];
-                float dz = tv->position[2] - cam.position[2];
+                uint32_t view_idx = state->neighbor_indices[best_hit];
+                RefView* tv = &state->refviews.views[view_idx];
+                float dx = tv->position[0] - state->cam.position[0];
+                float dy = tv->position[1] - state->cam.position[1];
+                float dz = tv->position[2] - state->cam.position[2];
                 float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                refviews.selected = (int32_t)view_idx;
-                refviews.lerping = true;
-                refviews.lerp_t = 0.0f;
-                refviews.lerp_duration = (dist > 1e-6f) ? dist / refviews.lerp_speed : 0.1f;
-                refviews.start_pos[0] = cam.position[0];
-                refviews.start_pos[1] = cam.position[1];
-                refviews.start_pos[2] = cam.position[2];
-                refviews.start_yaw = cam.yaw;
-                refviews.start_pitch = cam.pitch;
+                state->refviews.selected = (int32_t)view_idx;
+                state->refviews.lerping = true;
+                state->refviews.lerp_t = 0.0f;
+                state->refviews.lerp_duration = (dist > 1e-6f) ? dist / state->refviews.lerp_speed : 0.1f;
+                state->refviews.start_pos[0] = state->cam.position[0];
+                state->refviews.start_pos[1] = state->cam.position[1];
+                state->refviews.start_pos[2] = state->cam.position[2];
+                state->refviews.start_yaw = state->cam.yaw;
+                state->refviews.start_pitch = state->cam.pitch;
             }
         }
         break;
     case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (ev.button.button == SDL_BUTTON_LEFT) map_dragging = false;
+        if (ev.button.button == SDL_BUTTON_LEFT) state->map_dragging = false;
         break;
     case SDL_EVENT_MOUSE_MOTION:
-        if (cam.camera_mode) {
-            mouse_dx += ev.motion.xrel;
-            mouse_dy += ev.motion.yrel;
+        if (state->cam.camera_mode) {
+            state->mouse_dx += ev.motion.xrel;
+            state->mouse_dy += ev.motion.yrel;
         }
-        if (map_dragging && map_view_active) {
+        if (state->map_dragging && state->map_view_active) {
             // Pan along the map camera's own right/up basis (which lies
             // in the world XZ plane for a top-down view). We use the
             // camera-local axes rather than world XZ so that dragging
             // still tracks screen-space movement if the map is rotated
             // about the world up axis.
             int ww, wh;
-            SDL_GetWindowSize(window, &ww, &wh);
+            SDL_GetWindowSize(state->window, &ww, &wh);
             float fwd[3], right[3], up[3];
             float wup[3] = {0.0f, 1.0f, 0.0f};
-            camera_get_forward(&map_cam, fwd);
+            camera_get_forward(&state->map_cam, fwd);
             right[0] = fwd[1]*wup[2] - fwd[2]*wup[1];
             right[1] = fwd[2]*wup[0] - fwd[0]*wup[2];
             right[2] = fwd[0]*wup[1] - fwd[1]*wup[0];
@@ -716,39 +669,39 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
             // actually points to screen-LEFT (see camera_update's A/D
             // strafe direction), so the signs here are flipped from
             // what a textbook drag-pan would suggest.
-            float wpp = (2.0f * map_cam.ortho_size) / (float)wh;
+            float wpp = (2.0f * state->map_cam.ortho_size) / (float)wh;
             float dr =  ev.motion.xrel * wpp;
             float du = -ev.motion.yrel * wpp;
-            map_cam.position[0] += dr * right[0] + du * up[0];
-            map_cam.position[1] += dr * right[1] + du * up[1];
-            map_cam.position[2] += dr * right[2] + du * up[2];
+            state->map_cam.position[0] += dr * right[0] + du * up[0];
+            state->map_cam.position[1] += dr * right[1] + du * up[1];
+            state->map_cam.position[2] += dr * right[2] + du * up[2];
         }
         break;
     case SDL_EVENT_MOUSE_WHEEL:
         if (!ImGui::GetIO().WantCaptureMouse) {
-            if (examine.state != Examine::OFF) {
+            if (state->examine.state != Examine::OFF) {
                 // Zoom while examining: scale the AABB-fit distance.
                 // Clamped so the object can't be shoved into the
                 // camera or flown off to infinity.
                 float factor = (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
-                examine.distance_scale *= factor;
-                if (examine.distance_scale < EXAMINE_ZOOM_MIN) examine.distance_scale = EXAMINE_ZOOM_MIN;
-                if (examine.distance_scale > EXAMINE_ZOOM_MAX) examine.distance_scale = EXAMINE_ZOOM_MAX;
+                state->examine.distance_scale *= factor;
+                if (state->examine.distance_scale < EXAMINE_ZOOM_MIN) state->examine.distance_scale = EXAMINE_ZOOM_MIN;
+                if (state->examine.distance_scale > EXAMINE_ZOOM_MAX) state->examine.distance_scale = EXAMINE_ZOOM_MAX;
                 break;
             }
-            if (map_view_active) {
+            if (state->map_view_active) {
                 // Zoom toward the cursor: scale ortho_size, then shift
                 // map_cam.position so the world point under the cursor
                 // before the zoom remains under the cursor after.
                 float factor = (ev.wheel.y > 0) ? (1.0f / 1.2f) : 1.2f;
-                float new_size = map_cam.ortho_size * factor;
-                if (new_size < 0.05f) { factor = 0.05f / map_cam.ortho_size; new_size = 0.05f; }
-                if (new_size > 50.0f) { factor = 50.0f  / map_cam.ortho_size; new_size = 50.0f;  }
+                float new_size = state->map_cam.ortho_size * factor;
+                if (new_size < 0.05f) { factor = 0.05f / state->map_cam.ortho_size; new_size = 0.05f; }
+                if (new_size > 50.0f) { factor = 50.0f  / state->map_cam.ortho_size; new_size = 50.0f;  }
 
                 int ww, wh;
-                SDL_GetWindowSize(window, &ww, &wh);
+                SDL_GetWindowSize(state->window, &ww, &wh);
                 float aspect_m = (float)ww / (float)wh;
-                float half_h = map_cam.ortho_size;
+                float half_h = state->map_cam.ortho_size;
                 float half_w = half_h * aspect_m;
 
                 float mx = ev.wheel.mouse_x;
@@ -758,7 +711,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
 
                 float fwd[3], right[3], up[3];
                 float wup[3] = {0.0f, 1.0f, 0.0f};
-                camera_get_forward(&map_cam, fwd);
+                camera_get_forward(&state->map_cam, fwd);
                 right[0] = fwd[1]*wup[2] - fwd[2]*wup[1];
                 right[1] = fwd[2]*wup[0] - fwd[0]*wup[2];
                 right[2] = fwd[0]*wup[1] - fwd[1]*wup[0];
@@ -772,23 +725,23 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
                 // mirrored relative to standard convention, so the
                 // shift is negated.
                 float k = factor - 1.0f;
-                map_cam.position[0] += k * (off_r * right[0] + off_u * up[0]);
-                map_cam.position[1] += k * (off_r * right[1] + off_u * up[1]);
-                map_cam.position[2] += k * (off_r * right[2] + off_u * up[2]);
+                state->map_cam.position[0] += k * (off_r * right[0] + off_u * up[0]);
+                state->map_cam.position[1] += k * (off_r * right[1] + off_u * up[1]);
+                state->map_cam.position[2] += k * (off_r * right[2] + off_u * up[2]);
 
-                map_cam.ortho_size = new_size;
-            } else if (cam.camera_mode) {
+                state->map_cam.ortho_size = new_size;
+            } else if (state->cam.camera_mode) {
                 // FPS camera: wheel zooms by adjusting FOV.
                 // Wheel up -> FOV down (zoom in), wheel down -> FOV up (zoom out).
-                cam.fov_y *= (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
+                state->cam.fov_y *= (ev.wheel.y > 0) ? (1.0f / 1.1f) : 1.1f;
                 float min_fov = 10.0f * (3.14159265358979f / 180.0f);
                 float max_fov = 120.0f * (3.14159265358979f / 180.0f);
-                if (cam.fov_y < min_fov) cam.fov_y = min_fov;
-                if (cam.fov_y > max_fov) cam.fov_y = max_fov;
+                if (state->cam.fov_y < min_fov) state->cam.fov_y = min_fov;
+                if (state->cam.fov_y > max_fov) state->cam.fov_y = max_fov;
             } else {
-                cam.move_speed *= (ev.wheel.y > 0) ? 1.2f : (1.0f / 1.2f);
-                if (cam.move_speed < 0.1f) cam.move_speed = 0.1f;
-                if (cam.move_speed > 100.0f) cam.move_speed = 100.0f;
+                state->cam.move_speed *= (ev.wheel.y > 0) ? 1.2f : (1.0f / 1.2f);
+                if (state->cam.move_speed < 0.1f) state->cam.move_speed = 0.1f;
+                if (state->cam.move_speed > 100.0f) state->cam.move_speed = 100.0f;
             }
         }
         break;
@@ -805,34 +758,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     PROFILE_FRAME();
     PROFILE_BEGIN("SDL_AppIterate");
 
-    const char* mesh_path = state->mesh_path;
-    const char* object_path = state->object_path;
-    Renderer& renderer = state->renderer;
-    GaussianScene& scene = state->scene;
-    bool& scene_loaded = state->scene_loaded;
-    Mesh& object = state->object;
-    RefViewSet& refviews = state->refviews;
-    bool& refviews_loaded = state->refviews_loaded;
-    Camera& cam = state->cam;
-    SDL_Window* window = state->window;
-    bool* keys = state->keys;
-    float& refview_max_alpha = state->refview_max_alpha;
-    float& node_half_size = state->node_half_size;
-    bool& show_node_boxes = state->show_node_boxes;
-    bool& show_hotspot_debug = state->show_hotspot_debug;
-    uint32_t& anim_node = state->anim_node;
-    float& anim_t = state->anim_t;
-    float& anim_speed = state->anim_speed;
-    float& anim_yaw = state->anim_yaw;
-    bool& anim_yaw_initialized = state->anim_yaw_initialized;
-    float& anim_y_offset = state->anim_y_offset;
     const uint32_t max_neighbors = MAX_NEIGHBORS;
-    float* neighbor_positions = state->neighbor_positions;
-    uint32_t* neighbor_indices = state->neighbor_indices;
-    uint32_t& neighbor_count = state->neighbor_count;
-    bool& map_view_active = state->map_view_active;
-    Camera& map_cam = state->map_cam;
-    Examine& examine = state->examine;
 
     uint64_t now = SDL_GetPerformanceCounter();
     float dt = (float)(now - state->last_time) / (float)state->freq;
@@ -855,121 +781,121 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     PROFILE("frame update") {
     // Mesh path animation: walk between consecutive refview nodes and loop forever.
-    if (mesh_path && refviews_loaded && refviews.count >= 2) {
-        uint32_t a = anim_node % refviews.count;
-        uint32_t b = (a + 1) % refviews.count;
-        const float* pa = refviews.views[a].position;
-        const float* pb = refviews.views[b].position;
+    if (state->mesh_path && state->refviews_loaded && state->refviews.count >= 2) {
+        uint32_t a = state->anim_node % state->refviews.count;
+        uint32_t b = (a + 1) % state->refviews.count;
+        const float* pa = state->refviews.views[a].position;
+        const float* pb = state->refviews.views[b].position;
         float dx = pb[0] - pa[0], dy = pb[1] - pa[1], dz = pb[2] - pa[2];
         float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-        float dur = (dist > 1e-6f) ? (dist / anim_speed) : 0.1f;
+        float dur = (dist > 1e-6f) ? (dist / state->anim_speed) : 0.1f;
 
-        anim_t += dt / dur;
+        state->anim_t += dt / dur;
         // Advance through nodes if we passed multiple segments in one frame.
-        int safety = (int)refviews.count + 1;
-        while (anim_t >= 1.0f && safety-- > 0) {
-            anim_t -= 1.0f;
-            anim_node = (anim_node + 1) % refviews.count;
-            a = anim_node;
-            b = (a + 1) % refviews.count;
-            pa = refviews.views[a].position;
-            pb = refviews.views[b].position;
+        int safety = (int)state->refviews.count + 1;
+        while (state->anim_t >= 1.0f && safety-- > 0) {
+            state->anim_t -= 1.0f;
+            state->anim_node = (state->anim_node + 1) % state->refviews.count;
+            a = state->anim_node;
+            b = (a + 1) % state->refviews.count;
+            pa = state->refviews.views[a].position;
+            pb = state->refviews.views[b].position;
             dx = pb[0] - pa[0]; dy = pb[1] - pa[1]; dz = pb[2] - pa[2];
             dist = sqrtf(dx*dx + dy*dy + dz*dz);
-            dur = (dist > 1e-6f) ? (dist / anim_speed) : 0.1f;
+            dur = (dist > 1e-6f) ? (dist / state->anim_speed) : 0.1f;
         }
 
-        float t = anim_t;
-        renderer.mesh_transform.translation[0] = pa[0] + dx * t;
-        renderer.mesh_transform.translation[1] = pa[1] + dy * t + anim_y_offset;
-        renderer.mesh_transform.translation[2] = pa[2] + dz * t;
+        float t = state->anim_t;
+        state->renderer.mesh_transform.translation[0] = pa[0] + dx * t;
+        state->renderer.mesh_transform.translation[1] = pa[1] + dy * t + state->anim_y_offset;
+        state->renderer.mesh_transform.translation[2] = pa[2] + dz * t;
 
         // Yaw faces direction of travel (matches camera yaw convention: yaw=0 -> +Z).
         float horiz2 = dx*dx + dz*dz;
         if (horiz2 > 1e-10f) {
             float target_yaw = atan2f(dx, dz);
-            if (!anim_yaw_initialized) {
-                anim_yaw = target_yaw;
-                anim_yaw_initialized = true;
+            if (!state->anim_yaw_initialized) {
+                state->anim_yaw = target_yaw;
+                state->anim_yaw_initialized = true;
             } else {
-                float diff = target_yaw - anim_yaw;
+                float diff = target_yaw - state->anim_yaw;
                 const float PI = 3.14159265358979f;
                 while (diff >  PI) diff -= 2.0f * PI;
                 while (diff < -PI) diff += 2.0f * PI;
                 float k = dt * 5.0f;
                 if (k > 1.0f) k = 1.0f;
-                anim_yaw += diff * k;
+                state->anim_yaw += diff * k;
             }
-            renderer.mesh_transform.rotation_euler[1] = anim_yaw;
+            state->renderer.mesh_transform.rotation_euler[1] = state->anim_yaw;
         }
     }
 
     // Update reference view interpolation (locks camera input while active)
-    bool camera_locked = refview_update(&refviews, &cam, dt);
+    bool camera_locked = refview_update(&state->refviews, &state->cam, dt);
 
     // Drive the examine lerp; while examining, FPS controls are fully
     // muted (no mouse look, no WASD) to keep the cam stationary for the
     // eventual return-lerp.
-    examine_active = examine_locks_input(examine);
-    examine_tick(&examine, &renderer.object_transform, dt);
+    examine_active = examine_locks_input(state->examine);
+    examine_tick(&state->examine, &state->renderer.object_transform, dt);
 
     // While ACTIVE, mouse drag orbits the object around its AABB center
     // and the wheel zooms (handled in the wheel event). Composes a
     // world-up yaw with a fixed-axis pitch on top of the entry rotation.
-    if (examine.state == Examine::ACTIVE) {
-        examine.orbit_yaw   -= mouse_dx * EXAMINE_ORBIT_SENSITIVITY;
-        examine.orbit_pitch += mouse_dy * EXAMINE_ORBIT_SENSITIVITY;
-        if (examine.orbit_pitch >  EXAMINE_PITCH_LIMIT) examine.orbit_pitch =  EXAMINE_PITCH_LIMIT;
-        if (examine.orbit_pitch < -EXAMINE_PITCH_LIMIT) examine.orbit_pitch = -EXAMINE_PITCH_LIMIT;
+    if (state->examine.state == Examine::ACTIVE) {
+        state->examine.orbit_yaw   -= mouse_dx * EXAMINE_ORBIT_SENSITIVITY;
+        state->examine.orbit_pitch += mouse_dy * EXAMINE_ORBIT_SENSITIVITY;
+        if (state->examine.orbit_pitch >  EXAMINE_PITCH_LIMIT) state->examine.orbit_pitch =  EXAMINE_PITCH_LIMIT;
+        if (state->examine.orbit_pitch < -EXAMINE_PITCH_LIMIT) state->examine.orbit_pitch = -EXAMINE_PITCH_LIMIT;
 
         // R_orbit = R_yaw(world_up) * R_pitch(cam_right_entry).
         float wu[3] = { 0.0f, 1.0f, 0.0f };
         float Ry[9], Rp[9], R_orbit[9];
-        math_mat3_axis_angle(wu,                       examine.orbit_yaw,   Ry);
-        math_mat3_axis_angle(examine.cam_right_entry,  examine.orbit_pitch, Rp);
+        math_mat3_axis_angle(wu,                       state->examine.orbit_yaw,   Ry);
+        math_mat3_axis_angle(state->examine.cam_right_entry,  state->examine.orbit_pitch, Rp);
         math_mat3_mul(Ry, Rp, R_orbit);
 
         // Compose with the base rotation captured at examine entry.
         float R_base[9], R_new[9];
-        math_mat3_from_euler_zyx(examine.base_rotation_euler, R_base);
+        math_mat3_from_euler_zyx(state->examine.base_rotation_euler, R_base);
         math_mat3_mul(R_orbit, R_base, R_new);
 
         // Write Euler back into object_transform.
-        math_mat3_decompose_zyx(R_new, renderer.object_transform.rotation_euler);
+        math_mat3_decompose_zyx(R_new, state->renderer.object_transform.rotation_euler);
 
         // Place the AABB center at the (zoom-adjusted) pivot along the
         // entry forward, then back the translation off by the rotated
         // local center so the pivot stays nailed there.
-        float s = renderer.object_transform.scale;
+        float s = state->renderer.object_transform.scale;
         float cl[3] = {
-            examine.aabb_center_local[0] * s,
-            examine.aabb_center_local[1] * s,
-            examine.aabb_center_local[2] * s,
+            state->examine.aabb_center_local[0] * s,
+            state->examine.aabb_center_local[1] * s,
+            state->examine.aabb_center_local[2] * s,
         };
         float cw[3] = {
             R_new[0]*cl[0] + R_new[3]*cl[1] + R_new[6]*cl[2],
             R_new[1]*cl[0] + R_new[4]*cl[1] + R_new[7]*cl[2],
             R_new[2]*cl[0] + R_new[5]*cl[1] + R_new[8]*cl[2],
         };
-        float dist = examine.dist_base * examine.distance_scale;
-        renderer.object_transform.translation[0] = cam.position[0] + examine.cam_fwd_entry[0]*dist - cw[0];
-        renderer.object_transform.translation[1] = cam.position[1] + examine.cam_fwd_entry[1]*dist - cw[1];
-        renderer.object_transform.translation[2] = cam.position[2] + examine.cam_fwd_entry[2]*dist - cw[2];
+        float dist = state->examine.dist_base * state->examine.distance_scale;
+        state->renderer.object_transform.translation[0] = state->cam.position[0] + state->examine.cam_fwd_entry[0]*dist - cw[0];
+        state->renderer.object_transform.translation[1] = state->cam.position[1] + state->examine.cam_fwd_entry[1]*dist - cw[1];
+        state->renderer.object_transform.translation[2] = state->cam.position[2] + state->examine.cam_fwd_entry[2]*dist - cw[2];
     }
 
     // Update camera (allow mouse look during lerp, but block WASD movement)
     if (examine_active) {
-        camera_update(&cam, keys, 0.0f, 0.0f, 0.0f);
+        camera_update(&state->cam, state->keys, 0.0f, 0.0f, 0.0f);
     } else if (camera_locked) {
-        camera_update(&cam, keys, mouse_dx, mouse_dy, 0);
-    } else if (cam.camera_mode || !ImGui::GetIO().WantCaptureKeyboard) {
-        camera_update(&cam, keys, mouse_dx, mouse_dy, dt);
+        camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, 0);
+    } else if (state->cam.camera_mode || !ImGui::GetIO().WantCaptureKeyboard) {
+        camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, dt);
     } else {
-        camera_update(&cam, keys, mouse_dx, mouse_dy, 0);
+        camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, 0);
     }
 
     // Get window size
-    SDL_GetWindowSize(window, &win_w, &win_h);
+    SDL_GetWindowSize(state->window, &win_w, &win_h);
     aspect = (float)win_w / (float)win_h;
 
     // Animate ortho blend toward target. Skipped while an inspect lerp is
@@ -985,29 +911,29 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     // focused subject strictly monotonic and remove the residual
     // nonlinearity from blending m[11] (-1 -> 0). Synchronizing the
     // timers, as we do here, is good enough in practice.
-    if (!(refviews_loaded && refviews.lerping && refviews.inspect_mode)) {
-        float target = cam.orthographic ? 1.0f : 0.0f;
+    if (!(state->refviews_loaded && state->refviews.lerping && state->refviews.inspect_mode)) {
+        float target = state->cam.orthographic ? 1.0f : 0.0f;
         float blend_speed = 1.0f; // 1/speed seconds for full transition
-        if (cam.ortho_blend < target) {
-            cam.ortho_blend += blend_speed * dt;
-            if (cam.ortho_blend > target) cam.ortho_blend = target;
-        } else if (cam.ortho_blend > target) {
-            cam.ortho_blend -= blend_speed * dt;
-            if (cam.ortho_blend < target) cam.ortho_blend = target;
+        if (state->cam.ortho_blend < target) {
+            state->cam.ortho_blend += blend_speed * dt;
+            if (state->cam.ortho_blend > target) state->cam.ortho_blend = target;
+        } else if (state->cam.ortho_blend > target) {
+            state->cam.ortho_blend -= blend_speed * dt;
+            if (state->cam.ortho_blend < target) state->cam.ortho_blend = target;
         }
     }
 
     // Build camera uniforms
     cam_uniforms = {};
-    camera_get_view_matrix(&cam, cam_uniforms.view);
-    camera_get_proj_matrix(&cam, aspect, cam_uniforms.proj);
+    camera_get_view_matrix(&state->cam, cam_uniforms.view);
+    camera_get_proj_matrix(&state->cam, aspect, cam_uniforms.proj);
     cam_uniforms.viewport[0] = (float)win_w;
     cam_uniforms.viewport[1] = (float)win_h;
-    cam_uniforms.orthographic = cam.ortho_blend;
+    cam_uniforms.orthographic = state->cam.ortho_blend;
     // Provide pure persp/ortho focal lengths so the splat shader can use
     // each in its own mix() branch (see comment in camera.h).
-    cam_uniforms.persp_focal = (1.0f / tanf(cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
-    cam_uniforms.ortho_focal = (float)win_h / (2.0f * cam.ortho_size);
+    cam_uniforms.persp_focal = (1.0f / tanf(state->cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
+    cam_uniforms.ortho_focal = (float)win_h / (2.0f * state->cam.ortho_size);
 #if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
     cam_uniforms.clip_y_sign = -1.0f;
     cam_uniforms.clip_z_01 = 1.0f;
@@ -1019,9 +945,9 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     // Cull here; sort later after ImGui so a same-frame render-mode switch
     // uses the currently selected sorted/stochastic path.
-    if (scene_loaded) {
+    if (state->scene_loaded) {
         PROFILE("gaussian cull") {
-        cull_gaussians(&scene, cam_uniforms.view, cam_uniforms.proj, cam.ortho_blend);
+        cull_gaussians(&state->scene, cam_uniforms.view, cam_uniforms.proj, state->cam.ortho_blend);
         }
     }
 
@@ -1034,24 +960,24 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     ImGui::Begin("Info");
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
-    if (scene_loaded) {
-        ImGui::Text("Visible: %u / %u", scene.visible_count, scene.gaussian_count);
-        int render_mode = (int)renderer.splat_render_mode;
+    if (state->scene_loaded) {
+        ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
+        int render_mode = (int)state->renderer.splat_render_mode;
         const char* render_mode_labels[] = { "Alpha Blend / Sorted", "Stochastic / Unsorted" };
         if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 2)) {
-            renderer.splat_render_mode = (SplatRenderMode)render_mode;
-            renderer_reset_stochastic_accumulation(&renderer);
+            state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
+            renderer_reset_stochastic_accumulation(&state->renderer);
         }
-        if (renderer.splat_render_mode == SplatRenderMode::StochasticUnsorted) {
-            int samples_per_frame = (int)renderer.stochastic_samples_per_frame;
+        if (state->renderer.splat_render_mode == SplatRenderMode::StochasticUnsorted) {
+            int samples_per_frame = (int)state->renderer.stochastic_samples_per_frame;
             if (ImGui::SliderInt("ST Samples / Frame", &samples_per_frame, 1, 16)) {
-                renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
+                state->renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
             }
-            if (ImGui::Checkbox("ST Accumulation", &renderer.stochastic_accumulation_enabled)) {
-                renderer_reset_stochastic_accumulation(&renderer);
+            if (ImGui::Checkbox("ST Accumulation", &state->renderer.stochastic_accumulation_enabled)) {
+                renderer_reset_stochastic_accumulation(&state->renderer);
             }
-            if (renderer.stochastic_accumulation_enabled) {
-                ImGui::Text("ST accumulated samples: %u", renderer.stochastic_sample_count);
+            if (state->renderer.stochastic_accumulation_enabled) {
+                ImGui::Text("ST accumulated samples: %u", state->renderer.stochastic_sample_count);
             } else {
                 ImGui::Text("ST accumulation off: averaging current-frame samples only");
             }
@@ -1059,35 +985,35 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         if (ImGui::Button("Shockwave Burst")) {
             g_splat_effect_active = true;
             g_splat_effect_start_time = g_app_time;
-            renderer_reset_stochastic_accumulation(&renderer);
+            renderer_reset_stochastic_accumulation(&state->renderer);
         }
         if (ImGui::SliderFloat("Shockwave Strength", &g_splat_effect_strength, 0.0f, 0.25f, "%.3f")) {
-            renderer_reset_stochastic_accumulation(&renderer);
+            renderer_reset_stochastic_accumulation(&state->renderer);
         }
         if (ImGui::SliderFloat("Shockwave Duration", &g_splat_effect_duration, 0.25f, 5.0f, "%.2fs")) {
-            renderer_reset_stochastic_accumulation(&renderer);
+            renderer_reset_stochastic_accumulation(&state->renderer);
         }
         if (ImGui::SliderFloat("Shockwave Tint", &g_splat_effect_tint_strength, 0.0f, 1.5f, "%.2f")) {
-            renderer_reset_stochastic_accumulation(&renderer);
+            renderer_reset_stochastic_accumulation(&state->renderer);
         }
     }
     ImGui::Text("Camera: %.1f, %.1f, %.1f  yaw %.3f  pitch %.3f",
-                cam.position[0], cam.position[1], cam.position[2],
-                cam.yaw, cam.pitch);
+                state->cam.position[0], state->cam.position[1], state->cam.position[2],
+                state->cam.yaw, state->cam.pitch);
 
     // Cursor UV on the active overlay panorama (matches .hotspots shape.points).
     // Only meaningful while the overlay is visible (same gate as overlay alpha).
-    if (refviews_loaded && refviews.current_node >= 0) {
-        RefView* cv = &refviews.views[refviews.current_node];
-        float dx0 = cam.position[0] - cv->position[0];
-        float dy0 = cam.position[1] - cv->position[1];
-        float dz0 = cam.position[2] - cv->position[2];
+    if (state->refviews_loaded && state->refviews.current_node >= 0) {
+        RefView* cv = &state->refviews.views[state->refviews.current_node];
+        float dx0 = state->cam.position[0] - cv->position[0];
+        float dy0 = state->cam.position[1] - cv->position[1];
+        float dz0 = state->cam.position[2] - cv->position[2];
         float d2  = dx0*dx0 + dy0*dy0 + dz0*dz0;
         if (d2 < 0.01f) {
             // In FPS mode the cursor is captured -> use the crosshair (screen
             // center). In cursor mode use the actual mouse position.
             float mx, my;
-            if (cam.camera_mode) {
+            if (state->cam.camera_mode) {
                 mx = (float)win_w * 0.5f;
                 my = (float)win_h * 0.5f;
             } else {
@@ -1101,7 +1027,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
             float cam_basis[16];
             float cam_tan[2];
-            camera_get_overlay_ray_basis(&cam, (float)win_w / (float)win_h,
+            camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h,
                                          cam_basis, cam_tan);
 
             // NDC -> camera-space ray (matches overlay.frag.glsl).
@@ -1133,64 +1059,64 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         }
     }
 
-    ImGui::Text("Speed: %.1f", cam.move_speed);
-    ImGui::Checkbox("Orthographic", &cam.orthographic);
-    if (cam.orthographic) {
-        ImGui::SliderFloat("Ortho Size", &cam.ortho_size, 0.5f, 5.0f);
+    ImGui::Text("Speed: %.1f", state->cam.move_speed);
+    ImGui::Checkbox("Orthographic", &state->cam.orthographic);
+    if (state->cam.orthographic) {
+        ImGui::SliderFloat("Ortho Size", &state->cam.ortho_size, 0.5f, 5.0f);
     } else {
-        float fov_deg = cam.fov_y * (180.0f / 3.14159265358979f);
+        float fov_deg = state->cam.fov_y * (180.0f / 3.14159265358979f);
         if (ImGui::SliderFloat("FOV", &fov_deg, 10.0f, 170.0f, "%.0f°")) {
-            cam.fov_y = fov_deg * (3.14159265358979f / 180.0f);
+            state->cam.fov_y = fov_deg * (3.14159265358979f / 180.0f);
         }
     }
-    if (refviews_loaded) {
-        ImGui::SliderFloat("Ref View Opacity", &refview_max_alpha, 0.0f, 1.0f);
-        ImGui::Checkbox("Use Covisibility", &refviews.use_covisibility);
-        if (refviews.use_covisibility) {
-            ImGui::SliderInt("Min Inliers", &refviews.min_inliers, 0, 500);
+    if (state->refviews_loaded) {
+        ImGui::SliderFloat("Ref View Opacity", &state->refview_max_alpha, 0.0f, 1.0f);
+        ImGui::Checkbox("Use Covisibility", &state->refviews.use_covisibility);
+        if (state->refviews.use_covisibility) {
+            ImGui::SliderInt("Min Inliers", &state->refviews.min_inliers, 0, 500);
         } else {
-            ImGui::SliderFloat("Neighbor Radius", &refviews.neighbor_radius, 0.5f, 10.0f);
+            ImGui::SliderFloat("Neighbor Radius", &state->refviews.neighbor_radius, 0.5f, 10.0f);
         }
-        ImGui::Checkbox("Show Node Boxes", &show_node_boxes);
-        ImGui::SliderFloat("Node Box Size", &node_half_size, 0.1f, 1.0f);
-        ImGui::Checkbox("Show Hotspot Debug", &show_hotspot_debug);
-        ImGui::SliderFloat("Transition Speed", &refviews.lerp_speed, 1.0f, 10.0f);
-        if (refviews.current_node >= 0) {
-            ImGui::Text("Current Node: %d", refviews.current_node);
-            ImGui::Text("Neighbors: %u", neighbor_count);
+        ImGui::Checkbox("Show Node Boxes", &state->show_node_boxes);
+        ImGui::SliderFloat("Node Box Size", &state->node_half_size, 0.1f, 1.0f);
+        ImGui::Checkbox("Show Hotspot Debug", &state->show_hotspot_debug);
+        ImGui::SliderFloat("Transition Speed", &state->refviews.lerp_speed, 1.0f, 10.0f);
+        if (state->refviews.current_node >= 0) {
+            ImGui::Text("Current Node: %d", state->refviews.current_node);
+            ImGui::Text("Neighbors: %u", state->neighbor_count);
         }
     }
     ImGui::End();
 
-    if (refviews_loaded) {
+    if (state->refviews_loaded) {
         ImGui::Begin("Reference Views");
-        for (uint32_t i = 0; i < refviews.count; i++) {
+        for (uint32_t i = 0; i < state->refviews.count; i++) {
             char label[32];
             snprintf(label, sizeof(label), "%u", i);
-            bool is_selected = ((int32_t)i == refviews.selected);
+            bool is_selected = ((int32_t)i == state->refviews.selected);
             if (ImGui::Selectable(label, is_selected)) {
-                RefView* tv = &refviews.views[i];
-                float dx = tv->position[0] - cam.position[0];
-                float dy = tv->position[1] - cam.position[1];
-                float dz = tv->position[2] - cam.position[2];
+                RefView* tv = &state->refviews.views[i];
+                float dx = tv->position[0] - state->cam.position[0];
+                float dy = tv->position[1] - state->cam.position[1];
+                float dz = tv->position[2] - state->cam.position[2];
                 float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                refviews.selected = i;
-                refviews.lerping = true;
-                refviews.lerp_t = 0.0f;
-                refviews.lerp_duration = (dist > 1e-6f) ? dist / refviews.lerp_speed : 0.1f;
-                refviews.start_pos[0] = cam.position[0];
-                refviews.start_pos[1] = cam.position[1];
-                refviews.start_pos[2] = cam.position[2];
-                refviews.start_yaw = cam.yaw;
-                refviews.start_pitch = cam.pitch;
+                state->refviews.selected = i;
+                state->refviews.lerping = true;
+                state->refviews.lerp_t = 0.0f;
+                state->refviews.lerp_duration = (dist > 1e-6f) ? dist / state->refviews.lerp_speed : 0.1f;
+                state->refviews.start_pos[0] = state->cam.position[0];
+                state->refviews.start_pos[1] = state->cam.position[1];
+                state->refviews.start_pos[2] = state->cam.position[2];
+                state->refviews.start_yaw = state->cam.yaw;
+                state->refviews.start_pitch = state->cam.pitch;
             }
         }
         ImGui::End();
     }
 
-    if (mesh_path) {
+    if (state->mesh_path) {
         ImGui::Begin("Mesh Transform");
-        MeshTransform& mt = renderer.mesh_transform;
+        MeshTransform& mt = state->renderer.mesh_transform;
         ImGui::DragFloat3("Translation", mt.translation, 0.01f);
         float rot_deg[3] = {
             mt.rotation_euler[0] * 57.2957795f,
@@ -1238,22 +1164,22 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     // Suppressed during examine: the object fills the view, so a hover
     // icon would just signal "you can examine what you're already
     // examining". The camera is also locked, so picks are meaningless.
-    if (cam.camera_mode && !examine_active) {
+    if (state->cam.camera_mode && !examine_active) {
         bool crosshair_hover = false;
         bool hotspot_hover = false;
 
         // Hotspot hover takes precedence over neighbor-node hover.
         // Mirrors the click-time pick logic above.
-        if (refviews_loaded && !refviews.lerping && refviews.current_node >= 0) {
-            RefView* cv = &refviews.views[refviews.current_node];
+        if (state->refviews_loaded && !state->refviews.lerping && state->refviews.current_node >= 0) {
+            RefView* cv = &state->refviews.views[state->refviews.current_node];
             if (cv->hotspot_count > 0) {
-                float dx0 = cam.position[0] - cv->position[0];
-                float dy0 = cam.position[1] - cv->position[1];
-                float dz0 = cam.position[2] - cv->position[2];
+                float dx0 = state->cam.position[0] - cv->position[0];
+                float dy0 = state->cam.position[1] - cv->position[1];
+                float dz0 = state->cam.position[2] - cv->position[2];
                 float d2  = dx0*dx0 + dy0*dy0 + dz0*dz0;
                 if (d2 < 0.01f) {
                     float forward[3];
-                    camera_get_forward(&cam, forward);
+                    camera_get_forward(&state->cam, forward);
                     float R[16];
                     refview_get_rotation_matrix(cv, R);
                     float rx = R[0]*forward[0] + R[4]*forward[1] + R[8] *forward[2];
@@ -1275,27 +1201,27 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         bool object_hover = false;
         if (!hotspot_hover) {
             float forward[3];
-            camera_get_forward(&cam, forward);
+            camera_get_forward(&state->cam, forward);
 
             float object_t = 1e30f;
-            if (object_path) {
+            if (state->object_path) {
                 float obj_model[16];
-                mat4_from_transform(renderer.object_transform, obj_model);
+                mat4_from_transform(state->renderer.object_transform, obj_model);
                 float obmin[3], obmax[3];
-                mesh_aabb_world(object.aabb_min, object.aabb_max, obj_model, obmin, obmax);
+                mesh_aabb_world(state->object.aabb_min, state->object.aabb_max, obj_model, obmin, obmax);
                 float t;
-                if (ray_aabb(cam.position, forward, obmin, obmax, &t)) object_t = t;
+                if (math_ray_aabb(state->cam.position, forward, obmin, obmax, &t)) object_t = t;
             }
 
             float node_t = 1e30f;
-            if (refviews_loaded && !refviews.lerping && neighbor_count > 0) {
-                for (uint32_t ni = 0; ni < neighbor_count; ni++) {
-                    const float* c = &neighbor_positions[ni*3];
-                    float hs = node_half_size;
+            if (state->refviews_loaded && !state->refviews.lerping && state->neighbor_count > 0) {
+                for (uint32_t ni = 0; ni < state->neighbor_count; ni++) {
+                    const float* c = &state->neighbor_positions[ni*3];
+                    float hs = state->node_half_size;
                     float bmin[3] = { c[0]-hs, c[1]-hs, c[2]-hs };
                     float bmax[3] = { c[0]+hs, c[1]+hs, c[2]+hs };
                     float t;
-                    if (ray_aabb(cam.position, forward, bmin, bmax, &t) && t < node_t) {
+                    if (math_ray_aabb(state->cam.position, forward, bmin, bmax, &t) && t < node_t) {
                         node_t = t;
                     }
                 }
@@ -1357,12 +1283,12 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     // Hotspot debug overlay: project authored polygons of the current
     // refview onto the screen by inverting the overlay shader pipeline.
-    if (show_hotspot_debug && refviews_loaded && refviews.current_node >= 0) {
-        RefView* cv = &refviews.views[refviews.current_node];
+    if (state->show_hotspot_debug && state->refviews_loaded && state->refviews.current_node >= 0) {
+        RefView* cv = &state->refviews.views[state->refviews.current_node];
         if (cv->hotspot_count > 0) {
             float cam_basis[16];
             float cam_tan[2];
-            camera_get_overlay_ray_basis(&cam, (float)win_w / (float)win_h, cam_basis, cam_tan);
+            camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h, cam_basis, cam_tan);
             float ref_rot[16];
             refview_get_rotation_matrix(cv, ref_rot);
             ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1376,7 +1302,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
                 if (h->polygon.count < 3) continue;
 
                 // Deterministic per-hotspot color via hash -> hue.
-                uint32_t k = (uint32_t)refviews.current_node * 2654435761u + hi * 2246822519u;
+                uint32_t k = (uint32_t)state->refviews.current_node * 2654435761u + hi * 2246822519u;
                 float hue = (float)(k & 0xFFFF) / 65535.0f; // [0,1)
                 // HSV(h, 0.85, 1.0) -> RGB
                 float hh = hue * 6.0f;
@@ -1457,34 +1383,34 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     PROFILE("overlay params") {
     // Find closest refview node to camera (used for overlay + current_node tracking)
-    if (refviews_loaded) {
+    if (state->refviews_loaded) {
         float best_dist2 = 1e30f;
         int best_idx = -1;
-        for (uint32_t i = 0; i < refviews.count; i++) {
-            if (!refviews.views[i].texture.id) continue;
-            float dx = cam.position[0] - refviews.views[i].position[0];
-            float dy = cam.position[1] - refviews.views[i].position[1];
-            float dz = cam.position[2] - refviews.views[i].position[2];
+        for (uint32_t i = 0; i < state->refviews.count; i++) {
+            if (!state->refviews.views[i].texture.id) continue;
+            float dx = state->cam.position[0] - state->refviews.views[i].position[0];
+            float dy = state->cam.position[1] - state->refviews.views[i].position[1];
+            float dz = state->cam.position[2] - state->refviews.views[i].position[2];
             float d2 = dx*dx + dy*dy + dz*dz;
             if (d2 < best_dist2) { best_dist2 = d2; best_idx = (int)i; }
         }
 
-        refviews.current_node = best_idx;
+        state->refviews.current_node = best_idx;
 
-        if (best_idx >= 0 && refview_max_alpha > 0.0f) {
-            RefView* rv = &refviews.views[best_idx];
+        if (best_idx >= 0 && state->refview_max_alpha > 0.0f) {
+            RefView* rv = &state->refviews.views[best_idx];
             float dist = sqrtf(best_dist2);
             float fade_dist = 0.1f;
             float alpha = 1.0f - dist / fade_dist;
             if (alpha < 0.0f) alpha = 0.0f;
-            if (alpha > refview_max_alpha) alpha = refview_max_alpha;
+            if (alpha > state->refview_max_alpha) alpha = state->refview_max_alpha;
 
             if (alpha > 0.0f) {
                 overlay.texture = rv->texture;
                 overlay.texture_view = rv->texture_view;
                 overlay.alpha = alpha;
 
-                camera_get_overlay_ray_basis(&cam, (float)win_w / (float)win_h,
+                camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h,
                                              overlay.camera_ray_basis,
                                              overlay.camera_tan_half_fov);
 
@@ -1494,30 +1420,30 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
         }
 
         // Collect neighbor nodes for wireframe rendering + click targets
-        neighbor_count = refview_get_neighbors(&refviews, neighbor_positions, neighbor_indices, max_neighbors);
+        state->neighbor_count = refview_get_neighbors(&state->refviews, state->neighbor_positions, state->neighbor_indices, max_neighbors);
     }
 
     // Build node render params
-    if (refviews_loaded && neighbor_count > 0 && show_node_boxes) {
-        node_params.positions = neighbor_positions;
-        node_params.count = neighbor_count;
-        node_params.half_size = node_half_size;
+    if (state->refviews_loaded && state->neighbor_count > 0 && state->show_node_boxes) {
+        node_params.positions = state->neighbor_positions;
+        node_params.count = state->neighbor_count;
+        node_params.half_size = state->node_half_size;
         node_ptr = &node_params;
     }
 
     // Build map-camera uniforms when the top-down overlay is active.
-    if (map_view_active) {
-        camera_get_view_matrix(&map_cam, map_uniforms.view);
-        camera_get_proj_matrix(&map_cam, aspect, map_uniforms.proj);
+    if (state->map_view_active) {
+        camera_get_view_matrix(&state->map_cam, map_uniforms.view);
+        camera_get_proj_matrix(&state->map_cam, aspect, map_uniforms.proj);
         map_uniforms.viewport[0]   = (float)win_w;
         map_uniforms.viewport[1]   = (float)win_h;
-        map_uniforms.orthographic  = map_cam.ortho_blend;
-        map_uniforms.persp_focal   = (1.0f / tanf(map_cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
-        map_uniforms.ortho_focal   = (float)win_h / (2.0f * map_cam.ortho_size);
+        map_uniforms.orthographic  = state->map_cam.ortho_blend;
+        map_uniforms.persp_focal   = (1.0f / tanf(state->map_cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
+        map_uniforms.ortho_focal   = (float)win_h / (2.0f * state->map_cam.ortho_size);
         map_uniforms_ptr = &map_uniforms;
     }
 
-    if (scene_loaded && g_splat_effect_active) {
+    if (state->scene_loaded && g_splat_effect_active) {
         float elapsed = g_app_time - g_splat_effect_start_time;
         if (elapsed >= g_splat_effect_duration) {
             g_splat_effect_active = false;
@@ -1539,15 +1465,15 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
     }
     }
 
-    if (scene_loaded && renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted && scene.visible_count > 0) {
+    if (state->scene_loaded && state->renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted && state->scene.visible_count > 0) {
         SortContext sort_ctx = {};
-        sort_ctx.depths = scene.visible_depths;
-        sort_ctx.input_indices = scene.visible_indices;
-        sort_ctx.count = scene.visible_count;
-        sort_ctx.sorted_indices = scene.sorted_indices;
-        sort_ctx.scratch_indices = scene.scratch_indices;
-        sort_ctx.scratch_keys = scene.scratch_keys;
-        sort_ctx.scratch_keys2 = scene.scratch_keys2;
+        sort_ctx.depths = state->scene.visible_depths;
+        sort_ctx.input_indices = state->scene.visible_indices;
+        sort_ctx.count = state->scene.visible_count;
+        sort_ctx.sorted_indices = state->scene.sorted_indices;
+        sort_ctx.scratch_indices = state->scene.scratch_indices;
+        sort_ctx.scratch_keys = state->scene.scratch_keys;
+        sort_ctx.scratch_keys2 = state->scene.scratch_keys2;
         PROFILE("gaussian sort") {
         sort_gaussians(&sort_ctx);
         }
@@ -1555,7 +1481,7 @@ GSPLAT_EXPORT SDL_AppResult SDL_AppIterate(void *appstate) {
 
     // Render
     PROFILE("render submit") {
-    renderer_draw_frame(&renderer, &scene, &cam_uniforms, overlay_ptr, node_ptr,
+    renderer_draw_frame(&state->renderer, &state->scene, &cam_uniforms, overlay_ptr, node_ptr,
                         splat_effect_ptr, 1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
     }
 

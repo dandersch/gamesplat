@@ -4,3 +4,4 @@ gsplat_hot
 imgui.ini
 build/
 bin/
+compile_commands.json

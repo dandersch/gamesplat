@@ -30,9 +30,11 @@ TRACY_SRC="$TRACY_DIR/TracyClient.cpp"
 mkdir -p "$BUILD_DIR" "$OBJ_DIR"
 
 INCLUDE_FLAGS=(
+    -I.
     -I"$IMGUI_DIR"
     -I"$IMGUI_DIR/backends"
     -I"$VENDOR_DIR"
+    -I"$VENDOR_DIR/libwebp/src"
     -I"$TRACY_DIR"
 )
 SOKOL_BACKEND_FLAGS=("-DSOKOL_GLCORE")

@@ -73,6 +73,28 @@ static inline float math_smoothstep01(float t) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+// Slab-style ray vs axis-aligned box intersection. On hit, returns true and
+// writes the near intersection distance to *out_t (clamped to >= 0 so that
+// the camera being inside the box still counts as a hit at t = 0).
+static bool math_ray_aabb(const float origin[3], const float dir[3], const float bmin[3], const float bmax[3], float* out_t) {
+    float tmin = -1e30f, tmax = 1e30f;
+    for (int axis = 0; axis < 3; axis++) {
+        float o = origin[axis], d = dir[axis];
+        if (fabsf(d) < 1e-8f) {
+            if (o < bmin[axis] || o > bmax[axis]) return false;
+        } else {
+            float t1 = (bmin[axis] - o) / d, t2 = (bmax[axis] - o) / d;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            if (t1 > tmin) tmin = t1;
+            if (t2 < tmax) tmax = t2;
+            if (tmin > tmax) return false;
+        }
+    }
+    if (tmax < 0.0f) return false;
+    *out_t = tmin > 0.0f ? tmin : 0.0f;
+    return true;
+}
+
 static inline void math_vec3_cross(const float a[3], const float b[3], float out[3]) {
     out[0] = a[1]*b[2] - a[2]*b[1];
     out[1] = a[2]*b[0] - a[0]*b[2];
