@@ -6,6 +6,7 @@
 #include <cstdint>
 #include "sokol_app.h"
 #include "sokol_gfx.h"
+#include "sokol_glue.h"
 #include "imgui.h"
 #include "sokol_imgui.h"
 #include "profiler.h"
@@ -26,49 +27,6 @@ sg_pixel_format renderer_default_color_format(void) {
         return sg_query_desc().environment.defaults.color_format;
     }
     return SG_PIXELFORMAT_RGBA8;
-}
-
-static sg_pixel_format renderer_sg_pixel_format(sapp_pixel_format fmt) {
-    switch (fmt) {
-        case SAPP_PIXELFORMAT_NONE:          return SG_PIXELFORMAT_NONE;
-        case SAPP_PIXELFORMAT_RGBA8:         return SG_PIXELFORMAT_RGBA8;
-        case SAPP_PIXELFORMAT_SRGB8A8:       return SG_PIXELFORMAT_SRGB8A8;
-        case SAPP_PIXELFORMAT_BGRA8:         return SG_PIXELFORMAT_BGRA8;
-        case SAPP_PIXELFORMAT_SBGRA8:        return SG_PIXELFORMAT_BGRA8;
-        case SAPP_PIXELFORMAT_DEPTH:         return SG_PIXELFORMAT_DEPTH;
-        case SAPP_PIXELFORMAT_DEPTH_STENCIL: return SG_PIXELFORMAT_DEPTH_STENCIL;
-        default:                             return SG_PIXELFORMAT_RGBA8;
-    }
-}
-
-static sg_swapchain renderer_default_swapchain(void) {
-    sapp_swapchain src = sapp_get_swapchain();
-    sg_swapchain dst = {};
-    dst.invalid = src.invalid;
-    dst.width = src.width;
-    dst.height = src.height;
-    dst.sample_count = src.sample_count;
-    dst.color_format = renderer_sg_pixel_format(src.color_format);
-    dst.depth_format = renderer_sg_pixel_format(src.depth_format);
-    dst.metal.current_drawable = src.metal.current_drawable;
-    dst.metal.depth_stencil_texture = src.metal.depth_stencil_texture;
-    dst.metal.msaa_color_texture = src.metal.msaa_color_texture;
-    dst.d3d11.render_view = src.d3d11.render_view;
-    dst.d3d11.resolve_view = src.d3d11.resolve_view;
-    dst.d3d11.depth_stencil_view = src.d3d11.depth_stencil_view;
-    dst.wgpu.render_view = src.wgpu.render_view;
-    dst.wgpu.resolve_view = src.wgpu.resolve_view;
-    dst.wgpu.depth_stencil_view = src.wgpu.depth_stencil_view;
-    dst.vulkan.render_image = src.vulkan.render_image;
-    dst.vulkan.render_view = src.vulkan.render_view;
-    dst.vulkan.resolve_image = src.vulkan.resolve_image;
-    dst.vulkan.resolve_view = src.vulkan.resolve_view;
-    dst.vulkan.depth_stencil_image = src.vulkan.depth_stencil_image;
-    dst.vulkan.depth_stencil_view = src.vulkan.depth_stencil_view;
-    dst.vulkan.render_finished_semaphore = src.vulkan.render_finished_semaphore;
-    dst.vulkan.present_complete_semaphore = src.vulkan.present_complete_semaphore;
-    dst.gl.framebuffer = src.gl.framebuffer;
-    return dst;
 }
 
 static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
@@ -997,7 +955,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
         pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
         pass.action.stencil.clear_value = 0;
-        pass.swapchain = renderer_default_swapchain();
+        pass.swapchain = sglue_swapchain();
 
         sg_begin_pass(&pass);
         sg_apply_pipeline(r->blit_pipeline);
@@ -1032,7 +990,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
     pass.action.stencil.clear_value = 0;
     // Backend-managed default surface (GL framebuffer 0 or current WebGPU canvas texture).
-    pass.swapchain = renderer_default_swapchain();
+    pass.swapchain = sglue_swapchain();
 
     sg_begin_pass(&pass);
     draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);

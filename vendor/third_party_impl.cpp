@@ -40,6 +40,7 @@ _Pragma ("GCC diagnostic ignored \"-Wunused-but-set-variable\"")
 #include "sokol_app.h"
 _Pragma ("GCC diagnostic pop")
 #include "sokol_gfx.h"
+#include "sokol_glue.h"
 #include "sokol_log.h"
 
 // sokol_imgui.h is the ImGui rendering backend (NOT to be confused with

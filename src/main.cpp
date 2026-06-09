@@ -4,6 +4,7 @@
 
 #include "sokol_app.h"
 #include "sokol_gfx.h"
+#include "sokol_glue.h"
 #include "sokol_log.h"
 #include "imgui.h"
 #include "sokol_imgui.h"
@@ -130,37 +131,6 @@ struct AppState {
 
 static AppState* g_state = NULL;
 
-static sg_pixel_format app_sg_pixel_format(sapp_pixel_format fmt) {
-    switch (fmt) {
-        case SAPP_PIXELFORMAT_NONE:          return SG_PIXELFORMAT_NONE;
-        case SAPP_PIXELFORMAT_RGBA8:         return SG_PIXELFORMAT_RGBA8;
-        case SAPP_PIXELFORMAT_SRGB8A8:       return SG_PIXELFORMAT_SRGB8A8;
-        case SAPP_PIXELFORMAT_BGRA8:         return SG_PIXELFORMAT_BGRA8;
-        case SAPP_PIXELFORMAT_SBGRA8:        return SG_PIXELFORMAT_BGRA8;
-        case SAPP_PIXELFORMAT_DEPTH:         return SG_PIXELFORMAT_DEPTH;
-        case SAPP_PIXELFORMAT_DEPTH_STENCIL: return SG_PIXELFORMAT_DEPTH_STENCIL;
-        default:                             return SG_PIXELFORMAT_RGBA8;
-    }
-}
-
-static sg_environment app_sg_environment(void) {
-    sapp_environment src = sapp_get_environment();
-    sg_environment dst = {};
-    dst.defaults.color_format = app_sg_pixel_format(src.defaults.color_format);
-    dst.defaults.depth_format = app_sg_pixel_format(src.defaults.depth_format);
-    dst.defaults.sample_count = src.defaults.sample_count;
-    dst.metal.device = src.metal.device;
-    dst.d3d11.device = src.d3d11.device;
-    dst.d3d11.device_context = src.d3d11.device_context;
-    dst.wgpu.device = src.wgpu.device;
-    dst.vulkan.instance = src.vulkan.instance;
-    dst.vulkan.physical_device = src.vulkan.physical_device;
-    dst.vulkan.device = src.vulkan.device;
-    dst.vulkan.queue = src.vulkan.queue;
-    dst.vulkan.queue_family_index = src.vulkan.queue_family_index;
-    return dst;
-}
-
 static void app_init(void) {
     AppState* state = new AppState();
     g_state = state;
@@ -185,7 +155,7 @@ static void app_init(void) {
     state->colmap_dir  = state->colmap_dir  ? state->colmap_dir  : "res/colmap";
 
     sg_desc sgd = {};
-    sgd.environment = app_sg_environment();
+    sgd.environment = sglue_environment();
     sgd.logger.func = slog_func;
     sg_setup(&sgd);
     if (!sg_isvalid()) {
