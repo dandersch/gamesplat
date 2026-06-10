@@ -14,11 +14,10 @@
 
 #include "profiler.h"
 #include "maths.h"
-
 #include "log_entries.h"
-#include "log.h"
 int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 
+/* unity build */
 #include "camera.cpp"
 #include "gaussian.cpp"
 #include "gaussian_loader_sog.cpp"
@@ -41,6 +40,7 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 static int g_argc = 0;
 static char** g_argv = NULL;
 
+// TODO inline
 static void compute_gaussian_scene_radius_from_center(const GaussianScene* scene, const float center[3], float* radius) {
     if (!scene || scene->gaussian_count == 0) {
         *radius = 1.0f;

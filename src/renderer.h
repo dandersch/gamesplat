@@ -66,10 +66,12 @@ struct Renderer {
     sg_pipeline     wireframe_pipeline;
     sg_pipeline     mesh_pipeline;
     sg_sampler      overlay_sampler;
-    // Gaussian data is stored in a readonly storage buffer. Layout matches
-    // GpuGaussian byte-for-byte.
-    sg_buffer       gaussian_buffer;
-    sg_view         gaussian_buffer_view;
+    // Gaussian data is stored in an RGBA32F texture (16 texels per gaussian)
+    // instead of a storage buffer; this keeps the splat shader compatible with
+    // GLES3 / WebGL2 which has no SSBOs. Layout matches GpuGaussian byte-for-byte.
+    sg_image        gaussian_texture;
+    sg_view         gaussian_texture_view;
+    sg_sampler      gaussian_sampler;
     sg_sampler      accum_sampler;
     uint32_t        gaussian_tex_w;
     uint32_t        gaussian_tex_h;

@@ -30,3 +30,5 @@ LOG_ENTRY(CATEGORY,  CULL,      (1<<26),    "[CULL ]",     LOG_COLOR_GRAY    )\
 LOG_ENTRY(CATEGORY,  SORT,      (1<<27),    "[SORT ]",     LOG_COLOR_GRAY    )\
 LOG_ENTRY(CATEGORY,  ANIM,      (1<<28),    "[ANIM ]",     LOG_COLOR_GRAY    )\
 LOG_ENTRY(CATEGORY,  DEBUG,     (1<<29),    "[DEBUG]",     LOG_COLOR_GRAY    )
+
+#include "log.h"

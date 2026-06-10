@@ -18,16 +18,16 @@
 #include "sj.h"
 
 // --- sokol_app + sokol_gfx + sokol_imgui ----------------------------------
-// Keep the native build on the desktop GL backend and switch only the
-// Emscripten build to WebGPU. The generated shader headers carry both
-// glsl430 and wgsl variants.
+// Keep the native build on the desktop GL backend. Emscripten builds select
+// either SOKOL_GLES3 (WebGL2) or SOKOL_WGPU via build flags; default to WebGL2
+// if neither was provided.
 #define SOKOL_IMPL
 #if defined(ENABLE_PROFILER)
   #define SOKOL_TRACE_HOOKS
 #endif
 #if defined(__EMSCRIPTEN__)
-  #if !defined(SOKOL_WGPU)
-    #define SOKOL_WGPU
+  #if !defined(SOKOL_GLES3) && !defined(SOKOL_WGPU)
+    #define SOKOL_GLES3
   #endif
 #else
   #if !defined(SOKOL_GLCORE)
