@@ -1,26 +1,24 @@
 // 3D Gaussian splat rendering. Vertex shader fetches packed gaussian data
-// from a readonly storage buffer and projects a 2D oriented quad with
-// screen-space covariance. Per-instance vertex attribute carries the sorted
-// gaussian id.
+// from an RGBA32F texture and projects a 2D oriented quad with screen-space
+// covariance. Per-instance vertex attribute carries the sorted gaussian id.
 //
 // sokol-shdc input. Compiled into shaders/splat.glsl.h.
 
 @vs splat_vs
-// Gaussian data is laid out as 16 vec4s per gaussian (= 64 floats,
+// Gaussian data is laid out as 16 RGBA32F texels per gaussian (= 64 floats,
 // byte-identical to the host-side GpuGaussian struct):
-//   data[0] = (pos.x, pos.y, pos.z, opacity)
-//   data[1] = (scale.x, scale.y, scale.z, pad)
-//   data[2] = (rot.w, rot.x, rot.y, rot.z)
-//   data[3] = (color.r, color.g, color.b, pad)   // raw f_dc
-//   data[4]..data[14] = sh_rest (45 floats packed tightly, RGB triples per coeff)
-//   data[15].last_three_components = pad
-struct GaussianData {
-    vec4 data[16];
-};
+//   texel 0 = (pos.x, pos.y, pos.z, opacity)
+//   texel 1 = (scale.x, scale.y, scale.z, pad)
+//   texel 2 = (rot.w, rot.x, rot.y, rot.z)
+//   texel 3 = (color.r, color.g, color.b, pad)   // raw f_dc
+//   texels 4..14 = sh_rest (45 floats packed tightly, RGB triples per coeff)
+//   texel 15.last_three_components = pad
+// Texture width is fixed (POT) so we can use bit ops to address.
+layout(binding = 0) uniform texture2D gaussian_tex;
+layout(binding = 0) uniform sampler   gaussian_smp;
 
-layout(binding = 0) readonly buffer gaussian_buf {
-    GaussianData gaussians[];
-};
+const int GAUSSIAN_TEX_WIDTH  = 4096;
+const int GAUSSIAN_TEXELS_PER = 16;
 
 layout(binding = 0) uniform CameraUBO {
     mat4 view;
@@ -49,7 +47,10 @@ out vec3  frag_conic;
 flat out uint frag_splat_id;
 
 vec4 fetch_texel(int k) {
-    return gaussians[int(splat_id)].data[k];
+    int linear = int(splat_id) * GAUSSIAN_TEXELS_PER + k;
+    int x = linear & (GAUSSIAN_TEX_WIDTH - 1);   // width is POT (4096)
+    int y = linear >> 12;                        // log2(4096) = 12
+    return texelFetch(sampler2D(gaussian_tex, gaussian_smp), ivec2(x, y), 0);
 }
 
 float hash11(float p) {
