@@ -1,0 +1,17 @@
+/*        entry       name                  value        string      color            */
+#line 0
+LOG_ENTRY(SEVERITY,   TRACE,        (1<<__LINE__),    "[TRACE]",     LOG_COLOR_GRAY    )
+LOG_ENTRY(SEVERITY,   INFO,         (1<<__LINE__),    "[INFO ]",     LOG_COLOR_GREEN   )
+LOG_ENTRY(SEVERITY,   WARN,         (1<<__LINE__),    "[WARN ]",     LOG_COLOR_YELLOW  )
+LOG_ENTRY(SEVERITY,   ERROR,        (1<<__LINE__),    "[ERROR]",     LOG_COLOR_RED     )
+LOG_ENTRY(SEVERITY,   FATAL,        (1<<__LINE__),    "[FATAL]",     LOG_COLOR_PURPLE  )
+LOG_ENTRY(SUBSYSTEM,  PLATFORM,     (1<<__LINE__),    "[PLATF]",     LOG_COLOR_CYAN    )
+LOG_ENTRY(SUBSYSTEM,  AUDIO,        (1<<__LINE__),    "[AUDIO]",     LOG_COLOR_GREEN   )
+LOG_ENTRY(SUBSYSTEM,  VIDEO,        (1<<__LINE__),    "[VIDEO]",     LOG_COLOR_RED     )
+LOG_ENTRY(SUBSYSTEM,  NETWORK,      (1<<__LINE__),    "[NETWK]",     LOG_COLOR_PURPLE  )
+LOG_ENTRY(SUBSYSTEM,  TEST,         (1<<__LINE__),    "[TEST ]",     LOG_COLOR_GREEN   )
+LOG_ENTRY(CATEGORY,   INIT,         (1<<__LINE__),    "[INIT ]",     LOG_COLOR_GRAY    )
+LOG_ENTRY(CATEGORY,   SHUTDOWN,     (1<<__LINE__),    "[SHUTD]",     LOG_COLOR_GRAY    )
+LOG_ENTRY(CATEGORY,   ACTIVATE,     (1<<__LINE__),    "[ACTIV]",     LOG_COLOR_GRAY    )
+LOG_ENTRY(CATEGORY,   DEACTIVATE,   (1<<__LINE__),    "[DEACT]",     LOG_COLOR_GRAY    )
+LOG_ENTRY(CATEGORY,   EMPTY,                    0,    "[     ]",     LOG_COLOR_GRAY    )
