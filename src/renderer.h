@@ -61,6 +61,7 @@ struct Renderer {
     sg_pipeline     splat_stochastic_pipeline;
     sg_pipeline     cull_pipeline;
     sg_pipeline     cull_reset_pipeline;
+    sg_pipeline     bitonic_sort_pipeline;
     sg_pipeline     accum_pipeline;
     sg_pipeline     blit_pipeline;
     sg_pipeline     overlay_pipeline;
@@ -86,11 +87,9 @@ struct Renderer {
     sg_sampler      mesh_sampler;
     MeshTransform   mesh_transform;         // translation/rotation/scale applied each frame to mesh_gpu
     MeshTransform   object_transform;       // applied each frame to object_gpu (identity by default)
-    sg_buffer       index_buffer;           // dynamic per-instance sorted-index storage buffer (stream)
-    sg_view         index_buffer_view;
     sg_buffer       unsorted_index_buffer;  // GPU-written per-instance visible-index storage buffer
     sg_view         unsorted_index_buffer_view;
-    uint32_t        index_buffer_capacity;  // in elements (uint32_t)
+    uint32_t        sort_capacity;          // power-of-two depth/id sort capacity
     uint32_t        gaussian_count;
 
     sg_image        stochastic_sample_image;

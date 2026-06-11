@@ -868,16 +868,10 @@ static void app_frame(void) {
     }
     }
 
-    // Alpha-blended sorting still needs CPU-visible cull/depth arrays. The
-    // stochastic path culls and generates depth keys on GPU in renderer_draw_frame.
-    if (state->scene_loaded && state->renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted) {
-        PROFILE("gaussian cull") {
-        cull_gaussians(&state->scene, cam_uniforms.view, cam_uniforms.proj, state->cam.ortho_blend);
-        }
-    } else if (state->scene_loaded) {
-        // GPU culling runs later inside renderer_draw_frame; until the GPU sort
-        // step provides a compact draw count, stochastic mode draws one
-        // sentinel-filtered instance per gaussian.
+    if (state->scene_loaded) {
+        // GPU culling/sorting runs later inside renderer_draw_frame. Until
+        // Sokol exposes an indirect draw count, splat modes draw conservative
+        // sentinel-filtered instance ranges.
         state->scene.visible_count = state->scene.gaussian_count;
     }
 
@@ -1391,20 +1385,6 @@ static void app_frame(void) {
             splat_effect_ptr = &splat_effect;
         }
     }
-    }
-
-    if (state->scene_loaded && state->renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted && state->scene.visible_count > 0) {
-        SortContext sort_ctx = {};
-        sort_ctx.depths = state->scene.visible_depths;
-        sort_ctx.input_indices = state->scene.visible_indices;
-        sort_ctx.count = state->scene.visible_count;
-        sort_ctx.sorted_indices = state->scene.sorted_indices;
-        sort_ctx.scratch_indices = state->scene.scratch_indices;
-        sort_ctx.scratch_keys = state->scene.scratch_keys;
-        sort_ctx.scratch_keys2 = state->scene.scratch_keys2;
-        PROFILE("gaussian sort") {
-        sort_gaussians(&sort_ctx);
-        }
     }
 
     // Render

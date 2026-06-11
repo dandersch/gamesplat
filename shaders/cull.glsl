@@ -59,6 +59,12 @@ uint positive_float_key(float v) {
     return floatBitsToUint(max(v, 0.0));
 }
 
+uint far_to_near_depth_key(float positive_view_depth) {
+    // Bitonic sort is ascending. Flip positive float depth keys so farther
+    // splats sort first for premultiplied back-to-front alpha blending.
+    return 0xFFFFFFFFu - positive_float_key(positive_view_depth);
+}
+
 float hash11(float p) {
     return fract(sin(p * 127.1) * 43758.5453123);
 }
@@ -145,7 +151,7 @@ void main() {
 
     uint compact_idx = atomicAdd(visible_count[0].count, 1u);
     output_splat_ids[compact_idx].count = idx;
-    output_depth_keys[compact_idx].count = positive_float_key(-p_view.z);
+    output_depth_keys[compact_idx].count = far_to_near_depth_key(-p_view.z);
 
     float qw = rot.x, qx = rot.y, qy = rot.z, qz = rot.w;
     mat3 R = mat3(
@@ -278,7 +284,7 @@ struct ResetUIntData {
 };
 
 layout(binding = 0) uniform ResetUBO {
-    int gaussian_count;
+    int sort_count;
 };
 
 layout(binding = 0) buffer ResetVisibleCount {
@@ -289,6 +295,10 @@ layout(binding = 1) buffer ResetOutputSplatIds {
     ResetUIntData output_splat_ids[];
 };
 
+layout(binding = 2) buffer ResetDepthKeys {
+    ResetUIntData output_depth_keys[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
@@ -296,8 +306,9 @@ void main() {
     if (idx == 0u) {
         visible_count[0].count = 0u;
     }
-    if (idx < uint(gaussian_count)) {
+    if (idx < uint(sort_count)) {
         output_splat_ids[idx].count = 0xFFFFFFFFu;
+        output_depth_keys[idx].count = 0xFFFFFFFFu;
     }
 }
 @end
