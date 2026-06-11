@@ -6,7 +6,7 @@ struct CullGaussianData {
 };
 
 struct UIntData {
-    uint value;
+    uint count;
 };
 
 struct CullProjectedSplatData {
@@ -47,6 +47,10 @@ layout(binding = 2) buffer OutputDepthKeys {
 
 layout(binding = 3) buffer ProjectedSplats {
     CullProjectedSplatData projected_splats[];
+};
+
+layout(binding = 4) buffer VisibleCount {
+    UIntData visible_count[];
 };
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -132,15 +136,16 @@ void main() {
         visible = abs(ndc_x) <= 1.3 && abs(ndc_y) <= 1.3;
     }
 
-    output_splat_ids[idx].value = visible ? idx : 0xFFFFFFFFu;
-    output_depth_keys[idx].value = visible ? positive_float_key(-p_view.z) : 0u;
-
     if (!visible) {
         projected_splats[idx].color_opacity = vec4(0.0);
         projected_splats[idx].center_radius = vec4(0.0);
         projected_splats[idx].conic_depth = vec4(1.0, 0.0, 1.0, 1.0);
         return;
     }
+
+    uint compact_idx = atomicAdd(visible_count[0].count, 1u);
+    output_splat_ids[compact_idx].count = idx;
+    output_depth_keys[compact_idx].count = positive_float_key(-p_view.z);
 
     float qw = rot.x, qx = rot.y, qy = rot.z, qz = rot.w;
     mat3 R = mat3(
@@ -266,3 +271,35 @@ void main() {
 @end
 
 @program cull cull_cs
+
+@cs cull_reset_cs
+struct ResetUIntData {
+    uint count;
+};
+
+layout(binding = 0) uniform ResetUBO {
+    int gaussian_count;
+};
+
+layout(binding = 0) buffer ResetVisibleCount {
+    ResetUIntData visible_count[];
+};
+
+layout(binding = 1) buffer ResetOutputSplatIds {
+    ResetUIntData output_splat_ids[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx == 0u) {
+        visible_count[0].count = 0u;
+    }
+    if (idx < uint(gaussian_count)) {
+        output_splat_ids[idx].count = 0xFFFFFFFFu;
+    }
+}
+@end
+
+@program cull_reset cull_reset_cs

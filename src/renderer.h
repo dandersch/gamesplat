@@ -60,6 +60,7 @@ struct Renderer {
     sg_pipeline     splat_pipeline;
     sg_pipeline     splat_stochastic_pipeline;
     sg_pipeline     cull_pipeline;
+    sg_pipeline     cull_reset_pipeline;
     sg_pipeline     accum_pipeline;
     sg_pipeline     blit_pipeline;
     sg_pipeline     overlay_pipeline;
@@ -75,6 +76,8 @@ struct Renderer {
     sg_view         depth_key_buffer_view;
     sg_buffer       projected_splat_buffer;
     sg_view         projected_splat_buffer_view;
+    sg_buffer       visible_count_buffer;
+    sg_view         visible_count_buffer_view;
     sg_sampler      accum_sampler;
     sg_buffer       cube_vertex_buffer;
     sg_buffer       cube_index_buffer;

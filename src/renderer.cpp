@@ -43,6 +43,7 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_pipeline);
     renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_pipeline);
+    renderer_destroy_shader_pipeline(&r->cull_reset_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
@@ -104,6 +105,13 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.shader = sg_make_shader(cull_shader_desc(sg_query_backend()));
         pd.label = "gaussian-cull-pipeline";
         r->cull_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(cull_reset_shader_desc(sg_query_backend()));
+        pd.label = "gaussian-cull-reset-pipeline";
+        r->cull_reset_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Fullscreen accumulation/display pipelines ----------------------
@@ -251,7 +259,8 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->mesh_pipeline = sg_make_pipeline(&pd);
     }
 
-    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id && r->cull_pipeline.id &&
+    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
+              r->cull_pipeline.id && r->cull_reset_pipeline.id &&
               r->accum_pipeline.id && r->blit_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
               r->mesh_pipeline.id;
@@ -380,6 +389,14 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         sg_destroy_buffer(r->projected_splat_buffer);
         r->projected_splat_buffer = {};
     }
+    if (r->visible_count_buffer_view.id) {
+        sg_destroy_view(r->visible_count_buffer_view);
+        r->visible_count_buffer_view = {};
+    }
+    if (r->visible_count_buffer.id) {
+        sg_destroy_buffer(r->visible_count_buffer);
+        r->visible_count_buffer = {};
+    }
     if (r->index_buffer_view.id) {
         sg_destroy_view(r->index_buffer_view);
         r->index_buffer_view = {};
@@ -441,6 +458,17 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.storage_buffer.buffer = r->projected_splat_buffer;
     vd.label = "projected-splat-storage-buffer-view";
     r->projected_splat_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = sizeof(uint32_t);
+    bd.label = "splat-visible-count-storage-buffer";
+    r->visible_count_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->visible_count_buffer;
+    vd.label = "splat-visible-count-storage-buffer-view";
+    r->visible_count_buffer_view = sg_make_view(&vd);
 
     // Dynamic per-instance sorted-index buffer (one uint per gaussian).
     bd = {};
@@ -881,9 +909,29 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     if (!r->cull_pipeline.id || !r->gaussian_buffer_view.id ||
         !r->unsorted_index_buffer_view.id || !r->depth_key_buffer_view.id ||
         !r->projected_splat_buffer_view.id ||
+        !r->visible_count_buffer_view.id ||
         scene->gaussian_count == 0) {
         scene->visible_count = 0;
         return;
+    }
+
+    {
+        sg_pass pass = {};
+        pass.compute = true;
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->cull_reset_pipeline);
+
+        sg_bindings bnd = {};
+        bnd.views[VIEW_ResetVisibleCount] = r->visible_count_buffer_view;
+        bnd.views[VIEW_ResetOutputSplatIds] = r->unsorted_index_buffer_view;
+        sg_apply_bindings(&bnd);
+
+        ResetUBO_t u = {};
+        u.gaussian_count = scene->gaussian_count;
+        sg_apply_uniforms(UB_ResetUBO, SG_RANGE_REF(u));
+
+        sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
+        sg_end_pass();
     }
 
     sg_pass pass = {};
@@ -896,6 +944,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     bnd.views[VIEW_OutputSplatIds] = r->unsorted_index_buffer_view;
     bnd.views[VIEW_OutputDepthKeys] = r->depth_key_buffer_view;
     bnd.views[VIEW_ProjectedSplats] = r->projected_splat_buffer_view;
+    bnd.views[VIEW_VisibleCount] = r->visible_count_buffer_view;
     sg_apply_bindings(&bnd);
 
     CullUBO_t u = {};
@@ -1114,6 +1163,8 @@ void renderer_destroy(Renderer* r) {
     if (r->depth_key_buffer.id)    sg_destroy_buffer(r->depth_key_buffer);
     if (r->projected_splat_buffer_view.id) sg_destroy_view(r->projected_splat_buffer_view);
     if (r->projected_splat_buffer.id) sg_destroy_buffer(r->projected_splat_buffer);
+    if (r->visible_count_buffer_view.id) sg_destroy_view(r->visible_count_buffer_view);
+    if (r->visible_count_buffer.id) sg_destroy_buffer(r->visible_count_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);
