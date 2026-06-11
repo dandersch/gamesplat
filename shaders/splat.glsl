@@ -29,6 +29,7 @@ layout(binding = 0) uniform SplatDrawUBO {
 
 out vec3  frag_color;
 out float frag_opacity;
+flat out float frag_alpha_power_cutoff;
 out vec2  frag_center;
 out vec3  frag_conic;
 flat out uint frag_splat_id;
@@ -44,6 +45,7 @@ void main() {
     if (splat_id == 0xFFFFFFFFu) {
         frag_color = vec3(0.0);
         frag_opacity = 0.0;
+        frag_alpha_power_cutoff = 0.0;
         frag_center = vec2(0.0);
         frag_conic = vec3(1.0, 0.0, 1.0);
         frag_splat_id = splat_id;
@@ -64,6 +66,7 @@ void main() {
 
     frag_color = projected.color_opacity.rgb;
     frag_opacity = projected.color_opacity.a;
+    frag_alpha_power_cutoff = log((1.0 / 255.0) / max(projected.color_opacity.a, 1.0e-8));
     frag_center = raster_center_px;
     frag_conic = projected.conic_depth.xyz;
     frag_splat_id = splat_id;
@@ -73,6 +76,7 @@ void main() {
 @fs splat_fs
 in vec3  frag_color;
 in float frag_opacity;
+flat in float frag_alpha_power_cutoff;
 in vec2  frag_center;
 in vec3  frag_conic;
 flat in uint frag_splat_id;
@@ -89,9 +93,9 @@ void main() {
     );
 
     if (power > 0.0) discard;
+    if (power < frag_alpha_power_cutoff) discard;
 
     float alpha = min(frag_opacity * exp(power), 0.99);
-    if (alpha < 1.0 / 255.0) discard;
 
     // Premultiplied alpha output
     out_color = vec4(frag_color * alpha, alpha);
@@ -101,6 +105,7 @@ void main() {
 @fs splat_stochastic_fs
 in vec3  frag_color;
 in float frag_opacity;
+flat in float frag_alpha_power_cutoff;
 in vec2  frag_center;
 in vec3  frag_conic;
 flat in uint frag_splat_id;
@@ -127,9 +132,9 @@ void main() {
     );
 
     if (power > 0.0) discard;
+    if (power < frag_alpha_power_cutoff) discard;
 
     float alpha = min(frag_opacity * exp(power), 0.99);
-    if (alpha < 1.0 / 255.0) discard;
 
     float r = hash13(vec3(gl_FragCoord.xy, float(frag_splat_id) + frame_seed));
     if (r >= alpha) discard;
