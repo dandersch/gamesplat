@@ -20,7 +20,7 @@ mkdir -p "$BUILD_ROOT"
 
 echo "Generating sokol-shdc headers..."
 for name in wireframe overlay darken mesh splat accum; do
-    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:glsl300es:wgsl
+    ./bin/sokol-shdc --input "shaders/$name.glsl" --output "shaders/$name.glsl.h" --slang glsl430:wgsl
 done
 
 COMMON_FLAGS_BASE=(
@@ -136,16 +136,9 @@ build_app() {
     echo "Done: $out"
 }
 
-build_app "WebGL2" "$BUILD_ROOT/webgl" \
-    -DSOKOL_GLES3 \
-    -sUSE_WEBGL2=1 \
-    -sFULL_ES3=1 \
-    -sMIN_WEBGL_VERSION=2 \
-    -sMAX_WEBGL_VERSION=2
-
 build_app "WebGPU" "$BUILD_ROOT/webgpu" \
     -DSOKOL_WGPU \
     --use-port=emdawnwebgpu \
     -sASYNCIFY=1
 
-echo "Done: $BUILD_ROOT/webgl/index.html and $BUILD_ROOT/webgpu/index.html"
+echo "Done: $BUILD_ROOT/webgpu/index.html"

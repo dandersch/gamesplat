@@ -313,17 +313,6 @@ bool renderer_init(Renderer* r) {
         sd.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
         sd.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
         sd.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
-        sd.label = "gaussian-sampler";
-        r->gaussian_sampler = sg_make_sampler(&sd);
-    }
-    {
-        sg_sampler_desc sd = {};
-        sd.min_filter = SG_FILTER_NEAREST;
-        sd.mag_filter = SG_FILTER_NEAREST;
-        sd.mipmap_filter = SG_FILTER_NEAREST;
-        sd.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
-        sd.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
-        sd.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
         sd.label = "accum-sampler";
         r->accum_sampler = sg_make_sampler(&sd);
     }
@@ -363,70 +352,44 @@ bool renderer_init(Renderer* r) {
     return true;
 }
 
-// Gaussian texture layout: each gaussian occupies 16 consecutive RGBA32F
-// texels (= 64 floats, same byte layout as GpuGaussian). Width is fixed at
-// 4096 (POT, so the shader can use bit ops). Height grows to hold N gaussians.
-#define GAUSSIAN_TEX_WIDTH      4096u
-#define GAUSSIAN_TEXELS_PER     16u
-#define GAUSSIAN_BYTES_PER_TEXEL 16u  // RGBA32F
-
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
     renderer_reset_stochastic_accumulation(r);
 
-    if (r->gaussian_texture_view.id) {
-        sg_destroy_view(r->gaussian_texture_view);
-        r->gaussian_texture_view = {};
+    if (r->gaussian_buffer_view.id) {
+        sg_destroy_view(r->gaussian_buffer_view);
+        r->gaussian_buffer_view = {};
     }
-    if (r->gaussian_texture.id) {
-        sg_destroy_image(r->gaussian_texture);
-        r->gaussian_texture = {};
+    if (r->gaussian_buffer.id) {
+        sg_destroy_buffer(r->gaussian_buffer);
+        r->gaussian_buffer = {};
     }
 
-    uint32_t total_texels = scene->gaussian_count * GAUSSIAN_TEXELS_PER;
-    uint32_t tex_w = GAUSSIAN_TEX_WIDTH;
-    uint32_t tex_h = (total_texels + tex_w - 1u) / tex_w;
-    r->gaussian_tex_w = tex_w;
-    r->gaussian_tex_h = tex_h;
-
-    // Pack into a tight buffer sized for the full tex_w*tex_h grid (trailing
-    // slack zeroed for cleanliness).
-    uint32_t tex_buf_size = tex_w * tex_h * GAUSSIAN_BYTES_PER_TEXEL;
     uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
-    uint8_t* tex_data = (uint8_t*)malloc(tex_buf_size);
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
-    memcpy(tex_data, gpu_data, payload_size);
-    if (tex_buf_size > payload_size) {
-        memset(tex_data + payload_size, 0, tex_buf_size - payload_size);
-    }
+
+    sg_buffer_desc bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = payload_size;
+    bd.data.ptr = gpu_data;
+    bd.data.size = payload_size;
+    bd.label = "gaussian-storage-buffer";
+    r->gaussian_buffer = sg_make_buffer(&bd);
     free(gpu_data);
 
-    sg_image_desc id = {};
-    id.type = SG_IMAGETYPE_2D;
-    id.width = (int)tex_w;
-    id.height = (int)tex_h;
-    id.num_slices = 1;
-    id.num_mipmaps = 1;
-    id.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    id.data.mip_levels[0].ptr = tex_data;
-    id.data.mip_levels[0].size = tex_buf_size;
-    id.label = "gaussian-tex";
-    r->gaussian_texture = sg_make_image(&id);
-    free(tex_data);
-
-    if (sg_query_image_state(r->gaussian_texture) != SG_RESOURCESTATE_VALID) {
-        LOG(ERROR|GAUSSIAN|GPU, "gaussian-texture: allocation failed; splat drawing disabled");
+    if (sg_query_buffer_state(r->gaussian_buffer) != SG_RESOURCESTATE_VALID) {
+        LOG(ERROR|GAUSSIAN|GPU, "gaussian-storage-buffer: allocation failed; splat drawing disabled");
         r->gaussian_count = 0;
         return;
     }
 
     sg_view_desc vd = {};
-    vd.texture.image = r->gaussian_texture;
-    vd.label = "gaussian-tex-view";
-    r->gaussian_texture_view = sg_make_view(&vd);
+    vd.storage_buffer.buffer = r->gaussian_buffer;
+    vd.label = "gaussian-storage-buffer-view";
+    r->gaussian_buffer_view = sg_make_view(&vd);
 
     // Dynamic per-instance sorted-index buffer (one uint per gaussian).
-    sg_buffer_desc bd = {};
+    bd = {};
     bd.usage.vertex_buffer = true;
     bd.usage.stream_update = true;
     bd.size = scene->gaussian_count * sizeof(uint32_t);
@@ -444,8 +407,8 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     ubd.label = "splat-unsorted-visible-index-vb";
     r->unsorted_index_buffer = sg_make_buffer(&ubd);
 
-    LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (gaussian_tex = %ux%u RGBA32F, %.1f MB)",
-        scene->gaussian_count, tex_w, tex_h, (double)tex_buf_size / (1024.0 * 1024.0));
+    LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
+        scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
 }
 
 // Release everything held by a MeshGpu and zero it. Safe to call on an
@@ -766,7 +729,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     sg_buffer splat_id_buffer = (splat_mode == SplatRenderMode::StochasticUnsorted)
         ? r->unsorted_index_buffer
         : r->index_buffer;
-    if (scene->visible_count > 0 && r->gaussian_texture.id && splat_id_buffer.id) {
+    if (scene->visible_count > 0 && r->gaussian_buffer_view.id && splat_id_buffer.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
@@ -775,8 +738,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
 
         sg_bindings bnd = {};
         bnd.vertex_buffers[0] = splat_id_buffer;
-        bnd.views[VIEW_gaussian_tex] = r->gaussian_texture_view;
-        bnd.samplers[SMP_gaussian_smp] = r->gaussian_sampler;
+        bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
         sg_apply_bindings(&bnd);
 
         // The CameraUniforms host struct lays out 1:1 with the generated
@@ -1031,11 +993,10 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 void renderer_destroy(Renderer* r) {
     renderer_destroy_shader_pipelines(r);
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
-    if (r->gaussian_sampler.id)   sg_destroy_sampler(r->gaussian_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
-    if (r->gaussian_texture_view.id) sg_destroy_view(r->gaussian_texture_view);
-    if (r->gaussian_texture.id)   sg_destroy_image(r->gaussian_texture);
+    if (r->gaussian_buffer_view.id) sg_destroy_view(r->gaussian_buffer_view);
+    if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);

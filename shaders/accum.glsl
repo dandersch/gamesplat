@@ -1,4 +1,4 @@
-// WebGL-safe RGBA8 temporal accumulation and display for stochastic splats.
+// RGBA8 temporal accumulation and display for stochastic splats.
 // Uses a fullscreen triangle and ping-pong color attachments.
 
 @vs accum_vs

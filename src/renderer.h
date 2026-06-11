@@ -26,8 +26,8 @@ struct NodeRenderParams {
 };
 
 // Shader-only splat effect parameters. The vec4-style layout mirrors the
-// SplatEffectUBO in shaders/splat.glsl and keeps WebGL/GLES uniform packing
-// simple: center_radius.xyz = effect center, .w = scene radius;
+// SplatEffectUBO in shaders/splat.glsl and keeps uniform packing simple:
+// center_radius.xyz = effect center, .w = scene radius;
 // params = (elapsed, duration, strength, active); color = tint.rgb + strength.
 struct SplatEffectParams {
     float center_radius[4];
@@ -66,15 +66,11 @@ struct Renderer {
     sg_pipeline     wireframe_pipeline;
     sg_pipeline     mesh_pipeline;
     sg_sampler      overlay_sampler;
-    // Gaussian data is stored in an RGBA32F texture (16 texels per gaussian)
-    // instead of a storage buffer; this keeps the splat shader compatible with
-    // GLES3 / WebGL2 which has no SSBOs. Layout matches GpuGaussian byte-for-byte.
-    sg_image        gaussian_texture;
-    sg_view         gaussian_texture_view;
-    sg_sampler      gaussian_sampler;
+    // Gaussian data is stored in a readonly storage buffer. Layout matches
+    // GpuGaussian byte-for-byte.
+    sg_buffer       gaussian_buffer;
+    sg_view         gaussian_buffer_view;
     sg_sampler      accum_sampler;
-    uint32_t        gaussian_tex_w;
-    uint32_t        gaussian_tex_h;
     sg_buffer       cube_vertex_buffer;
     sg_buffer       cube_index_buffer;
     MeshGpu         mesh_gpu;               // primary animated mesh (--mesh)

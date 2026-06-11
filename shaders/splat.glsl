@@ -1,24 +1,25 @@
 // 3D Gaussian splat rendering. Vertex shader fetches packed gaussian data
-// from an RGBA32F texture and projects a 2D oriented quad with screen-space
+// from a storage buffer and projects a 2D oriented quad with screen-space
 // covariance. Per-instance vertex attribute carries the sorted gaussian id.
 //
 // sokol-shdc input. Compiled into shaders/splat.glsl.h.
 
 @vs splat_vs
-// Gaussian data is laid out as 16 RGBA32F texels per gaussian (= 64 floats,
-// byte-identical to the host-side GpuGaussian struct):
-//   texel 0 = (pos.x, pos.y, pos.z, opacity)
-//   texel 1 = (scale.x, scale.y, scale.z, pad)
-//   texel 2 = (rot.w, rot.x, rot.y, rot.z)
-//   texel 3 = (color.r, color.g, color.b, pad)   // raw f_dc
-//   texels 4..14 = sh_rest (45 floats packed tightly, RGB triples per coeff)
-//   texel 15.last_three_components = pad
-// Texture width is fixed (POT) so we can use bit ops to address.
-layout(binding = 0) uniform texture2D gaussian_tex;
-layout(binding = 0) uniform sampler   gaussian_smp;
+// Gaussian data is laid out as 64 floats per gaussian, byte-identical to the
+// host-side GpuGaussian struct:
+//   floats 0..2   = pos.xyz                 float 3  = opacity
+//   floats 4..6   = scale.xyz               float 7  = pad
+//   floats 8..11  = rot.wxyz
+//   floats 12..14 = color.rgb raw f_dc      float 15 = pad
+//   floats 16..60 = sh_rest (45 floats, RGB triples per coeff)
+//   floats 61..63 = pad
+struct GaussianData {
+    float data[64];
+};
 
-const int GAUSSIAN_TEX_WIDTH  = 4096;
-const int GAUSSIAN_TEXELS_PER = 16;
+layout(binding = 0) readonly buffer GaussianBuffer {
+    GaussianData gaussian_data[];
+};
 
 layout(binding = 0) uniform CameraUBO {
     mat4 view;
@@ -46,11 +47,14 @@ out vec2  frag_center;
 out vec3  frag_conic;
 flat out uint frag_splat_id;
 
-vec4 fetch_texel(int k) {
-    int linear = int(splat_id) * GAUSSIAN_TEXELS_PER + k;
-    int x = linear & (GAUSSIAN_TEX_WIDTH - 1);   // width is POT (4096)
-    int y = linear >> 12;                        // log2(4096) = 12
-    return texelFetch(sampler2D(gaussian_tex, gaussian_smp), ivec2(x, y), 0);
+vec4 fetch_vec4(int k) {
+    int base = k * 4;
+    return vec4(
+        gaussian_data[splat_id].data[base + 0],
+        gaussian_data[splat_id].data[base + 1],
+        gaussian_data[splat_id].data[base + 2],
+        gaussian_data[splat_id].data[base + 3]
+    );
 }
 
 float hash11(float p) {
@@ -73,11 +77,11 @@ void main() {
     );
     vec2 corner = corners[quad_verts[gl_VertexIndex % 6]];
 
-    // 2. Fetch Gaussian header (texels 0..3)
-    vec4 t0 = fetch_texel(0);  // pos.xyz, opacity
-    vec4 t1 = fetch_texel(1);  // scale.xyz, pad
-    vec4 t2 = fetch_texel(2);  // rot (w,x,y,z)
-    vec4 t3 = fetch_texel(3);  // dc.rgb, pad
+    // 2. Fetch Gaussian header (vec4 records 0..3)
+    vec4 t0 = fetch_vec4(0);  // pos.xyz, opacity
+    vec4 t1 = fetch_vec4(1);  // scale.xyz, pad
+    vec4 t2 = fetch_vec4(2);  // rot (w,x,y,z)
+    vec4 t3 = fetch_vec4(3);  // dc.rgb, pad
     vec3  position = t0.xyz;
     float opacity  = t0.w;
     vec3  scale    = t1.xyz;
@@ -230,12 +234,12 @@ void main() {
     const float SH_C3_5 =  1.445305721320277;
     const float SH_C3_6 = -0.5900435899266435;
 
-    // Fetch the 12 texels covering sh_rest (floats 16..63 = 48 floats; last
+    // Fetch the 12 vec4 records covering sh_rest (floats 16..63 = 48 floats; last
     // 3 are padding). Flatten into a 48-float array so SH(k) can index three
     // consecutive floats at offset k*3.
     float sh_flat[48];
     for (int i = 0; i < 12; ++i) {
-        vec4 tt = fetch_texel(4 + i);
+        vec4 tt = fetch_vec4(4 + i);
         sh_flat[i*4 + 0] = tt.x;
         sh_flat[i*4 + 1] = tt.y;
         sh_flat[i*4 + 2] = tt.z;
