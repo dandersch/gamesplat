@@ -6,7 +6,7 @@
 #include <cctype>
 #include <dirent.h>
 #include <SDL3/SDL.h>
-#include "log_entries.h"
+#include "log.h"
 
 #if !defined(__EMSCRIPTEN__)
 #include <sqlite3.h>

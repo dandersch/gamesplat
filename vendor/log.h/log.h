@@ -135,7 +135,7 @@ enum
     /* get a timestamp string */                                                                  \
     time_t t = time(NULL); struct tm* time = localtime(&t);                                       \
     char buf[32]; buf[strftime(buf, sizeof(buf), LOG_TIME_FORMAT, time)] = '\0';                  \
-    printf("%s" LOG_COLOR_OFF "%s%s%s %12.12s:%4i " format LOG_COLOR_OFF"\n", buf,                \
+    SDL_Log("%s" LOG_COLOR_OFF "%s%s%s %12.12s:%4i " format LOG_COLOR_OFF"\n", buf,                \
            _log_label((flags) & LOG_SEVERITY),                                                    \
            _log_label((flags) & LOG_SUBSYSTEMS),                                                  \
            _log_label((flags) & LOG_CATEGORIES),                                                  \

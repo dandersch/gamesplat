@@ -14,7 +14,7 @@
 
 #include "profiler.h"
 #include "maths.h"
-#include "log_entries.h"
+#include "log.h"
 int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 
 /* unity build */
@@ -39,27 +39,6 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 
 static int g_argc = 0;
 static char** g_argv = NULL;
-
-// TODO inline
-static void compute_gaussian_scene_radius_from_center(const GaussianScene* scene, const float center[3], float* radius) {
-    if (!scene || scene->gaussian_count == 0) {
-        *radius = 1.0f;
-        return;
-    }
-
-    float max_r2 = 0.0f;
-    for (uint32_t i = 0; i < scene->gaussian_count; ++i) {
-        const float* p = scene->gaussians[i].position;
-        float dx = p[0] - center[0];
-        float dy = p[1] - center[1];
-        float dz = p[2] - center[2];
-        float r2 = dx*dx + dy*dy + dz*dz;
-        if (r2 > max_r2) max_r2 = r2;
-    }
-
-    float r = sqrtf(max_r2);
-    *radius = r > 1e-4f ? r : 1.0f;
-}
 
 static float g_app_time = 0.0f;
 static float g_splat_effect_start_time = 0.0f;
@@ -198,7 +177,26 @@ static void app_init(void) {
         state->scene_loaded = load_gaussian_scene(state->ply_path, &state->scene);
         }
         if (state->scene_loaded) {
-            compute_gaussian_scene_radius_from_center(&state->scene, g_splat_effect_center, &g_splat_effect_radius);
+            // compute gaussian scene radius from center
+            {
+                if (state->scene.gaussian_count == 0) {
+                    g_splat_effect_radius = 1.0f;
+                    return;
+                }
+
+                float max_r2 = 0.0f;
+                for (uint32_t i = 0; i < state->scene.gaussian_count; ++i) {
+                    const float* p = state->scene.gaussians[i].position;
+                    float dx = p[0] - g_splat_effect_center[0];
+                    float dy = p[1] - g_splat_effect_center[1];
+                    float dz = p[2] - g_splat_effect_center[2];
+                    float r2 = dx*dx + dy*dy + dz*dz;
+                    if (r2 > max_r2) max_r2 = r2;
+                }
+
+                float r = sqrtf(max_r2);
+                g_splat_effect_radius = r > 1e-4f ? r : 1.0f;
+            }
             PROFILE("upload gaussian scene") {
             renderer_upload_gaussians(&state->renderer, &state->scene);
             }

@@ -1,196 +1,34 @@
 #pragma once
 
-#if defined(LOG_ENTRY_FILE) && !defined(LOG_USE_DEF_FILE)
-  #include LOG_ENTRY_FILE
-#endif
+#define LOG_ENTRIES \
+LOG_ENTRY(SEVERITY,  INFO,      (1<< 0),    "[INFO ]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SEVERITY,  WARN,      (1<< 1),    "[WARN ]",     LOG_COLOR_YELLOW  )\
+LOG_ENTRY(SEVERITY,  ERROR,     (1<< 2),    "[ERROR]",     LOG_COLOR_RED     )\
+LOG_ENTRY(SUBSYSTEM, APP,       (1<< 4),    "[APP  ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, PLATFORM,  (1<< 5),    "[PLAT ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, RENDERER,  (1<< 6),    "[RENDR]",     LOG_COLOR_PURPLE  )\
+LOG_ENTRY(SUBSYSTEM, WEBGPU,    (1<< 7),    "[WGPU ]",     LOG_COLOR_PURPLE  )\
+LOG_ENTRY(SUBSYSTEM, GAUSSIAN,  (1<< 8),    "[GAUSS]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SUBSYSTEM, MESH,      (1<< 9),    "[MESH ]",     LOG_COLOR_GREEN   )\
+LOG_ENTRY(SUBSYSTEM, COLMAP,    (1<<10),    "[COLMP]",     LOG_COLOR_BLUE    )\
+LOG_ENTRY(SUBSYSTEM, REFVIEW,   (1<<11),    "[REFVW]",     LOG_COLOR_BLUE    )\
+LOG_ENTRY(SUBSYSTEM, HOTSPOT,   (1<<12),    "[HOTSP]",     LOG_COLOR_YELLOW  )\
+LOG_ENTRY(SUBSYSTEM, CAMERA,    (1<<13),    "[CAM  ]",     LOG_COLOR_CYAN    )\
+LOG_ENTRY(SUBSYSTEM, UI,        (1<<14),    "[UI   ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  INIT,      (1<<15),    "[INIT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SHUTDOWN,  (1<<16),    "[QUIT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  LOAD,      (1<<17),    "[LOAD ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  PARSE,     (1<<18),    "[PARSE]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  IO,        (1<<19),    "[IO   ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  GPU,       (1<<20),    "[GPU  ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SHADER,    (1<<21),    "[SHADR]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  RESOURCE,  (1<<22),    "[RESRC]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  FRAME,     (1<<23),    "[FRAME]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  INPUT,     (1<<24),    "[INPUT]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  NAV,       (1<<25),    "[NAV  ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  CULL,      (1<<26),    "[CULL ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  SORT,      (1<<27),    "[SORT ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  ANIM,      (1<<28),    "[ANIM ]",     LOG_COLOR_GRAY    )\
+LOG_ENTRY(CATEGORY,  DEBUG,     (1<<29),    "[DEBUG]",     LOG_COLOR_GRAY    )
 
-#if defined(_MSC_VER)
-  __pragma(warning(disable : 4996)) /* 'localtime' is deprecated */
-#endif
-#if defined (_WIN32)
-  #undef ERROR /* defined in wingdi.h as 0 */
-#endif
-
-#include <stdio.h>
-#include <time.h>
-
-#if !defined(LOG_VARIABLE_NAME)
-  #define LOG_VARIABLE_NAME log_verbosity_level
-#endif
-
-extern int LOG_VARIABLE_NAME;
-
-#ifdef LOG_USE_NO_COLOR
-  #define LOG_COLOR_OFF    ""
-  #define LOG_COLOR_GRAY   ""
-  #define LOG_COLOR_BLUE   ""
-  #define LOG_COLOR_CYAN   ""
-  #define LOG_COLOR_GREEN  ""
-  #define LOG_COLOR_YELLOW ""
-  #define LOG_COLOR_RED    ""
-  #define LOG_COLOR_PURPLE ""
-#else
-  #define LOG_COLOR_OFF    "\x1b[0m"
-  #define LOG_COLOR_GRAY   "\x1b[38;5;245m"
-  #define LOG_COLOR_BLUE   "\x1b[94m"
-  #define LOG_COLOR_CYAN   "\x1b[36m"
-  #define LOG_COLOR_GREEN  "\x1b[32m"
-  #define LOG_COLOR_YELLOW "\x1b[33m"
-  #define LOG_COLOR_RED    "\x1b[31m"
-  #define LOG_COLOR_PURPLE "\x1b[35m"
-#endif
-
-enum
-{
-  /* severity */
-  #define SEVERITY  1
-  #define SUBSYSTEM 0
-  #define CATEGORY  0
-  #define LOG_ENTRY(entry, name, value, string, color) LOG_SEVERITY_##name = value * entry ,
-  #ifdef LOG_USE_DEF_FILE
-    #include LOG_ENTRY_FILE
-  #else
-    LOG_ENTRIES
-  #endif
-  #undef LOG_ENTRY
-
-  #define LOG_ENTRY(entry, name, value, string, color) (value * entry) |
-  #define LOG_SEVERITY_MASK LOG_ENTRIES 0
-  #ifdef LOG_USE_DEF_FILE
-    LOG_SEVERITY =
-      #include LOG_ENTRY_FILE
-    0,
-  #else
-    LOG_SEVERITY = LOG_SEVERITY_MASK,
-  #endif
-  #undef LOG_ENTRY
-  #undef SEVERITY
-  #undef SUBSYSTEM
-  #undef CATEGORY
-
-  /* subsystems */
-  #define SEVERITY  0
-  #define SUBSYSTEM 1
-  #define CATEGORY  0
-  #define LOG_ENTRY(entry, name, value, string, color) LOG_SUBSYSTEM_##name = value * entry,
-  #ifdef LOG_USE_DEF_FILE
-    #include LOG_ENTRY_FILE
-  #else
-    LOG_ENTRIES
-  #endif
-  #undef LOG_ENTRY
-
-  #define LOG_ENTRY(entry, name, value, string, color) (value * entry) |
-  #define LOG_SUBSYSTEM_MASK LOG_ENTRIES 0
-  #ifdef LOG_USE_DEF_FILE
-    LOG_SUBSYSTEMS =
-      #include LOG_ENTRY_FILE
-    0,
-  #else
-    LOG_SUBSYSTEMS = LOG_SUBSYSTEM_MASK,
-  #endif
-  #undef LOG_ENTRY
-  #undef SEVERITY
-  #undef SUBSYSTEM
-  #undef CATEGORY
-
-  /* categories */
-  #define SEVERITY  0
-  #define SUBSYSTEM 0
-  #define CATEGORY  1
-  #define LOG_ENTRY(entry, name, value, string, color) LOG_CATEGORY_##name = value * entry,
-  #ifdef LOG_USE_DEF_FILE
-    #include LOG_ENTRY_FILE
-  #else
-    LOG_ENTRIES
-  #endif
-  #undef LOG_ENTRY
-
-  #define LOG_ENTRY(entry, name, value, string, color) (value * entry) |
-  #define LOG_CATEGORY_MASK LOG_ENTRIES 0
-  #ifdef LOG_USE_DEF_FILE
-    LOG_CATEGORIES =
-      #include LOG_ENTRY_FILE
-    0,
-  #else
-    LOG_CATEGORIES = LOG_CATEGORY_MASK,
-  #endif
-  #undef LOG_ENTRY
-  #undef SEVERITY
-  #undef SUBSYSTEM
-  #undef CATEGORY
-
-  /* useful masks */
-  LOG_EVERYTHING       = 0x7fffffff,
-};
-
-#if !defined(LOG_TIME_FORMAT)
-  #define LOG_TIME_FORMAT "%H:%M:%S "
-#endif
-
-/* the core of the log macro */
-#define _LOG(flags, format, ...)                                                                  \
-  if ((flags) & LOG_VARIABLE_NAME)                                                                \
-  {                                                                                               \
-    /* get a timestamp string */                                                                  \
-    time_t t = time(NULL); struct tm* time = localtime(&t);                                       \
-    char buf[32]; buf[strftime(buf, sizeof(buf), LOG_TIME_FORMAT, time)] = '\0';                  \
-    SDL_Log("%s" LOG_COLOR_OFF "%s%s%s %12.12s:%4i " format LOG_COLOR_OFF"\n", buf,                \
-           _log_label((flags) & LOG_SEVERITY),                                                    \
-           _log_label((flags) & LOG_SUBSYSTEMS),                                                  \
-           _log_label((flags) & LOG_CATEGORIES),                                                  \
-           __FILE__, __LINE__, ##__VA_ARGS__);                                                    \
-  }
-
-#if defined(LOG_USE_SHORT_NAMES_GLOBALLY) && defined(LOG_USE_DEF_FILE)
-  /* NOTE fill the global namespace with unprefixed names of log entries (e.g. TRACE instead of LOG_SEVERITY_TRACE) */
-  #define LOG_ENTRY(entry, name, value, string, color)  name = LOG_##entry##_##name ,
-  enum {
-      #include LOG_ENTRY_FILE
-  };
-  #undef LOG_ENTRY
-#endif
-
-#define LOG_ENTRY(entry, name, value, string, color)  name = LOG_##entry##_##name ,
-#if defined(LOG_USE_DEF_FILE)
-  #define LOG(flags, format, ...)          \
-    {                                      \
-        _LOG(flags, format, ##__VA_ARGS__) \
-    }
-
-  #define LOG_SET_MASK(flags) LOG_VARIABLE_NAME = flags;
-#else
-  #define LOG_SET_MASK(flags)               \
-    {                                       \
-        /* remove LOG_ prefix */            \
-        enum { LOG_ENTRIES };               \
-        LOG_VARIABLE_NAME = flags;          \
-    }
-
-  #define LOG(flags, format, ...)           \
-    {                                       \
-        /* remove LOG_ prefix */            \
-        enum { LOG_ENTRIES };               \
-        _LOG(flags, format, ##__VA_ARGS__)  \
-    }
-#endif
-/* NOTE redefined to above #define at bottom of file */
-#undef LOG_ENTRY
-
-#define LOG_ENTRY(entry, name, value, string, color) case LOG_##entry##_##name: return color string LOG_COLOR_OFF;
-static const char* _log_label(int flags)
-{
-  switch (flags)
-  {
-    #ifdef LOG_USE_DEF_FILE
-      #include LOG_ENTRY_FILE
-    #else
-      LOG_ENTRIES
-    #endif
-    default: return "[     ]"; /* TODO let user pass in */
-  }
-}
-#undef LOG_ENTRY
-
-/* NOTE this #define is used in the LOG macro, so we cannot keep it #undef'ed */
-#define LOG_ENTRY(entry, name, value, string, color)  name = LOG_##entry##_##name,
+#include "log.h/log.h"
