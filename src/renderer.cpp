@@ -21,6 +21,7 @@
 #include "shaders/darken.glsl.h"
 #include "shaders/mesh.glsl.h"
 #include "shaders/splat.glsl.h"
+#include "shaders/cull.glsl.h"
 #include "shaders/accum.glsl.h"
 
 sg_pixel_format renderer_default_color_format(void) {
@@ -41,6 +42,7 @@ static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
 static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_pipeline);
     renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
+    renderer_destroy_shader_pipeline(&r->cull_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
@@ -55,12 +57,6 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         sg_pipeline_desc pd = {};
         pd.shader = sg_make_shader(splat_shader_desc(sg_query_backend()));
         pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-        // Per-instance attribute (uint splat_id) on buffer slot 0.
-        pd.layout.buffers[0].stride = sizeof(uint32_t);
-        pd.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
-        pd.layout.attrs[ATTR_splat_splat_id].buffer_index = 0;
-        pd.layout.attrs[ATTR_splat_splat_id].offset = 0;
-        pd.layout.attrs[ATTR_splat_splat_id].format = SG_VERTEXFORMAT_UINT;
         // Splats only test depth (so they don't poke through the mesh from
         // behind), they don't write depth or stencil.
         pd.depth.compare = SG_COMPAREFUNC_LESS;
@@ -90,11 +86,6 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         sg_pipeline_desc pd = {};
         pd.shader = sg_make_shader(splat_stochastic_shader_desc(sg_query_backend()));
         pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-        pd.layout.buffers[0].stride = sizeof(uint32_t);
-        pd.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
-        pd.layout.attrs[ATTR_splat_stochastic_splat_id].buffer_index = 0;
-        pd.layout.attrs[ATTR_splat_stochastic_splat_id].offset = 0;
-        pd.layout.attrs[ATTR_splat_stochastic_splat_id].format = SG_VERTEXFORMAT_UINT;
         pd.depth.compare = SG_COMPAREFUNC_LESS;
         pd.depth.write_enabled = true;
         pd.depth.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
@@ -104,6 +95,15 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "splat-stochastic-pipeline";
         r->splat_stochastic_pipeline = sg_make_pipeline(&pd);
+    }
+
+    // --- Gaussian cull/depth-key compute pipeline -----------------------
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(cull_shader_desc(sg_query_backend()));
+        pd.label = "gaussian-cull-pipeline";
+        r->cull_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Fullscreen accumulation/display pipelines ----------------------
@@ -251,7 +251,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->mesh_pipeline = sg_make_pipeline(&pd);
     }
 
-    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
+    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id && r->cull_pipeline.id &&
               r->accum_pipeline.id && r->blit_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
               r->mesh_pipeline.id;
@@ -364,6 +364,30 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         sg_destroy_buffer(r->gaussian_buffer);
         r->gaussian_buffer = {};
     }
+    if (r->depth_key_buffer_view.id) {
+        sg_destroy_view(r->depth_key_buffer_view);
+        r->depth_key_buffer_view = {};
+    }
+    if (r->depth_key_buffer.id) {
+        sg_destroy_buffer(r->depth_key_buffer);
+        r->depth_key_buffer = {};
+    }
+    if (r->index_buffer_view.id) {
+        sg_destroy_view(r->index_buffer_view);
+        r->index_buffer_view = {};
+    }
+    if (r->index_buffer.id) {
+        sg_destroy_buffer(r->index_buffer);
+        r->index_buffer = {};
+    }
+    if (r->unsorted_index_buffer_view.id) {
+        sg_destroy_view(r->unsorted_index_buffer_view);
+        r->unsorted_index_buffer_view = {};
+    }
+    if (r->unsorted_index_buffer.id) {
+        sg_destroy_buffer(r->unsorted_index_buffer);
+        r->unsorted_index_buffer = {};
+    }
 
     uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
     GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
@@ -388,24 +412,43 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.label = "gaussian-storage-buffer-view";
     r->gaussian_buffer_view = sg_make_view(&vd);
 
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = scene->gaussian_count * sizeof(uint32_t);
+    bd.label = "splat-depth-key-storage-buffer";
+    r->depth_key_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->depth_key_buffer;
+    vd.label = "splat-depth-key-storage-buffer-view";
+    r->depth_key_buffer_view = sg_make_view(&vd);
+
     // Dynamic per-instance sorted-index buffer (one uint per gaussian).
     bd = {};
-    bd.usage.vertex_buffer = true;
+    bd.usage.storage_buffer = true;
     bd.usage.stream_update = true;
     bd.size = scene->gaussian_count * sizeof(uint32_t);
-    bd.label = "splat-index-vb";
+    bd.label = "splat-index-storage-buffer";
     r->index_buffer = sg_make_buffer(&bd);
     r->index_buffer_capacity = scene->gaussian_count;
 
-    // Dynamic per-instance unsorted visible-index buffer. In stochastic mode
-    // this is updated from culling output directly (no depth sort), preserving
-    // frustum culling while avoiding per-frame sort order.
+    vd = {};
+    vd.storage_buffer.buffer = r->index_buffer;
+    vd.label = "splat-index-storage-buffer-view";
+    r->index_buffer_view = sg_make_view(&vd);
+
+    // GPU-written per-instance unsorted visible-index buffer. Culled entries are
+    // marked UINT_MAX; the splat shader skips those instances.
     sg_buffer_desc ubd = {};
-    ubd.usage.vertex_buffer = true;
-    ubd.usage.stream_update = true;
+    ubd.usage.storage_buffer = true;
     ubd.size = scene->gaussian_count * sizeof(uint32_t);
-    ubd.label = "splat-unsorted-visible-index-vb";
+    ubd.label = "splat-unsorted-visible-index-storage-buffer";
     r->unsorted_index_buffer = sg_make_buffer(&ubd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->unsorted_index_buffer;
+    vd.label = "splat-unsorted-visible-index-storage-buffer-view";
+    r->unsorted_index_buffer_view = sg_make_view(&vd);
 
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
@@ -726,10 +769,10 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     }
 
     // Splats
-    sg_buffer splat_id_buffer = (splat_mode == SplatRenderMode::StochasticUnsorted)
-        ? r->unsorted_index_buffer
-        : r->index_buffer;
-    if (scene->visible_count > 0 && r->gaussian_buffer_view.id && splat_id_buffer.id) {
+    sg_view splat_id_buffer_view = (splat_mode == SplatRenderMode::StochasticUnsorted)
+        ? r->unsorted_index_buffer_view
+        : r->index_buffer_view;
+    if (scene->visible_count > 0 && r->gaussian_buffer_view.id && splat_id_buffer_view.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
@@ -737,8 +780,8 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
             : r->splat_pipeline);
 
         sg_bindings bnd = {};
-        bnd.vertex_buffers[0] = splat_id_buffer;
         bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
+        bnd.views[VIEW_SplatIdBuffer] = splat_id_buffer_view;
         sg_apply_bindings(&bnd);
 
         // The CameraUniforms host struct lays out 1:1 with the generated
@@ -818,6 +861,41 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     }
 }
 
+static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const CameraUniforms* cam) {
+    if (!r->cull_pipeline.id || !r->gaussian_buffer_view.id ||
+        !r->unsorted_index_buffer_view.id || !r->depth_key_buffer_view.id ||
+        scene->gaussian_count == 0) {
+        scene->visible_count = 0;
+        return;
+    }
+
+    sg_pass pass = {};
+    pass.compute = true;
+    sg_begin_pass(&pass);
+    sg_apply_pipeline(r->cull_pipeline);
+
+    sg_bindings bnd = {};
+    bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
+    bnd.views[VIEW_OutputSplatIds] = r->unsorted_index_buffer_view;
+    bnd.views[VIEW_OutputDepthKeys] = r->depth_key_buffer_view;
+    sg_apply_bindings(&bnd);
+
+    CullUBO_t u = {};
+    memcpy(u.view, cam->view, sizeof(u.view));
+    memcpy(u.proj, cam->proj, sizeof(u.proj));
+    u.gaussian_count = scene->gaussian_count;
+    u.orthographic = cam->orthographic;
+    sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
+
+    sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
+    sg_end_pass();
+
+    // Sokol doesn't expose an indirect draw count here, so draw one instance per
+    // gaussian in stochastic mode; the shader skips UINT_MAX entries written by
+    // the cull compute pass.
+    scene->visible_count = scene->gaussian_count;
+}
+
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
                          const OverlayParams* overlay, const NodeRenderParams* nodes,
                          const SplatEffectParams* splat_effect,
@@ -826,6 +904,14 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
 
     const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticUnsorted);
+
+    if (stochastic) {
+        PROFILE("gaussian gpu cull") {
+        PROFILE_GPU("gaussian gpu cull") {
+        renderer_cull_gaussians_gpu(r, scene, cam);
+        }
+        }
+    }
 
     // Push fresh visible IDs to the GPU once per frame. Alpha blend uses
     // depth-sorted IDs; stochastic mode deliberately keeps culling order
@@ -836,13 +922,6 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         range.ptr = scene->sorted_indices;
         range.size = scene->visible_count * sizeof(uint32_t);
         sg_update_buffer(r->index_buffer, &range);
-        }
-    } else if (stochastic && scene->visible_count > 0 && r->unsorted_index_buffer.id) {
-        PROFILE("update unsorted visible index buffer") {
-        sg_range range;
-        range.ptr = scene->visible_indices;
-        range.size = scene->visible_count * sizeof(uint32_t);
-        sg_update_buffer(r->unsorted_index_buffer, &range);
         }
     }
 
@@ -997,10 +1076,14 @@ void renderer_destroy(Renderer* r) {
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
     if (r->gaussian_buffer_view.id) sg_destroy_view(r->gaussian_buffer_view);
     if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
+    if (r->depth_key_buffer_view.id) sg_destroy_view(r->depth_key_buffer_view);
+    if (r->depth_key_buffer.id)    sg_destroy_buffer(r->depth_key_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);
+    if (r->index_buffer_view.id)  sg_destroy_view(r->index_buffer_view);
     if (r->index_buffer.id)       sg_destroy_buffer(r->index_buffer);
+    if (r->unsorted_index_buffer_view.id) sg_destroy_view(r->unsorted_index_buffer_view);
     if (r->unsorted_index_buffer.id) sg_destroy_buffer(r->unsorted_index_buffer);
     mesh_gpu_release(&r->mesh_gpu);
     mesh_gpu_release(&r->object_gpu);

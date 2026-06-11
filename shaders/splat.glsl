@@ -21,6 +21,14 @@ layout(binding = 0) readonly buffer GaussianBuffer {
     GaussianData gaussian_data[];
 };
 
+struct SplatIdData {
+    uint id;
+};
+
+layout(binding = 1) readonly buffer SplatIdBuffer {
+    SplatIdData splat_ids[];
+};
+
 layout(binding = 0) uniform CameraUBO {
     mat4 view;
     mat4 proj;
@@ -38,16 +46,13 @@ layout(binding = 1) uniform SplatEffectUBO {
     vec4 effect_color;         // rgb = tint, a = tint strength
 };
 
-// Per-instance attribute: the sorted gaussian index for this instance.
-in uint splat_id;
-
 out vec3  frag_color;
 out float frag_opacity;
 out vec2  frag_center;
 out vec3  frag_conic;
 flat out uint frag_splat_id;
 
-vec4 fetch_vec4(int k) {
+vec4 fetch_vec4(uint splat_id, int k) {
     int base = k * 4;
     return vec4(
         gaussian_data[splat_id].data[base + 0],
@@ -77,11 +82,22 @@ void main() {
     );
     vec2 corner = corners[quad_verts[gl_VertexIndex % 6]];
 
+    uint splat_id = splat_ids[gl_InstanceIndex].id;
+    if (splat_id == 0xFFFFFFFFu) {
+        frag_color = vec3(0.0);
+        frag_opacity = 0.0;
+        frag_center = vec2(0.0);
+        frag_conic = vec3(1.0, 0.0, 1.0);
+        frag_splat_id = splat_id;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
     // 2. Fetch Gaussian header (vec4 records 0..3)
-    vec4 t0 = fetch_vec4(0);  // pos.xyz, opacity
-    vec4 t1 = fetch_vec4(1);  // scale.xyz, pad
-    vec4 t2 = fetch_vec4(2);  // rot (w,x,y,z)
-    vec4 t3 = fetch_vec4(3);  // dc.rgb, pad
+    vec4 t0 = fetch_vec4(splat_id, 0);  // pos.xyz, opacity
+    vec4 t1 = fetch_vec4(splat_id, 1);  // scale.xyz, pad
+    vec4 t2 = fetch_vec4(splat_id, 2);  // rot (w,x,y,z)
+    vec4 t3 = fetch_vec4(splat_id, 3);  // dc.rgb, pad
     vec3  position = t0.xyz;
     float opacity  = t0.w;
     vec3  scale    = t1.xyz;
@@ -239,7 +255,7 @@ void main() {
     // consecutive floats at offset k*3.
     float sh_flat[48];
     for (int i = 0; i < 12; ++i) {
-        vec4 tt = fetch_vec4(4 + i);
+        vec4 tt = fetch_vec4(splat_id, 4 + i);
         sh_flat[i*4 + 0] = tt.x;
         sh_flat[i*4 + 1] = tt.y;
         sh_flat[i*4 + 2] = tt.z;

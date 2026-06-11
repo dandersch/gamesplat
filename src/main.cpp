@@ -868,12 +868,17 @@ static void app_frame(void) {
     }
     }
 
-    // Cull here; sort later after ImGui so a same-frame render-mode switch
-    // uses the currently selected sorted/stochastic path.
-    if (state->scene_loaded) {
+    // Alpha-blended sorting still needs CPU-visible cull/depth arrays. The
+    // stochastic path culls and generates depth keys on GPU in renderer_draw_frame.
+    if (state->scene_loaded && state->renderer.splat_render_mode == SplatRenderMode::AlphaBlendSorted) {
         PROFILE("gaussian cull") {
         cull_gaussians(&state->scene, cam_uniforms.view, cam_uniforms.proj, state->cam.ortho_blend);
         }
+    } else if (state->scene_loaded) {
+        // GPU culling runs later inside renderer_draw_frame; until the GPU sort
+        // step provides a compact draw count, stochastic mode draws one
+        // sentinel-filtered instance per gaussian.
+        state->scene.visible_count = state->scene.gaussian_count;
     }
 
     PROFILE("imgui") {
