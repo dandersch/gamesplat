@@ -73,6 +73,8 @@ struct Renderer {
     sg_view         gaussian_buffer_view;
     sg_buffer       depth_key_buffer;
     sg_view         depth_key_buffer_view;
+    sg_buffer       projected_splat_buffer;
+    sg_view         projected_splat_buffer_view;
     sg_sampler      accum_sampler;
     sg_buffer       cube_vertex_buffer;
     sg_buffer       cube_index_buffer;

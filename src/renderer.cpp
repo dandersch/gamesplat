@@ -372,6 +372,14 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         sg_destroy_buffer(r->depth_key_buffer);
         r->depth_key_buffer = {};
     }
+    if (r->projected_splat_buffer_view.id) {
+        sg_destroy_view(r->projected_splat_buffer_view);
+        r->projected_splat_buffer_view = {};
+    }
+    if (r->projected_splat_buffer.id) {
+        sg_destroy_buffer(r->projected_splat_buffer);
+        r->projected_splat_buffer = {};
+    }
     if (r->index_buffer_view.id) {
         sg_destroy_view(r->index_buffer_view);
         r->index_buffer_view = {};
@@ -422,6 +430,17 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.storage_buffer.buffer = r->depth_key_buffer;
     vd.label = "splat-depth-key-storage-buffer-view";
     r->depth_key_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = scene->gaussian_count * sizeof(float) * 12u;
+    bd.label = "projected-splat-storage-buffer";
+    r->projected_splat_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->projected_splat_buffer;
+    vd.label = "projected-splat-storage-buffer-view";
+    r->projected_splat_buffer_view = sg_make_view(&vd);
 
     // Dynamic per-instance sorted-index buffer (one uint per gaussian).
     bd = {};
@@ -706,6 +725,7 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
 static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam,
                        const OverlayParams* overlay, const NodeRenderParams* nodes,
                        const SplatEffectParams* splat_effect, SplatRenderMode splat_mode) {
+    (void)splat_effect;
     // VP shared by both mesh slots and the wireframe pass.
     float vp[16];
     math_mat4_mul(cam->proj, cam->view, vp);
@@ -772,7 +792,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     sg_view splat_id_buffer_view = (splat_mode == SplatRenderMode::StochasticUnsorted)
         ? r->unsorted_index_buffer_view
         : r->index_buffer_view;
-    if (scene->visible_count > 0 && r->gaussian_buffer_view.id && splat_id_buffer_view.id) {
+    if (scene->visible_count > 0 && r->projected_splat_buffer_view.id && splat_id_buffer_view.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
@@ -780,20 +800,15 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
             : r->splat_pipeline);
 
         sg_bindings bnd = {};
-        bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
+        bnd.views[VIEW_ProjectedSplatBuffer] = r->projected_splat_buffer_view;
         bnd.views[VIEW_SplatIdBuffer] = splat_id_buffer_view;
         sg_apply_bindings(&bnd);
 
-        // The CameraUniforms host struct lays out 1:1 with the generated
-        // CameraUBO_t (verified by the existing usage in main.cpp).
-        sg_apply_uniforms(UB_CameraUBO, sg_range{ cam, sizeof(CameraUniforms) });
-        SplatEffectUBO_t effect_ubo = {};
-        if (splat_effect) {
-            memcpy(effect_ubo.effect_center_radius, splat_effect->center_radius, sizeof(effect_ubo.effect_center_radius));
-            memcpy(effect_ubo.effect_params, splat_effect->params, sizeof(effect_ubo.effect_params));
-            memcpy(effect_ubo.effect_color, splat_effect->color, sizeof(effect_ubo.effect_color));
-        }
-        sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
+        SplatDrawUBO_t draw_ubo = {};
+        draw_ubo.viewport[0] = cam->viewport[0];
+        draw_ubo.viewport[1] = cam->viewport[1];
+        draw_ubo.clip_y_sign = cam->clip_y_sign;
+        sg_apply_uniforms(UB_SplatDrawUBO, SG_RANGE_REF(draw_ubo));
         if (splat_mode == SplatRenderMode::StochasticUnsorted) {
             StochasticUBO_t stochastic_ubo = {};
             stochastic_ubo.frame_seed = (float)r->stochastic_frame_seed;
@@ -861,9 +876,11 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     }
 }
 
-static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const CameraUniforms* cam) {
+static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
+                                        const SplatEffectParams* splat_effect) {
     if (!r->cull_pipeline.id || !r->gaussian_buffer_view.id ||
         !r->unsorted_index_buffer_view.id || !r->depth_key_buffer_view.id ||
+        !r->projected_splat_buffer_view.id ||
         scene->gaussian_count == 0) {
         scene->visible_count = 0;
         return;
@@ -878,22 +895,33 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
     bnd.views[VIEW_OutputSplatIds] = r->unsorted_index_buffer_view;
     bnd.views[VIEW_OutputDepthKeys] = r->depth_key_buffer_view;
+    bnd.views[VIEW_ProjectedSplats] = r->projected_splat_buffer_view;
     sg_apply_bindings(&bnd);
 
     CullUBO_t u = {};
     memcpy(u.view, cam->view, sizeof(u.view));
     memcpy(u.proj, cam->proj, sizeof(u.proj));
+    u.viewport[0] = cam->viewport[0];
+    u.viewport[1] = cam->viewport[1];
     u.gaussian_count = scene->gaussian_count;
     u.orthographic = cam->orthographic;
+    u.persp_focal = cam->persp_focal;
+    u.ortho_focal = cam->ortho_focal;
+    u.clip_y_sign = cam->clip_y_sign;
+    u.clip_z_01 = cam->clip_z_01;
     sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
+
+    SplatEffectUBO_t effect_ubo = {};
+    if (splat_effect) {
+        memcpy(effect_ubo.effect_center_radius, splat_effect->center_radius, sizeof(effect_ubo.effect_center_radius));
+        memcpy(effect_ubo.effect_params, splat_effect->params, sizeof(effect_ubo.effect_params));
+        memcpy(effect_ubo.effect_color, splat_effect->color, sizeof(effect_ubo.effect_color));
+    }
+    sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
 
     sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
     sg_end_pass();
 
-    // Sokol doesn't expose an indirect draw count here, so draw one instance per
-    // gaussian in stochastic mode; the shader skips UINT_MAX entries written by
-    // the cull compute pass.
-    scene->visible_count = scene->gaussian_count;
 }
 
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
@@ -905,11 +933,17 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
     const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticUnsorted);
 
-    if (stochastic) {
-        PROFILE("gaussian gpu cull") {
-        PROFILE_GPU("gaussian gpu cull") {
-        renderer_cull_gaussians_gpu(r, scene, cam);
+    if (scene->gaussian_count > 0) {
+        PROFILE("gaussian gpu cull/project") {
+        PROFILE_GPU("gaussian gpu cull/project") {
+        renderer_cull_gaussians_gpu(r, scene, cam, splat_effect);
         }
+        }
+        if (stochastic) {
+            // Sokol doesn't expose an indirect draw count here, so stochastic
+            // mode draws one instance per gaussian; the shader skips UINT_MAX
+            // entries written by the cull/project pass.
+            scene->visible_count = scene->gaussian_count;
         }
     }
 
@@ -1078,6 +1112,8 @@ void renderer_destroy(Renderer* r) {
     if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
     if (r->depth_key_buffer_view.id) sg_destroy_view(r->depth_key_buffer_view);
     if (r->depth_key_buffer.id)    sg_destroy_buffer(r->depth_key_buffer);
+    if (r->projected_splat_buffer_view.id) sg_destroy_view(r->projected_splat_buffer_view);
+    if (r->projected_splat_buffer.id) sg_destroy_buffer(r->projected_splat_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);
