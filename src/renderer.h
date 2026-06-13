@@ -61,7 +61,9 @@ struct Renderer {
     sg_pipeline     splat_stochastic_pipeline;
     sg_pipeline     cull_pipeline;
     sg_pipeline     cull_reset_pipeline;
-    sg_pipeline     bitonic_sort_pipeline;
+    sg_pipeline     radix_hist_pipeline;
+    sg_pipeline     radix_prefix_pipeline;
+    sg_pipeline     radix_scatter_pipeline;
     sg_pipeline     accum_pipeline;
     sg_pipeline     blit_pipeline;
     sg_pipeline     overlay_pipeline;
@@ -75,6 +77,12 @@ struct Renderer {
     sg_view         gaussian_buffer_view;
     sg_buffer       depth_key_buffer;
     sg_view         depth_key_buffer_view;
+    sg_buffer       sort_temp_key_buffer;
+    sg_view         sort_temp_key_buffer_view;
+    sg_buffer       sort_temp_index_buffer;
+    sg_view         sort_temp_index_buffer_view;
+    sg_buffer       sort_histogram_buffer;
+    sg_view         sort_histogram_buffer_view;
     sg_buffer       projected_splat_buffer;
     sg_view         projected_splat_buffer_view;
     sg_buffer       visible_count_buffer;
@@ -90,6 +98,7 @@ struct Renderer {
     sg_buffer       unsorted_index_buffer;  // GPU-written per-instance visible-index storage buffer
     sg_view         unsorted_index_buffer_view;
     uint32_t        sort_capacity;          // power-of-two depth/id sort capacity
+    uint32_t        sort_group_count;
     uint32_t        gaussian_count;
 
     sg_image        stochastic_sample_image;

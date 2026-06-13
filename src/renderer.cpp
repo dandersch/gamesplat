@@ -45,7 +45,9 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_reset_pipeline);
-    renderer_destroy_shader_pipeline(&r->bitonic_sort_pipeline);
+    renderer_destroy_shader_pipeline(&r->radix_hist_pipeline);
+    renderer_destroy_shader_pipeline(&r->radix_prefix_pipeline);
+    renderer_destroy_shader_pipeline(&r->radix_scatter_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
@@ -127,13 +129,27 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->cull_reset_pipeline = sg_make_pipeline(&pd);
     }
 
-    // --- Alpha-blend depth sort compute pipeline ------------------------
+    // --- Alpha-blend radix sort compute pipelines -----------------------
     {
         sg_pipeline_desc pd = {};
         pd.compute = true;
-        pd.shader = sg_make_shader(bitonic_sort_shader_desc(sg_query_backend()));
-        pd.label = "gaussian-bitonic-sort-pipeline";
-        r->bitonic_sort_pipeline = sg_make_pipeline(&pd);
+        pd.shader = sg_make_shader(radix_hist_shader_desc(sg_query_backend()));
+        pd.label = "gaussian-radix-hist-pipeline";
+        r->radix_hist_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(radix_prefix_shader_desc(sg_query_backend()));
+        pd.label = "gaussian-radix-prefix-pipeline";
+        r->radix_prefix_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(radix_scatter_shader_desc(sg_query_backend()));
+        pd.label = "gaussian-radix-scatter-pipeline";
+        r->radix_scatter_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Fullscreen accumulation/display pipelines ----------------------
@@ -386,6 +402,7 @@ bool renderer_init(Renderer* r) {
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
     r->sort_capacity = next_power_of_two_u32(scene->gaussian_count);
+    r->sort_group_count = (r->sort_capacity + 255u) / 256u;
     renderer_reset_stochastic_accumulation(r);
 
     if (r->gaussian_buffer_view.id) {
@@ -403,6 +420,30 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     if (r->depth_key_buffer.id) {
         sg_destroy_buffer(r->depth_key_buffer);
         r->depth_key_buffer = {};
+    }
+    if (r->sort_temp_key_buffer_view.id) {
+        sg_destroy_view(r->sort_temp_key_buffer_view);
+        r->sort_temp_key_buffer_view = {};
+    }
+    if (r->sort_temp_key_buffer.id) {
+        sg_destroy_buffer(r->sort_temp_key_buffer);
+        r->sort_temp_key_buffer = {};
+    }
+    if (r->sort_temp_index_buffer_view.id) {
+        sg_destroy_view(r->sort_temp_index_buffer_view);
+        r->sort_temp_index_buffer_view = {};
+    }
+    if (r->sort_temp_index_buffer.id) {
+        sg_destroy_buffer(r->sort_temp_index_buffer);
+        r->sort_temp_index_buffer = {};
+    }
+    if (r->sort_histogram_buffer_view.id) {
+        sg_destroy_view(r->sort_histogram_buffer_view);
+        r->sort_histogram_buffer_view = {};
+    }
+    if (r->sort_histogram_buffer.id) {
+        sg_destroy_buffer(r->sort_histogram_buffer);
+        r->sort_histogram_buffer = {};
     }
     if (r->projected_splat_buffer_view.id) {
         sg_destroy_view(r->projected_splat_buffer_view);
@@ -462,6 +503,39 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.storage_buffer.buffer = r->depth_key_buffer;
     vd.label = "splat-depth-key-storage-buffer-view";
     r->depth_key_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = r->sort_capacity * sizeof(uint32_t);
+    bd.label = "splat-sort-temp-key-storage-buffer";
+    r->sort_temp_key_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->sort_temp_key_buffer;
+    vd.label = "splat-sort-temp-key-storage-buffer-view";
+    r->sort_temp_key_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = r->sort_capacity * sizeof(uint32_t);
+    bd.label = "splat-sort-temp-index-storage-buffer";
+    r->sort_temp_index_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->sort_temp_index_buffer;
+    vd.label = "splat-sort-temp-index-storage-buffer-view";
+    r->sort_temp_index_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = r->sort_group_count * 256u * sizeof(uint32_t);
+    bd.label = "splat-sort-histogram-storage-buffer";
+    r->sort_histogram_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->sort_histogram_buffer;
+    vd.label = "splat-sort-histogram-storage-buffer-view";
+    r->sort_histogram_buffer_view = sg_make_view(&vd);
 
     bd = {};
     bd.usage.storage_buffer = true;
@@ -974,34 +1048,82 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
 }
 
 static void renderer_sort_gaussians_gpu(Renderer* r) {
-    if (!r->bitonic_sort_pipeline.id || !r->depth_key_buffer_view.id ||
-        !r->unsorted_index_buffer_view.id || r->sort_capacity <= 1u) {
+    if (!r->radix_hist_pipeline.id || !r->radix_prefix_pipeline.id || !r->radix_scatter_pipeline.id ||
+        !r->depth_key_buffer_view.id || !r->unsorted_index_buffer_view.id ||
+        !r->sort_temp_key_buffer_view.id || !r->sort_temp_index_buffer_view.id ||
+        !r->sort_histogram_buffer_view.id || r->sort_capacity <= 1u || r->sort_group_count == 0u) {
         return;
     }
 
-    sg_pass pass = {};
-    pass.compute = true;
-    sg_begin_pass(&pass);
-    sg_apply_pipeline(r->bitonic_sort_pipeline);
+    sg_view key_views[2] = { r->depth_key_buffer_view, r->sort_temp_key_buffer_view };
+    sg_view id_views[2] = { r->unsorted_index_buffer_view, r->sort_temp_index_buffer_view };
 
-    sg_bindings bnd = {};
-    bnd.views[VIEW_SortKeys] = r->depth_key_buffer_view;
-    bnd.views[VIEW_SortIds] = r->unsorted_index_buffer_view;
-    sg_apply_bindings(&bnd);
+    for (uint32_t pass_i = 0; pass_i < 4u; ++pass_i) {
+        const int shift = (int)(pass_i * 8u);
+        const uint32_t src = pass_i & 1u;
+        const uint32_t dst = src ^ 1u;
 
-    const uint32_t groups = (r->sort_capacity + 255u) / 256u;
-    for (uint32_t k = 2u; k <= r->sort_capacity; k <<= 1u) {
-        for (uint32_t j = k >> 1u; j > 0u; j >>= 1u) {
-            BitonicSortUBO_t u = {};
-            u.sort_count = r->sort_capacity;
-            u.stage_k = k;
-            u.stage_j = j;
-            sg_apply_uniforms(UB_BitonicSortUBO, SG_RANGE_REF(u));
-            sg_dispatch((int)groups, 1, 1);
+        {
+            sg_pass pass = {};
+            pass.compute = true;
+            sg_begin_pass(&pass);
+            sg_apply_pipeline(r->radix_hist_pipeline);
+
+            sg_bindings bnd = {};
+            bnd.views[VIEW_RadixHistKeys] = key_views[src];
+            bnd.views[VIEW_RadixHistograms] = r->sort_histogram_buffer_view;
+            sg_apply_bindings(&bnd);
+
+            RadixHistUBO_t u = {};
+            u.sort_count = (int)r->sort_capacity;
+            u.shift = shift;
+            sg_apply_uniforms(UB_RadixHistUBO, SG_RANGE_REF(u));
+
+            sg_dispatch((int)r->sort_group_count, 1, 1);
+            sg_end_pass();
+        }
+
+        {
+            sg_pass pass = {};
+            pass.compute = true;
+            sg_begin_pass(&pass);
+            sg_apply_pipeline(r->radix_prefix_pipeline);
+
+            sg_bindings bnd = {};
+            bnd.views[VIEW_RadixPrefixHistograms] = r->sort_histogram_buffer_view;
+            sg_apply_bindings(&bnd);
+
+            RadixPrefixUBO_t u = {};
+            u.group_count = (int)r->sort_group_count;
+            sg_apply_uniforms(UB_RadixPrefixUBO, SG_RANGE_REF(u));
+
+            sg_dispatch(1, 1, 1);
+            sg_end_pass();
+        }
+
+        {
+            sg_pass pass = {};
+            pass.compute = true;
+            sg_begin_pass(&pass);
+            sg_apply_pipeline(r->radix_scatter_pipeline);
+
+            sg_bindings bnd = {};
+            bnd.views[VIEW_RadixScatterKeysIn] = key_views[src];
+            bnd.views[VIEW_RadixScatterKeysOut] = key_views[dst];
+            bnd.views[VIEW_RadixScatterIdsIn] = id_views[src];
+            bnd.views[VIEW_RadixScatterIdsOut] = id_views[dst];
+            bnd.views[VIEW_RadixScatterHistograms] = r->sort_histogram_buffer_view;
+            sg_apply_bindings(&bnd);
+
+            RadixScatterUBO_t u = {};
+            u.sort_count = (int)r->sort_capacity;
+            u.shift = shift;
+            sg_apply_uniforms(UB_RadixScatterUBO, SG_RANGE_REF(u));
+
+            sg_dispatch((int)r->sort_group_count, 1, 1);
+            sg_end_pass();
         }
     }
-
-    sg_end_pass();
 }
 
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
@@ -1190,6 +1312,12 @@ void renderer_destroy(Renderer* r) {
     if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
     if (r->depth_key_buffer_view.id) sg_destroy_view(r->depth_key_buffer_view);
     if (r->depth_key_buffer.id)    sg_destroy_buffer(r->depth_key_buffer);
+    if (r->sort_temp_key_buffer_view.id) sg_destroy_view(r->sort_temp_key_buffer_view);
+    if (r->sort_temp_key_buffer.id) sg_destroy_buffer(r->sort_temp_key_buffer);
+    if (r->sort_temp_index_buffer_view.id) sg_destroy_view(r->sort_temp_index_buffer_view);
+    if (r->sort_temp_index_buffer.id) sg_destroy_buffer(r->sort_temp_index_buffer);
+    if (r->sort_histogram_buffer_view.id) sg_destroy_view(r->sort_histogram_buffer_view);
+    if (r->sort_histogram_buffer.id) sg_destroy_buffer(r->sort_histogram_buffer);
     if (r->projected_splat_buffer_view.id) sg_destroy_view(r->projected_splat_buffer_view);
     if (r->projected_splat_buffer.id) sg_destroy_buffer(r->projected_splat_buffer);
     if (r->visible_count_buffer_view.id) sg_destroy_view(r->visible_count_buffer_view);
