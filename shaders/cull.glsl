@@ -60,9 +60,11 @@ uint positive_float_key(float v) {
 }
 
 uint far_to_near_depth_key(float positive_view_depth) {
-    // Bitonic sort is ascending. Flip positive float depth keys so farther
-    // splats sort first for premultiplied back-to-front alpha blending.
-    return 0xFFFFFFFFu - positive_float_key(positive_view_depth);
+    // Radix sort is ascending. Keep the upper 16 monotonic bits of the
+    // positive-float depth key and flip them so farther splats sort first for
+    // premultiplied back-to-front alpha blending. Sorting 16 depth bits needs
+    // two radix passes instead of four; ties retain compacted splat order.
+    return 0xFFFFu - (positive_float_key(positive_view_depth) >> 16u);
 }
 
 float hash11(float p) {

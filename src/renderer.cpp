@@ -401,8 +401,8 @@ bool renderer_init(Renderer* r) {
 
 void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gaussian_count = scene->gaussian_count;
-    r->sort_capacity = next_power_of_two_u32(scene->gaussian_count);
-    r->sort_group_count = (r->sort_capacity + 255u) / 256u;
+    r->sort_capacity = scene->gaussian_count;
+    r->sort_group_count = (scene->gaussian_count + 255u) / 256u;
     renderer_reset_stochastic_accumulation(r);
 
     if (r->gaussian_buffer_view.id) {
@@ -1058,7 +1058,7 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
     sg_view key_views[2] = { r->depth_key_buffer_view, r->sort_temp_key_buffer_view };
     sg_view id_views[2] = { r->unsorted_index_buffer_view, r->sort_temp_index_buffer_view };
 
-    for (uint32_t pass_i = 0; pass_i < 4u; ++pass_i) {
+    for (uint32_t pass_i = 0; pass_i < 2u; ++pass_i) {
         const int shift = (int)(pass_i * 8u);
         const uint32_t src = pass_i & 1u;
         const uint32_t dst = src ^ 1u;
@@ -1153,9 +1153,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             }
             }
             // Sokol doesn't expose an indirect draw count here, so alpha mode
-            // draws the padded power-of-two sorted buffer; the shader skips
-            // culled/padded UINT_MAX entries.
-            scene->visible_count = r->sort_capacity;
+            // draws one sorted entry per gaussian; the shader skips culled
+            // UINT_MAX entries.
+            scene->visible_count = scene->gaussian_count;
         }
     }
 

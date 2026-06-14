@@ -1,4 +1,4 @@
-// Portable 4-pass 8-bit radix sort for splat depth keys. Avoids subgroup
+// Portable 8-bit-pass radix sort for splat depth keys. Avoids subgroup
 // extensions so the shader path remains viable for both modern GL and WebGPU.
 
 @cs radix_hist_cs

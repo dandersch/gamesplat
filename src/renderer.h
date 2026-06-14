@@ -97,7 +97,7 @@ struct Renderer {
     MeshTransform   object_transform;       // applied each frame to object_gpu (identity by default)
     sg_buffer       unsorted_index_buffer;  // GPU-written per-instance visible-index storage buffer
     sg_view         unsorted_index_buffer_view;
-    uint32_t        sort_capacity;          // power-of-two depth/id sort capacity
+    uint32_t        sort_capacity;          // allocated depth/id sort capacity
     uint32_t        sort_group_count;
     uint32_t        gaussian_count;
 
