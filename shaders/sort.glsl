@@ -57,23 +57,34 @@ layout(binding = 0) buffer RadixPrefixHistograms {
     RadixPrefixUIntData histograms[];
 };
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+shared uint bin_totals[256];
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
-    if (gl_LocalInvocationID.x != 0u) {
-        return;
+    uint bin = gl_LocalInvocationID.x;
+    uint groups = uint(group_count);
+
+    uint total = 0u;
+    for (uint g = 0u; g < groups; ++g) {
+        total += histograms[g * 256u + bin].count;
+    }
+    bin_totals[bin] = total;
+    barrier();
+
+    for (uint offset = 1u; offset < 256u; offset <<= 1u) {
+        uint add = (bin >= offset) ? bin_totals[bin - offset] : 0u;
+        barrier();
+        bin_totals[bin] += add;
+        barrier();
     }
 
-    uint groups = uint(group_count);
-    uint running = 0u;
-
-    for (uint b = 0u; b < 256u; ++b) {
-        for (uint g = 0u; g < groups; ++g) {
-            uint idx = g * 256u + b;
-            uint count = histograms[idx].count;
-            histograms[idx].count = running;
-            running += count;
-        }
+    uint running = (bin == 0u) ? 0u : bin_totals[bin - 1u];
+    for (uint g = 0u; g < groups; ++g) {
+        uint idx = g * 256u + bin;
+        uint count = histograms[idx].count;
+        histograms[idx].count = running;
+        running += count;
     }
 }
 @end
@@ -110,7 +121,7 @@ layout(binding = 4) readonly buffer RadixScatterHistograms {
     RadixScatterUIntData histograms[];
 };
 
-shared uint local_bins[256];
+shared uint bin_flags[256 * 8];
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -119,13 +130,18 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     uint group = gl_WorkGroupID.x;
 
+    for (uint i = 0u; i < 8u; ++i) {
+        bin_flags[lid * 8u + i] = 0u;
+    }
+    barrier();
+
     uint key = 0xFFFFFFFFu;
     uint bin = 255u;
     if (gid < uint(sort_count)) {
         key = keys_in[gid].count;
         bin = (key >> uint(shift)) & 255u;
+        atomicOr(bin_flags[bin * 8u + (lid >> 5u)], 1u << (lid & 31u));
     }
-    local_bins[lid] = bin;
     barrier();
 
     if (gid >= uint(sort_count)) {
@@ -133,10 +149,12 @@ void main() {
     }
 
     uint local_rank = 0u;
-    for (uint i = 0u; i < lid; ++i) {
-        if (local_bins[i] == bin) {
-            local_rank++;
-        }
+    uint flag_word = lid >> 5u;
+    uint flag_bit = 1u << (lid & 31u);
+    for (uint i = 0u; i < 8u; ++i) {
+        uint bits = bin_flags[bin * 8u + i];
+        local_rank += (i < flag_word) ? uint(bitCount(bits)) : 0u;
+        local_rank += (i == flag_word) ? uint(bitCount(bits & (flag_bit - 1u))) : 0u;
     }
 
     uint out_index = histograms[group * 256u + bin].count + local_rank;
