@@ -1058,7 +1058,7 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
     sg_view key_views[2] = { r->depth_key_buffer_view, r->sort_temp_key_buffer_view };
     sg_view id_views[2] = { r->unsorted_index_buffer_view, r->sort_temp_index_buffer_view };
 
-    for (uint32_t pass_i = 0; pass_i < 2u; ++pass_i) {
+    for (uint32_t pass_i = 0; pass_i < 4u; ++pass_i) {
         const int shift = (int)(pass_i * 8u);
         const uint32_t src = pass_i & 1u;
         const uint32_t dst = src ^ 1u;
