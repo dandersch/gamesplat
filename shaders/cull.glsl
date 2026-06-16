@@ -151,9 +151,9 @@ void main() {
         return;
     }
 
-    uint compact_idx = atomicAdd(visible_count[0].count, 1u);
-    output_splat_ids[compact_idx].count = idx;
-    output_depth_keys[compact_idx].count = far_to_near_depth_key(-p_view.z);
+    atomicAdd(visible_count[0].count, 1u);
+    output_splat_ids[idx].count = idx;
+    output_depth_keys[idx].count = far_to_near_depth_key(-p_view.z);
 
     float qw = rot.x, qx = rot.y, qy = rot.z, qz = rot.w;
     mat3 R = mat3(
