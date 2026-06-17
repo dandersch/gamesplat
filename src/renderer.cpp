@@ -1064,6 +1064,8 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
         const uint32_t dst = src ^ 1u;
 
         {
+            PROFILE("radix hist") {
+            PROFILE_GPU("radix hist") {
             sg_pass pass = {};
             pass.compute = true;
             sg_begin_pass(&pass);
@@ -1081,9 +1083,13 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 
             sg_dispatch((int)r->sort_group_count, 1, 1);
             sg_end_pass();
+            }
+            }
         }
 
         {
+            PROFILE("radix prefix") {
+            PROFILE_GPU("radix prefix") {
             sg_pass pass = {};
             pass.compute = true;
             sg_begin_pass(&pass);
@@ -1099,9 +1105,13 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 
             sg_dispatch(1, 1, 1);
             sg_end_pass();
+            }
+            }
         }
 
         {
+            PROFILE("radix scatter") {
+            PROFILE_GPU("radix scatter") {
             sg_pass pass = {};
             pass.compute = true;
             sg_begin_pass(&pass);
@@ -1122,6 +1132,8 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 
             sg_dispatch((int)r->sort_group_count, 1, 1);
             sg_end_pass();
+            }
+            }
         }
     }
 }
