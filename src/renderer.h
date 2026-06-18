@@ -25,6 +25,14 @@ struct NodeRenderParams {
     float        half_size;   // AABB half-extent for the wireframe cubes
 };
 
+struct SplatDiagnostics {
+    uint32_t total_quad_kpix;       // sum of projected bbox area / 1024
+    uint32_t max_quad_px;           // largest projected bbox area in pixels
+    uint32_t splats_over_1k_px;     // projected bbox area > 1K pixels
+    uint32_t splats_over_16k_px;    // projected bbox area > 16K pixels
+    bool     valid;
+};
+
 // Shader-only splat effect parameters. The vec4-style layout mirrors the
 // SplatEffectUBO in shaders/splat.glsl and keeps uniform packing simple:
 // center_radius.xyz = effect center, .w = scene radius;
@@ -87,6 +95,8 @@ struct Renderer {
     sg_view         projected_splat_buffer_view;
     sg_buffer       visible_count_buffer;
     sg_view         visible_count_buffer_view;
+    sg_buffer       splat_diagnostics_buffer;
+    sg_view         splat_diagnostics_buffer_view;
     sg_sampler      accum_sampler;
     sg_buffer       cube_vertex_buffer;
     sg_buffer       cube_index_buffer;
@@ -100,6 +110,8 @@ struct Renderer {
     uint32_t        sort_capacity;          // allocated depth/id sort capacity
     uint32_t        sort_group_count;
     uint32_t        gaussian_count;
+    bool            splat_diagnostics_enabled;
+    SplatDiagnostics splat_diagnostics;
 
     sg_image        stochastic_sample_image;
     sg_view         stochastic_sample_color_view;

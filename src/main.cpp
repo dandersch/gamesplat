@@ -909,6 +909,23 @@ static void app_frame(void) {
             g_splat_effect_start_time = g_app_time;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
+        if (ImGui::Checkbox("Splat diagnostics", &state->renderer.splat_diagnostics_enabled)) {
+            state->renderer.splat_diagnostics.valid = false;
+        }
+        if (state->renderer.splat_diagnostics_enabled) {
+            const SplatDiagnostics& diag = state->renderer.splat_diagnostics;
+            if (diag.valid) {
+                ImGui::Text("Projected quad area: %.1f MPix", (double)diag.total_quad_kpix * 1024.0 / 1000000.0);
+                ImGui::Text("Avg quad area: %.1f px", state->scene.visible_count > 0
+                    ? ((double)diag.total_quad_kpix * 1024.0 / (double)state->scene.visible_count)
+                    : 0.0);
+                ImGui::Text("Max quad area: %u px", diag.max_quad_px);
+                ImGui::Text(">1K px: %u, >16K px: %u", diag.splats_over_1k_px, diag.splats_over_16k_px);
+            } else {
+                ImGui::Text("Projected quad area: unavailable");
+            }
+            ImGui::TextDisabled("Diagnostics use synchronous GL readback; disable for profiling.");
+        }
         if (ImGui::SliderFloat("Shockwave Strength", &g_splat_effect_strength, 0.0f, 0.25f, "%.3f")) {
             renderer_reset_stochastic_accumulation(&state->renderer);
         }

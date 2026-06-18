@@ -8,6 +8,12 @@
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
+#if defined(SOKOL_GLCORE)
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES
+#endif
+#include <SDL3/SDL_opengl.h>
+#endif
 #include "imgui.h"
 #include "sokol_imgui.h"
 #include "profiler.h"
@@ -461,6 +467,14 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         sg_destroy_buffer(r->visible_count_buffer);
         r->visible_count_buffer = {};
     }
+    if (r->splat_diagnostics_buffer_view.id) {
+        sg_destroy_view(r->splat_diagnostics_buffer_view);
+        r->splat_diagnostics_buffer_view = {};
+    }
+    if (r->splat_diagnostics_buffer.id) {
+        sg_destroy_buffer(r->splat_diagnostics_buffer);
+        r->splat_diagnostics_buffer = {};
+    }
     if (r->unsorted_index_buffer_view.id) {
         sg_destroy_view(r->unsorted_index_buffer_view);
         r->unsorted_index_buffer_view = {};
@@ -559,6 +573,17 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.label = "splat-visible-count-storage-buffer-view";
     r->visible_count_buffer_view = sg_make_view(&vd);
 
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = sizeof(uint32_t) * 4u;
+    bd.label = "splat-diagnostics-storage-buffer";
+    r->splat_diagnostics_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->splat_diagnostics_buffer;
+    vd.label = "splat-diagnostics-storage-buffer-view";
+    r->splat_diagnostics_buffer_view = sg_make_view(&vd);
+
     // GPU-written per-instance unsorted visible-index buffer. Culled entries are
     // marked UINT_MAX; alpha mode sorts this buffer in place by depth.
     sg_buffer_desc ubd = {};
@@ -574,6 +599,35 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
+}
+
+static void renderer_read_splat_diagnostics(Renderer* r) {
+    r->splat_diagnostics.valid = false;
+    if (!r->splat_diagnostics_enabled || !r->splat_diagnostics_buffer.id) {
+        return;
+    }
+
+#if defined(SOKOL_GLCORE)
+    sg_gl_buffer_info info = sg_gl_query_buffer_info(r->splat_diagnostics_buffer);
+    if (info.active_slot < 0 || info.active_slot >= SG_NUM_INFLIGHT_FRAMES || info.buf[info.active_slot] == 0) {
+        return;
+    }
+
+    GLint previous_buffer = 0;
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous_buffer);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, info.buf[info.active_slot]);
+
+    uint32_t stats[4] = {};
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(stats), stats);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
+
+    r->splat_diagnostics.total_quad_kpix = stats[0];
+    r->splat_diagnostics.max_quad_px = stats[1];
+    r->splat_diagnostics.splats_over_1k_px = stats[2];
+    r->splat_diagnostics.splats_over_16k_px = stats[3];
+    r->splat_diagnostics.valid = true;
+#endif
 }
 
 // Release everything held by a MeshGpu and zero it. Safe to call on an
@@ -998,6 +1052,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
         bnd.views[VIEW_ResetVisibleCount] = r->visible_count_buffer_view;
         bnd.views[VIEW_ResetOutputSplatIds] = r->unsorted_index_buffer_view;
         bnd.views[VIEW_ResetDepthKeys] = r->depth_key_buffer_view;
+        bnd.views[VIEW_ResetSplatDiagnostics] = r->splat_diagnostics_buffer_view;
         sg_apply_bindings(&bnd);
 
         ResetUBO_t u = {};
@@ -1019,6 +1074,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     bnd.views[VIEW_OutputDepthKeys] = r->depth_key_buffer_view;
     bnd.views[VIEW_ProjectedSplats] = r->projected_splat_buffer_view;
     bnd.views[VIEW_VisibleCount] = r->visible_count_buffer_view;
+    bnd.views[VIEW_SplatDiagnostics] = r->splat_diagnostics_buffer_view;
     sg_apply_bindings(&bnd);
 
     CullUBO_t u = {};
@@ -1032,6 +1088,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     u.ortho_focal = cam->ortho_focal;
     u.clip_y_sign = cam->clip_y_sign;
     u.clip_z_01 = cam->clip_z_01;
+    u.collect_stats = r->splat_diagnostics_enabled ? 1 : 0;
     sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
 
     SplatEffectUBO_t effect_ubo = {};
@@ -1044,6 +1101,8 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
 
     sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
     sg_end_pass();
+
+    renderer_read_splat_diagnostics(r);
 
 }
 
@@ -1334,6 +1393,8 @@ void renderer_destroy(Renderer* r) {
     if (r->projected_splat_buffer.id) sg_destroy_buffer(r->projected_splat_buffer);
     if (r->visible_count_buffer_view.id) sg_destroy_view(r->visible_count_buffer_view);
     if (r->visible_count_buffer.id) sg_destroy_buffer(r->visible_count_buffer);
+    if (r->splat_diagnostics_buffer_view.id) sg_destroy_view(r->splat_diagnostics_buffer_view);
+    if (r->splat_diagnostics_buffer.id) sg_destroy_buffer(r->splat_diagnostics_buffer);
     renderer_destroy_stochastic_targets(r);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);

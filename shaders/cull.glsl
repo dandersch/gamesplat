@@ -25,6 +25,7 @@ layout(binding = 0) uniform CullUBO {
     float ortho_focal;
     float clip_y_sign;
     float clip_z_01;
+    int collect_stats;
 };
 
 layout(binding = 1) uniform SplatEffectUBO {
@@ -51,6 +52,10 @@ layout(binding = 3) buffer ProjectedSplats {
 
 layout(binding = 4) buffer VisibleCount {
     UIntData visible_count[];
+};
+
+layout(binding = 5) buffer SplatDiagnostics {
+    UIntData splat_diagnostics[];
 };
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -215,6 +220,19 @@ void main() {
     float radius_x = ceil(3.0 * sqrt(a));
     float radius_y = ceil(3.0 * sqrt(c));
 
+    if (collect_stats != 0) {
+        float quad_area = max(0.0, 4.0 * radius_x * radius_y);
+        uint quad_area_px = uint(min(quad_area, 4294967295.0));
+        atomicAdd(splat_diagnostics[0].count, (quad_area_px + 1023u) >> 10u);
+        atomicMax(splat_diagnostics[1].count, quad_area_px);
+        if (quad_area_px > 1024u) {
+            atomicAdd(splat_diagnostics[2].count, 1u);
+        }
+        if (quad_area_px > 16384u) {
+            atomicAdd(splat_diagnostics[3].count, 1u);
+        }
+    }
+
     float ndc_z = (proj[2][2] * p_view.z + proj[3][2]) / (-p_view.z);
     ndc_z = mix(ndc_z, ndc_z * 0.5 + 0.5, clip_z_01);
 
@@ -299,12 +317,20 @@ layout(binding = 2) buffer ResetDepthKeys {
     ResetUIntData output_depth_keys[];
 };
 
+layout(binding = 3) buffer ResetSplatDiagnostics {
+    ResetUIntData splat_diagnostics[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx == 0u) {
         visible_count[0].count = 0u;
+        splat_diagnostics[0].count = 0u;
+        splat_diagnostics[1].count = 0u;
+        splat_diagnostics[2].count = 0u;
+        splat_diagnostics[3].count = 0u;
     }
     if (idx < uint(sort_count)) {
         output_splat_ids[idx].count = 0xFFFFFFFFu;
