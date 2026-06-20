@@ -41,6 +41,7 @@ _Pragma ("GCC diagnostic pop")
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
 #include "sokol_log.h"
+#include "sokol_args.h"
 
 // sokol_imgui.h is the ImGui rendering backend (NOT to be confused with
 // sokol_gfx_imgui.h, which is a debug inspector). We compile as C++ so it

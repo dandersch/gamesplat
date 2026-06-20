@@ -1,11 +1,11 @@
 #include <SDL3/SDL.h>
 #include <cstdio>
-#include <cstring>
 
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
 #include "sokol_log.h"
+#include "sokol_args.h"
 #include "imgui.h"
 #include "sokol_imgui.h"
 #if defined(ENABLE_PROFILER)
@@ -116,24 +116,25 @@ static void app_init(void) {
     AppState* state = new AppState();
     g_state = state;
 
-    for (int i = 1; i < g_argc; i++) {
-        char** argv = g_argv;
-        if (strcmp(argv[i], "--colmap") == 0 && i + 1 < g_argc) {
-            state->colmap_dir = argv[++i];
-        } else if (strcmp(argv[i], "--mesh") == 0 && i + 1 < g_argc) {
-            state->mesh_path = argv[++i];
-        } else if (strcmp(argv[i], "--object") == 0 && i + 1 < g_argc) {
-            state->object_path = argv[++i];
-        } else if (!state->ply_path) {
-            state->ply_path = argv[i];
-        }
-    }
+    sargs_desc args = {};
+    args.argc = g_argc;
+    args.argv = g_argv;
+    sargs_setup(&args);
 
-    // set defaults (used primarily by web build since it has no cli)
-    state->ply_path    = state->ply_path    ? state->ply_path    : "res/export_n01.sog";
+    state->ply_path    = sargs_value("ply");
+    state->colmap_dir  = sargs_value("colmap");
+    state->mesh_path   = sargs_value("mesh");
+    state->object_path = sargs_value("object");
+
+    // Set defaults. Native and web builds can override these with sokol_args:
+    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb
+    //   index.html?ply=res/export_n01.sog&colmap=res/colmap&mesh=res/foo.glb
+    state->ply_path    = state->ply_path[0]    ? state->ply_path    : "res/export_n01.sog";
     //state->object_path = state->object_path ? state->object_path : "res/priest.glb";
     //state->mesh_path   = state->mesh_path   ? state->mesh_path   : "res/cyberpunk_guy.glb";
-    state->colmap_dir  = state->colmap_dir  ? state->colmap_dir  : "res/colmap";
+    state->colmap_dir  = state->colmap_dir[0]  ? state->colmap_dir  : "res/colmap";
+    state->mesh_path   = state->mesh_path[0]   ? state->mesh_path   : NULL;
+    state->object_path = state->object_path[0] ? state->object_path : NULL;
 
     sg_desc sgd = {};
     sgd.environment = sglue_environment();
@@ -1438,6 +1439,7 @@ static void app_cleanup(void) {
 
     delete state;
     g_state = NULL;
+    if (sargs_isvalid()) sargs_shutdown();
 }
 
 sapp_desc sokol_main(int argc, char* argv[]) {
