@@ -327,6 +327,8 @@ bool renderer_init(Renderer* r) {
     r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
     r->stochastic_samples_per_frame = 1;
     r->stochastic_accumulation_enabled = true;
+    r->sh_degree = 3;            // full SH degree 3 by default (lossless)
+    r->sh_lod_distance = 0.0f;    // distance LOD off by default
     r->mesh_transform.scale = 1.0f;
     r->object_transform.scale = 1.0f;
     PROFILE_GPU_CONTEXT();
@@ -1089,6 +1091,8 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     u.clip_y_sign = cam->clip_y_sign;
     u.clip_z_01 = cam->clip_z_01;
     u.collect_stats = r->splat_diagnostics_enabled ? 1 : 0;
+    u.sh_degree = r->sh_degree;
+    u.sh_lod_distance = r->sh_lod_distance;
     sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
 
     SplatEffectUBO_t effect_ubo = {};

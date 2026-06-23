@@ -112,6 +112,12 @@ struct Renderer {
     uint32_t        gaussian_count;
     bool            splat_diagnostics_enabled;
     SplatDiagnostics splat_diagnostics;
+    // SH degree cap (0..3) applied in the cull compute shader; lower degrees
+    // skip the corresponding sh_rest fetches and basis-term ALU.
+    int             sh_degree;
+    // View-space distance beyond which splats use SH degree 0 (DC only).
+    // <= 0 disables distance LOD.
+    float           sh_lod_distance;
 
     sg_image        stochastic_sample_image;
     sg_view         stochastic_sample_color_view;

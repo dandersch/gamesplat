@@ -26,6 +26,12 @@ layout(binding = 0) uniform CullUBO {
     float clip_y_sign;
     float clip_z_01;
     int collect_stats;
+    // Max SH degree to evaluate (0..3). Lower degrees skip the corresponding
+    // sh_rest fetches and basis-term ALU in the cull shader.
+    int sh_degree;
+    // View-space distance beyond which splats fall back to SH degree 0 (DC
+    // only). <= 0 disables distance LOD.
+    float sh_lod_distance;
 };
 
 layout(binding = 1) uniform SplatEffectUBO {
@@ -255,34 +261,68 @@ void main() {
     const float SH_C3_6 = -0.5900435899266435;
 
     float sh_flat[48];
-    for (int i = 0; i < 12; ++i) {
-        vec4 tt = fetch_vec4(idx, 4 + i);
-        sh_flat[i*4 + 0] = tt.x;
-        sh_flat[i*4 + 1] = tt.y;
-        sh_flat[i*4 + 2] = tt.z;
-        sh_flat[i*4 + 3] = tt.w;
-    }
     #define SH(k) vec3(sh_flat[(k)*3 + 0], sh_flat[(k)*3 + 1], sh_flat[(k)*3 + 2])
 
+    // Bound SH evaluation by runtime degree (0..3) and optional view-distance
+    // LOD. Far splats fall back to DC-only color, skipping 48 of 64 floats of
+    // per-splat fetch and the full SH-basis ALU. This is the bandwidth-bound
+    // path for large scenes.
+    int eff_degree = sh_degree;
+    if (sh_lod_distance > 0.0 && (-p_view.z) > sh_lod_distance) {
+        eff_degree = 0;
+    }
+
     vec3 result = SH_C0 * dc;
-    float x = dir.x, y = dir.y, z = dir.z;
-    result += -SH_C1 * y * SH(0);
-    result +=  SH_C1 * z * SH(1);
-    result += -SH_C1 * x * SH(2);
-    float xx = x*x, yy = y*y, zz = z*z;
-    float xy = x*y, yz = y*z, xz = z*x;
-    result += SH_C2_0 * xy            * SH(3);
-    result += SH_C2_1 * yz            * SH(4);
-    result += SH_C2_2 * (2.0*zz - xx - yy) * SH(5);
-    result += SH_C2_3 * xz            * SH(6);
-    result += SH_C2_4 * (xx - yy)     * SH(7);
-    result += SH_C3_0 * y * (3.0*xx - yy)               * SH(8);
-    result += SH_C3_1 * xy * z                          * SH(9);
-    result += SH_C3_2 * y * (4.0*zz - xx - yy)          * SH(10);
-    result += SH_C3_3 * z * (2.0*zz - 3.0*xx - 3.0*yy)  * SH(11);
-    result += SH_C3_4 * x * (4.0*zz - xx - yy)          * SH(12);
-    result += SH_C3_5 * z * (xx - yy)                   * SH(13);
-    result += SH_C3_6 * x * (xx - 3.0*yy)               * SH(14);
+    if (eff_degree >= 1) {
+        float x = dir.x, y = dir.y, z = dir.z;
+        // SH0..2 (3 vec4s -> sh_flat[0..11])
+        for (int i = 0; i < 3; ++i) {
+            vec4 tt = fetch_vec4(idx, 4 + i);
+            sh_flat[i*4 + 0] = tt.x;
+            sh_flat[i*4 + 1] = tt.y;
+            sh_flat[i*4 + 2] = tt.z;
+            sh_flat[i*4 + 3] = tt.w;
+        }
+        result += -SH_C1 * y * SH(0);
+        result +=  SH_C1 * z * SH(1);
+        result += -SH_C1 * x * SH(2);
+
+        if (eff_degree >= 2) {
+            float xx = x*x, yy = y*y, zz = z*z;
+            float xy = x*y, yz = y*z, xz = z*x;
+            // SH3..7 (vec4s 3..5 -> sh_flat[12..23])
+            for (int i = 3; i < 6; ++i) {
+                vec4 tt = fetch_vec4(idx, 4 + i);
+                sh_flat[i*4 + 0] = tt.x;
+                sh_flat[i*4 + 1] = tt.y;
+                sh_flat[i*4 + 2] = tt.z;
+                sh_flat[i*4 + 3] = tt.w;
+            }
+            result += SH_C2_0 * xy            * SH(3);
+            result += SH_C2_1 * yz            * SH(4);
+            result += SH_C2_2 * (2.0*zz - xx - yy) * SH(5);
+            result += SH_C2_3 * xz            * SH(6);
+            result += SH_C2_4 * (xx - yy)     * SH(7);
+
+            if (eff_degree >= 3) {
+                // SH8..14 (vec4s 6..11 -> sh_flat[24..47])
+                for (int i = 6; i < 12; ++i) {
+                    vec4 tt = fetch_vec4(idx, 4 + i);
+                    sh_flat[i*4 + 0] = tt.x;
+                    sh_flat[i*4 + 1] = tt.y;
+                    sh_flat[i*4 + 2] = tt.z;
+                    sh_flat[i*4 + 3] = tt.w;
+                }
+                result += SH_C3_0 * y * (3.0*xx - yy)               * SH(8);
+                result += SH_C3_1 * xy * z                          * SH(9);
+                result += SH_C3_2 * y * (4.0*zz - xx - yy)          * SH(10);
+                result += SH_C3_3 * z * (2.0*zz - 3.0*xx - 3.0*yy)  * SH(11);
+                result += SH_C3_4 * x * (4.0*zz - xx - yy)          * SH(12);
+                result += SH_C3_5 * z * (xx - yy)                   * SH(13);
+                result += SH_C3_6 * x * (xx - 3.0*yy)               * SH(14);
+            }
+        }
+    }
 
     result += 0.5;
     vec3 color = max(result, vec3(0.0));

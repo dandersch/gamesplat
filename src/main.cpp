@@ -913,6 +913,24 @@ static void app_frame(void) {
         if (ImGui::Checkbox("Splat diagnostics", &state->renderer.splat_diagnostics_enabled)) {
             state->renderer.splat_diagnostics.valid = false;
         }
+        {
+            const char* sh_deg_labels[] = { "0 (DC only)", "1", "2", "3 (full)" };
+            int sh_deg = state->renderer.sh_degree;
+            if (sh_deg < 0) sh_deg = 0;
+            if (sh_deg > 3) sh_deg = 3;
+            if (ImGui::Combo("SH Degree", &sh_deg, sh_deg_labels, 4)) {
+                state->renderer.sh_degree = sh_deg;
+                renderer_reset_stochastic_accumulation(&state->renderer);
+            }
+            float lod = state->renderer.sh_lod_distance;
+            if (ImGui::SliderFloat("SH LOD Distance", &lod, 0.0f, 200.0f, "%.1f")) {
+                state->renderer.sh_lod_distance = lod;
+                renderer_reset_stochastic_accumulation(&state->renderer);
+            }
+            if (state->renderer.sh_lod_distance <= 0.0f) {
+                ImGui::TextDisabled("LOD off: set >0 to drop far splats to DC color");
+            }
+        }
         if (state->renderer.splat_diagnostics_enabled) {
             const SplatDiagnostics& diag = state->renderer.splat_diagnostics;
             if (diag.valid) {
