@@ -3517,7 +3517,10 @@ _SOKOL_PRIVATE sapp_desc _sapp_desc_defaults(const sapp_desc* desc) {
     SOKOL_ASSERT((desc->allocator.alloc_fn && desc->allocator.free_fn) || (!desc->allocator.alloc_fn && !desc->allocator.free_fn));
     sapp_desc res = *desc;
     res.sample_count = _sapp_def(res.sample_count, 1);
-    res.swap_interval = _sapp_def(res.swap_interval, 1);
+    // NOTE: swap_interval is NOT defaulted via _sapp_def here. 0 is a valid
+    // value (vsync off), so it must pass through unchanged. Apps that want
+    // vsync must set desc.swap_interval explicitly (this app does).
+    res.swap_interval = res.swap_interval;
     if (0 == res.gl.major_version) {
         #if defined(SOKOL_GLCORE)
             res.gl.major_version = 4;

@@ -1472,7 +1472,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     desc.width = 1280;
     desc.height = 720;
     desc.sample_count = 1;
-    desc.swap_interval = 1;
+    desc.swap_interval = 0; // no vsync
     desc.window_title = "gsplat";
     desc.logger.func = slog_func;
     desc.html5.canvas_selector = "#canvas";
