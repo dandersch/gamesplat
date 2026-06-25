@@ -7,45 +7,11 @@
 #include <dirent.h>
 #include <SDL3/SDL.h>
 #include "log.h"
+#include "utils.h"
 
 #if !defined(__EMSCRIPTEN__)
 #include <sqlite3.h>
 #endif
-
-// TODO utils.h / strings.h
-static bool file_exists(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return false;
-    fclose(f);
-    return true;
-}
-
-// TODO strings.h
-static void copy_string(char* dst, size_t dst_size, const char* src) {
-    snprintf(dst, dst_size, "%s", src ? src : "");
-}
-
-// TODO utils.h / strings.h
-static void join_path(char* dst, size_t dst_size, const char* a, const char* b) {
-    copy_string(dst, dst_size, a);
-    size_t len = strlen(dst);
-    if (len + 1 < dst_size) {
-        dst[len++] = '/';
-        dst[len] = '\0';
-    }
-    if (len < dst_size) {
-        strncat(dst, b, dst_size - len - 1);
-    }
-}
-
-// TODO utils.h / strings.h
-static bool is_numeric_name(const char* name) {
-    if (!name || !name[0]) return false;
-    for (const char* p = name; *p; p++) {
-        if (!isdigit((unsigned char)*p)) return false;
-    }
-    return true;
-}
 
 static bool text_model_exists(const char* dir) {
     char path[512];
@@ -234,13 +200,6 @@ bool colmap_resolve_paths(ColmapPaths* out, const char* input_path) {
     resolve_image_dir(out, input_path);
     resolve_database_path(out, input_path);
     return true;
-}
-
-// TODO utils.h / strings.h
-// Skip the rest of the current line (handles arbitrarily long POINTS2D lines)
-static void skip_line(FILE* f) {
-    int c;
-    while ((c = fgetc(f)) != EOF && c != '\n') {}
 }
 
 // Convert COLMAP quaternion (world-to-camera, X-right Y-down Z-forward) to
