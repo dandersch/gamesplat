@@ -112,6 +112,20 @@ struct AppState {
 
 static AppState* g_state = NULL;
 
+GSPLAT_EXPORT void* gsplat_app_state_save(void) {
+    return g_state;
+}
+
+GSPLAT_EXPORT void gsplat_app_state_load(void* state) {
+    g_state = (AppState*)state;
+}
+
+GSPLAT_EXPORT void gsplat_hot_reload_after_state_restore(void) {
+    if (g_state && g_state->imgui_context) {
+        ImGui::SetCurrentContext(g_state->imgui_context);
+    }
+}
+
 static void app_init(void) {
     AppState* state = new AppState();
     g_state = state;

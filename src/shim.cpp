@@ -1,134 +1,40 @@
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_loadso.h>
-
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
+#include <dlfcn.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
-#include "log_entries.h"
+#include <SDL3/SDL.h>
+
+#define SOKOL_NO_ENTRY
+#define SOKOL_APP_IMPL
+#if !defined(SOKOL_GLCORE)
+#define SOKOL_GLCORE
+#endif
+#include "sokol_app.h"
+
 #include "log.h"
 int log_verbosity_level = LOG_EVERYTHING;
 
 /*
-    Minimal SDL callback hot-reload shim
-    ===================================
+    sokol_app hot-reload shim
+    =========================
 
-    This executable intentionally owns as little application setup as possible.
-    SDL, the window, GL context, sokol_gfx, sokol_imgui, ImGui, scene loading,
-    renderer setup, etc. are still initialized from the reloadable code module's
-    SDL_AppInit(). The shim only:
+    The shim owns the non-reloadable sokol_app window/event loop and loads the
+    actual application code from build/hotreload/gsplat_code.so.  On startup it
+    asks the code module for its sapp_desc via sokol_main(), copies the window
+    setup fields, and replaces the callbacks with shim callbacks.  Each shim
+    callback mirrors the live sokol_app state into the code module, calls the
+    current code callback, then mirrors state back so sapp_quit(), mouse lock,
+    frame counters, etc. stay coherent.
 
-      - watches build/hotreload/gsplat_code.so for changes,
-      - dynamically loads the current code module,
-      - resolves SDL_AppInit / SDL_AppEvent / SDL_AppIterate / SDL_AppQuit,
-      - forwards SDL events and frame iteration to those callbacks,
-      - preserves the callback appstate pointer across reloads.
-
-    Important problems we ran into
-    ------------------------------
-
-    1. Loading the same shared-library path may return old code.
-
-       On Linux, dlopen() may key loaded libraries by the path string passed to
-       dlopen(), not by the current file contents behind that path. If we call
-       SDL_LoadObject("./build/hotreload/gsplat_code.so") after rebuilding that
-       same path, the loader can hand back the already-loaded image even though
-       the file was replaced. This matches the warning from:
-
-           https://nullprogram.com/blog/2014/12/23/
-
-       Workaround here:
-
-         a. unload the old SDL_SharedObject before loading replacement code, and
-         b. never load the stable build output path directly.
-
-       Instead, code_copy_for_loading() copies gsplat_code.so to a unique path
-       containing inode/size/mtime, and SDL_LoadObject() loads that unique path.
-       This also helps with C++ DSOs that may not fully unmap after dlclose()
-       because of GNU-unique symbols or other dynamic-loader details: even if an
-       old image remains mapped, a unique filename forces the loader to map a
-       new image for the next build.
-
-    2. Rebuilds produce multiple filesystem changes.
-
-       The linker/build may update the .so several times during one build. When
-       we reloaded immediately on any stat() change, one rebuild could print
-       several "shim: loaded" messages and race partially-written output.
-
-       Workaround here:
-
-         - detect a changed timestamp,
-         - remember it as pending,
-         - wait GSPLAT_RELOAD_DEBOUNCE_MS before loading,
-         - reset the debounce if another distinct timestamp appears.
-
-    3. AppState alone is not enough for single-header library statics.
-
-       Our AppState preserves project-owned state across reloads, but some of
-       the third-party libraries we compile into the code module keep their own
-       file-scope static state:
-
-         - sokol_gfx.h owns private static _sg
-         - sokol_imgui.h owns private static _simgui
-         - Dear ImGui owns a DLL-local current-context pointer (GImGui)
-
-       After a true reload, the new code module gets fresh zero-initialized
-       copies of those statics. The first observable failure was
-       ImGui_ImplSDL3_NewFrame() asserting because the new module's ImGui
-       current context pointer was null / not pointing at the existing context.
-
-       Workaround here:
-
-         - vendor/third_party_impl.cpp exports gsplat_sg_state_* and
-           gsplat_simgui_state_* helper functions from the same translation unit
-           that defines SOKOL_IMPL / SOKOL_IMGUI_IMPL. Those helpers can see the
-           otherwise-private _sg and _simgui objects and memcpy them out/in.
-         - before unloading old code, snapshot_capture() copies _sg and _simgui
-           into shim-owned heap buffers.
-         - after loading new code, snapshot_restore() copies those blobs into
-           the new module's _sg and _simgui.
-         - src/main.cpp stores ImGuiContext* in AppState after initial setup and
-           calls ImGui::SetCurrentContext(state->imgui_context) on reload.
-
-       This keeps standalone builds clean: the same third_party_impl.cpp still
-       supplies the implementations for a normal executable, and the hot-reload
-       hooks are just extra exported symbols when the app is built as a shared
-       object.
-
-    Caveats
-    -------
-
-    - This is a proof-of-concept, not a general ABI-safe serialization layer.
-      The _sg and _simgui structs are private implementation details. Copying
-      them is only safe while the old and new code are built from compatible
-      headers, compiler settings, backend selection, and struct layouts.
-
-    - Do not change sokol_gfx.h, sokol_imgui.h, ImGui versions, relevant compile
-      defines, or the third_party_impl.cpp layout while a hot-reloaded process is
-      running. Rebuild/restart if those change.
-
-    - Backend behavior may vary. The GitHub discussion that suggested this
-      approach reported OpenGL and Metal working, with WebGPU being trickier.
-      Our current native path is OpenGL, which is why this is plausible.
-
-    - Function pointers inside copied third-party state are dangerous if they
-      point at old module code. Current sokol state mostly contains backend
-      resources, pools, handles, descriptors, allocator/logger callbacks, etc.;
-      if we add callbacks that live in reloadable code, revisit this.
-
-    - If the new shared object fails to load or initialize after the old one has
-      been unloaded, there is no old code left to continue running. The shim will
-      idle and keep trying when the stable .so changes again.
-
-    - AppState layout itself is an ABI contract across reloads. Adding/removing
-      fields while the process is running can make an old state block invalid for
-      new code. For now, restart after AppState layout changes.
-
-    - The shim removes unique copied libraries after unloading them, but if the
-      process crashes, stale gsplat_code_loaded_*.so files may remain under
-      build/hotreload/. They are disposable build artifacts.
+    On reload, the shim preserves the private single-header-library state that
+    lives in the code module (sokol_gfx, sokol_imgui, sokol_app and the app's
+    AppState pointer), unloads the old .so, loads a uniquely named copy of the
+    new .so, restores the snapshots, and continues dispatching callbacks.
 */
 
 #if defined(_WIN32)
@@ -148,19 +54,23 @@ struct CodeTimestamp {
 };
 
 struct CodeApi {
-    SDL_SharedObject* handle;
+    void* handle;
     CodeTimestamp timestamp;
     char loaded_path[512];
-    SDL_AppResult (*app_init)(void**, int, char**);
-    SDL_AppResult (*app_event)(void*, SDL_Event*);
-    SDL_AppResult (*app_iterate)(void*);
-    void (*app_quit)(void*, SDL_AppResult);
+    sapp_desc desc;
+    sapp_desc (*sokol_main_fn)(int, char**);
     size_t (*sg_state_size)(void);
     void (*sg_state_save)(void*, size_t);
     void (*sg_state_load)(const void*, size_t);
     size_t (*simgui_state_size)(void);
     void (*simgui_state_save)(void*, size_t);
     void (*simgui_state_load)(const void*, size_t);
+    size_t (*sapp_state_size)(void);
+    void (*sapp_state_save)(void*, size_t);
+    void (*sapp_state_load)(const void*, size_t);
+    void* (*app_state_save)(void);
+    void (*app_state_load)(void*);
+    void (*after_state_restore)(void);
 };
 
 struct RuntimeSnapshot {
@@ -168,12 +78,49 @@ struct RuntimeSnapshot {
     size_t sg_state_size;
     void* simgui_state;
     size_t simgui_state_size;
+    void* sapp_state;
+    size_t sapp_state_size;
+    void* app_state;
 };
+
+static CodeApi g_code = {};
+static int g_argc = 0;
+static char** g_argv = NULL;
+static CodeTimestamp g_pending_timestamp = {};
+static bool g_has_pending_timestamp = false;
+static uint64_t g_pending_since = 0;
+
+static uint64_t shim_ticks_ms(void) {
+    struct timespec ts = {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static void* shim_load_symbol(void* handle, const char* name) {
+    return dlsym(handle, name);
+}
+
+static size_t shim_sapp_state_size(void) {
+    return sizeof(_sapp);
+}
+
+static void shim_sapp_state_save(void* dst, size_t dst_size) {
+    if (dst && dst_size == sizeof(_sapp)) {
+        memcpy(dst, &_sapp, sizeof(_sapp));
+    }
+}
+
+static void shim_sapp_state_load(const void* src, size_t src_size) {
+    if (src && src_size == sizeof(_sapp)) {
+        memcpy(&_sapp, src, sizeof(_sapp));
+    }
+}
 
 static void snapshot_free(RuntimeSnapshot* snapshot) {
     if (!snapshot) return;
     free(snapshot->sg_state);
     free(snapshot->simgui_state);
+    free(snapshot->sapp_state);
     *snapshot = {};
 }
 
@@ -198,16 +145,39 @@ static bool snapshot_capture(const CodeApi* code, RuntimeSnapshot* out) {
         code->simgui_state_save(out->simgui_state, out->simgui_state_size);
     }
 
+    if (code->sapp_state_size && code->sapp_state_save) {
+        out->sapp_state_size = code->sapp_state_size();
+        out->sapp_state = malloc(out->sapp_state_size);
+        if (!out->sapp_state) {
+            snapshot_free(out);
+            return false;
+        }
+        code->sapp_state_save(out->sapp_state, out->sapp_state_size);
+    }
+
+    if (code->app_state_save) {
+        out->app_state = code->app_state_save();
+    }
+
     return true;
 }
 
 static void snapshot_restore(const RuntimeSnapshot* snapshot, const CodeApi* code) {
     if (!snapshot || !code) return;
+    if (snapshot->sapp_state && code->sapp_state_load) {
+        code->sapp_state_load(snapshot->sapp_state, snapshot->sapp_state_size);
+    }
     if (snapshot->sg_state && code->sg_state_load) {
         code->sg_state_load(snapshot->sg_state, snapshot->sg_state_size);
     }
     if (snapshot->simgui_state && code->simgui_state_load) {
         code->simgui_state_load(snapshot->simgui_state, snapshot->simgui_state_size);
+    }
+    if (code->app_state_load) {
+        code->app_state_load(snapshot->app_state);
+    }
+    if (code->after_state_restore) {
+        code->after_state_restore();
     }
 }
 
@@ -286,27 +256,38 @@ static bool code_load(CodeApi* out, const CodeTimestamp* timestamp) {
         return false;
     }
 
-    api.handle = SDL_LoadObject(api.loaded_path);
+    api.handle = dlopen(api.loaded_path, RTLD_NOW | RTLD_LOCAL);
     if (!api.handle) {
-        LOG(ERROR|APP|LOAD, "shim: SDL_LoadObject(%s) failed: %s", api.loaded_path, SDL_GetError());
+        LOG(ERROR|APP|LOAD, "shim: dlopen(%s) failed: %s", api.loaded_path, dlerror());
         remove(api.loaded_path);
         return false;
     }
 
-    api.app_init = (SDL_AppResult (*)(void**, int, char**))SDL_LoadFunction(api.handle, "SDL_AppInit");
-    api.app_event = (SDL_AppResult (*)(void*, SDL_Event*))SDL_LoadFunction(api.handle, "SDL_AppEvent");
-    api.app_iterate = (SDL_AppResult (*)(void*))SDL_LoadFunction(api.handle, "SDL_AppIterate");
-    api.app_quit = (void (*)(void*, SDL_AppResult))SDL_LoadFunction(api.handle, "SDL_AppQuit");
-    api.sg_state_size = (size_t (*)(void))SDL_LoadFunction(api.handle, "gsplat_sg_state_size");
-    api.sg_state_save = (void (*)(void*, size_t))SDL_LoadFunction(api.handle, "gsplat_sg_state_save");
-    api.sg_state_load = (void (*)(const void*, size_t))SDL_LoadFunction(api.handle, "gsplat_sg_state_load");
-    api.simgui_state_size = (size_t (*)(void))SDL_LoadFunction(api.handle, "gsplat_simgui_state_size");
-    api.simgui_state_save = (void (*)(void*, size_t))SDL_LoadFunction(api.handle, "gsplat_simgui_state_save");
-    api.simgui_state_load = (void (*)(const void*, size_t))SDL_LoadFunction(api.handle, "gsplat_simgui_state_load");
+    api.sokol_main_fn = (sapp_desc (*)(int, char**))shim_load_symbol(api.handle, "sokol_main");
+    api.sg_state_size = (size_t (*)(void))shim_load_symbol(api.handle, "gsplat_sg_state_size");
+    api.sg_state_save = (void (*)(void*, size_t))shim_load_symbol(api.handle, "gsplat_sg_state_save");
+    api.sg_state_load = (void (*)(const void*, size_t))shim_load_symbol(api.handle, "gsplat_sg_state_load");
+    api.simgui_state_size = (size_t (*)(void))shim_load_symbol(api.handle, "gsplat_simgui_state_size");
+    api.simgui_state_save = (void (*)(void*, size_t))shim_load_symbol(api.handle, "gsplat_simgui_state_save");
+    api.simgui_state_load = (void (*)(const void*, size_t))shim_load_symbol(api.handle, "gsplat_simgui_state_load");
+    api.sapp_state_size = (size_t (*)(void))shim_load_symbol(api.handle, "gsplat_sapp_state_size");
+    api.sapp_state_save = (void (*)(void*, size_t))shim_load_symbol(api.handle, "gsplat_sapp_state_save");
+    api.sapp_state_load = (void (*)(const void*, size_t))shim_load_symbol(api.handle, "gsplat_sapp_state_load");
+    api.app_state_save = (void* (*)(void))shim_load_symbol(api.handle, "gsplat_app_state_save");
+    api.app_state_load = (void (*)(void*))shim_load_symbol(api.handle, "gsplat_app_state_load");
+    api.after_state_restore = (void (*)(void))shim_load_symbol(api.handle, "gsplat_hot_reload_after_state_restore");
 
-    if (!api.app_init || !api.app_event || !api.app_iterate || !api.app_quit) {
-        LOG(ERROR|APP|LOAD, "shim: %s is missing one or more SDL_App* exports", api.loaded_path);
-        SDL_UnloadObject(api.handle);
+    if (!api.sokol_main_fn) {
+        LOG(ERROR|APP|LOAD, "shim: %s is missing sokol_main", api.loaded_path);
+        dlclose(api.handle);
+        remove(api.loaded_path);
+        return false;
+    }
+
+    api.desc = api.sokol_main_fn(g_argc, g_argv);
+    if (!api.desc.init_cb || !api.desc.frame_cb || !api.desc.cleanup_cb || !api.desc.event_cb) {
+        LOG(ERROR|APP|LOAD, "shim: %s returned an incomplete sapp_desc", api.loaded_path);
+        dlclose(api.handle);
         remove(api.loaded_path);
         return false;
     }
@@ -316,79 +297,145 @@ static bool code_load(CodeApi* out, const CodeTimestamp* timestamp) {
     return true;
 }
 
+static void code_unload(CodeApi* code) {
+    if (!code || !code->handle) return;
+    char old_loaded_path[sizeof(code->loaded_path)];
+    snprintf(old_loaded_path, sizeof(old_loaded_path), "%s", code->loaded_path);
+    dlclose(code->handle);
+    remove(old_loaded_path);
+    *code = {};
+}
+
+static void sync_shim_sapp_to_code(const CodeApi* code) {
+    if (!code || !code->handle || !code->sapp_state_load) return;
+    size_t size = shim_sapp_state_size();
+    void* state = malloc(size);
+    if (!state) return;
+    shim_sapp_state_save(state, size);
+    code->sapp_state_load(state, size);
+    free(state);
+}
+
+static void sync_code_sapp_to_shim(const CodeApi* code) {
+    if (!code || !code->handle || !code->sapp_state_size || !code->sapp_state_save) return;
+    size_t size = code->sapp_state_size();
+    if (size != shim_sapp_state_size()) return;
+    void* state = malloc(size);
+    if (!state) return;
+    code->sapp_state_save(state, size);
+    shim_sapp_state_load(state, size);
+    free(state);
+}
+
+static bool perform_reload(const CodeTimestamp* timestamp) {
+    RuntimeSnapshot snapshot = {};
+    if (g_code.handle) {
+        sync_shim_sapp_to_code(&g_code);
+        if (!snapshot_capture(&g_code, &snapshot)) {
+            LOG(ERROR|APP|RESOURCE, "shim: failed to capture runtime state before reload");
+            return false;
+        }
+        code_unload(&g_code);
+    }
+
+    CodeApi next = {};
+    if (!code_load(&next, timestamp)) {
+        snapshot_free(&snapshot);
+        return false;
+    }
+
+    if (snapshot.sapp_state) {
+        snapshot_restore(&snapshot, &next);
+    } else {
+        sync_shim_sapp_to_code(&next);
+        if (next.desc.init_cb) {
+            next.desc.init_cb();
+        }
+        sync_code_sapp_to_shim(&next);
+    }
+
+    snapshot_free(&snapshot);
+    g_code = next;
+    LOG(INFO|APP|LOAD, "shim: loaded %s from %s", g_code.loaded_path, GSPLAT_CODE_PATH);
+    return true;
+}
+
+static void check_reload(void) {
+    CodeTimestamp timestamp = {};
+    if (code_stat(GSPLAT_CODE_PATH, &timestamp)) {
+        bool changed = !g_code.handle || !code_timestamp_equal(&timestamp, &g_code.timestamp);
+        if (changed && (!g_has_pending_timestamp || !code_timestamp_equal(&timestamp, &g_pending_timestamp))) {
+            g_pending_timestamp = timestamp;
+            g_has_pending_timestamp = true;
+            g_pending_since = shim_ticks_ms();
+        } else if (!changed) {
+            g_has_pending_timestamp = false;
+        }
+    }
+
+    if (g_has_pending_timestamp && shim_ticks_ms() - g_pending_since >= GSPLAT_RELOAD_DEBOUNCE_MS) {
+        if (perform_reload(&g_pending_timestamp)) {
+            g_has_pending_timestamp = false;
+        }
+    }
+}
+
+static void shim_init(void) {
+    if (g_code.handle) {
+        sync_shim_sapp_to_code(&g_code);
+        g_code.desc.init_cb();
+        sync_code_sapp_to_shim(&g_code);
+    }
+}
+
+static void shim_frame(void) {
+    check_reload();
+    if (g_code.handle) {
+        sync_shim_sapp_to_code(&g_code);
+        g_code.desc.frame_cb();
+        sync_code_sapp_to_shim(&g_code);
+    }
+}
+
+static void shim_cleanup(void) {
+    if (g_code.handle) {
+        sync_shim_sapp_to_code(&g_code);
+        g_code.desc.cleanup_cb();
+        sync_code_sapp_to_shim(&g_code);
+        code_unload(&g_code);
+    }
+}
+
+static void shim_event(const sapp_event* event) {
+    if (g_code.handle) {
+        sync_shim_sapp_to_code(&g_code);
+        g_code.desc.event_cb(event);
+        sync_code_sapp_to_shim(&g_code);
+    }
+}
+
 int main(int argc, char** argv) {
-    CodeApi code = {};
-    CodeTimestamp pending_timestamp = {};
-    bool has_pending_timestamp = false;
-    uint64_t pending_since = 0;
-    void* appstate = NULL;
-    SDL_AppResult result = SDL_APP_CONTINUE;
+    g_argc = argc;
+    g_argv = argv;
 
-    while (result == SDL_APP_CONTINUE) {
-        CodeTimestamp timestamp = {};
-        if (code_stat(GSPLAT_CODE_PATH, &timestamp)) {
-            bool changed = !code.handle || !code_timestamp_equal(&timestamp, &code.timestamp);
-            if (changed && (!has_pending_timestamp || !code_timestamp_equal(&timestamp, &pending_timestamp))) {
-                pending_timestamp = timestamp;
-                has_pending_timestamp = true;
-                pending_since = SDL_GetTicks();
-            } else if (!changed) {
-                has_pending_timestamp = false;
-            }
-        }
-
-        if (has_pending_timestamp && SDL_GetTicks() - pending_since >= GSPLAT_RELOAD_DEBOUNCE_MS) {
-            RuntimeSnapshot snapshot = {};
-            if (code.handle) {
-                if (!snapshot_capture(&code, &snapshot)) {
-                    LOG(ERROR|APP|RESOURCE, "shim: failed to capture runtime state before reload");
-                    result = SDL_APP_FAILURE;
-                    break;
-                }
-                char old_loaded_path[sizeof(code.loaded_path)];
-                snprintf(old_loaded_path, sizeof(old_loaded_path), "%s", code.loaded_path);
-                SDL_UnloadObject(code.handle);
-                remove(old_loaded_path);
-                code = {};
-            }
-
-            CodeApi next = {};
-            if (code_load(&next, &pending_timestamp)) {
-                snapshot_restore(&snapshot, &next);
-                SDL_AppResult init_result = next.app_init(&appstate, argc, argv);
-                if (init_result == SDL_APP_CONTINUE) {
-                    code = next;
-                    LOG(INFO|APP|LOAD, "shim: loaded %s from %s", code.loaded_path, GSPLAT_CODE_PATH);
-                    has_pending_timestamp = false;
-                } else {
-                    SDL_UnloadObject(next.handle);
-                    remove(next.loaded_path);
-                    result = init_result;
-                }
-            }
-            snapshot_free(&snapshot);
-        }
-
-        if (!code.handle) {
-            SDL_Delay(100);
-            continue;
-        }
-
-        SDL_Event event;
-        while (result == SDL_APP_CONTINUE && SDL_PollEvent(&event)) {
-            result = code.app_event(appstate, &event);
-        }
-
-        if (result == SDL_APP_CONTINUE) {
-            result = code.app_iterate(appstate);
-        }
+    CodeTimestamp timestamp = {};
+    if (!code_stat(GSPLAT_CODE_PATH, &timestamp) || !code_load(&g_code, &timestamp)) {
+        LOG(ERROR|APP|LOAD, "shim: failed to load initial code module %s", GSPLAT_CODE_PATH);
+        return 1;
     }
 
-    if (code.handle) {
-        code.app_quit(appstate, result);
-        SDL_UnloadObject(code.handle);
-        remove(code.loaded_path);
-    }
+    sapp_desc desc = g_code.desc;
+    desc.init_cb = shim_init;
+    desc.frame_cb = shim_frame;
+    desc.cleanup_cb = shim_cleanup;
+    desc.event_cb = shim_event;
+    desc.logger.func = NULL;
+    desc.user_data = NULL;
+    desc.init_userdata_cb = NULL;
+    desc.frame_userdata_cb = NULL;
+    desc.cleanup_userdata_cb = NULL;
+    desc.event_userdata_cb = NULL;
 
-    return result == SDL_APP_FAILURE ? 1 : 0;
+    sapp_run(&desc);
+    return 0;
 }

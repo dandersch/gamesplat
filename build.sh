@@ -112,7 +112,7 @@ if [ "$HOTRELOAD" = "1" ]; then
     $CXX $CXXFLAGS -fPIC -shared -DCOMPILE_AS_DLL "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/main.cpp -o "$CODE_SO" "$IMGUI_LIB" "$THIRDPARTY_LIB" "${PROFILE_LIBS[@]}" $LDFLAGS
 
     echo "Building $SHIM_OUT..."
-    $CXX $CXXFLAGS src/shim.cpp -o "$SHIM_OUT" -lSDL3 -ldl
+    $CXX $CXXFLAGS "${SOKOL_BACKEND_FLAGS[@]}" "${INCLUDE_FLAGS[@]}" src/shim.cpp -o "$SHIM_OUT" -lSDL3 -lm -lGL -lX11 -lXi -lXcursor -ldl -lpthread
 
     echo "Done: ./$SHIM_OUT (reloads $CODE_SO)"
 else

@@ -9,6 +9,11 @@ static bool file_exists(const char* path) {
 }
 
 // NOTE: strings.h
+static void copy_string(char* dst, size_t dst_size, const char* src) {
+    snprintf(dst, dst_size, "%s", src ? src : "");
+}
+
+// NOTE: strings.h
 static void join_path(char* dst, size_t dst_size, const char* a, const char* b) {
     copy_string(dst, dst_size, a);
     size_t len = strlen(dst);
@@ -28,11 +33,6 @@ static bool is_numeric_name(const char* name) {
         if (!isdigit((unsigned char)*p)) return false;
     }
     return true;
-}
-
-// NOTE: strings.h
-static void copy_string(char* dst, size_t dst_size, const char* src) {
-    snprintf(dst, dst_size, "%s", src ? src : "");
 }
 
 // NOTE: strings.h

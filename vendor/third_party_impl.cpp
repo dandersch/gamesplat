@@ -106,3 +106,19 @@ GSPLAT_HOTRELOAD_EXPORT void gsplat_simgui_state_load(const void* src, size_t sr
         memcpy(&_simgui, src, sizeof(_simgui));
     }
 }
+
+GSPLAT_HOTRELOAD_EXPORT size_t gsplat_sapp_state_size(void) {
+    return sizeof(_sapp);
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_sapp_state_save(void* dst, size_t dst_size) {
+    if (dst && dst_size == sizeof(_sapp)) {
+        memcpy(dst, &_sapp, sizeof(_sapp));
+    }
+}
+
+GSPLAT_HOTRELOAD_EXPORT void gsplat_sapp_state_load(const void* src, size_t src_size) {
+    if (src && src_size == sizeof(_sapp)) {
+        memcpy(&_sapp, src, sizeof(_sapp));
+    }
+}
