@@ -55,6 +55,7 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->radix_prefix_pipeline);
     renderer_destroy_shader_pipeline(&r->radix_scatter_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
+    renderer_destroy_shader_pipeline(&r->taa_accum_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
     renderer_destroy_shader_pipeline(&r->darken_pipeline);
@@ -71,6 +72,129 @@ static uint32_t next_power_of_two_u32(uint32_t v) {
     v |= v >> 8;
     v |= v >> 16;
     return v + 1u;
+}
+
+static bool mat4_inverse(const float m[16], float inv_out[16]) {
+    float inv[16];
+
+    inv[0] = m[5]  * m[10] * m[15] -
+             m[5]  * m[11] * m[14] -
+             m[9]  * m[6]  * m[15] +
+             m[9]  * m[7]  * m[14] +
+             m[13] * m[6]  * m[11] -
+             m[13] * m[7]  * m[10];
+
+    inv[4] = -m[4]  * m[10] * m[15] +
+              m[4]  * m[11] * m[14] +
+              m[8]  * m[6]  * m[15] -
+              m[8]  * m[7]  * m[14] -
+              m[12] * m[6]  * m[11] +
+              m[12] * m[7]  * m[10];
+
+    inv[8] = m[4]  * m[9] * m[15] -
+             m[4]  * m[11] * m[13] -
+             m[8]  * m[5] * m[15] +
+             m[8]  * m[7] * m[13] +
+             m[12] * m[5] * m[11] -
+             m[12] * m[7] * m[9];
+
+    inv[12] = -m[4]  * m[9] * m[14] +
+               m[4]  * m[10] * m[13] +
+               m[8]  * m[5] * m[14] -
+               m[8]  * m[6] * m[13] -
+               m[12] * m[5] * m[10] +
+               m[12] * m[6] * m[9];
+
+    inv[1] = -m[1]  * m[10] * m[15] +
+              m[1]  * m[11] * m[14] +
+              m[9]  * m[2] * m[15] -
+              m[9]  * m[3] * m[14] -
+              m[13] * m[2] * m[11] +
+              m[13] * m[3] * m[10];
+
+    inv[5] = m[0]  * m[10] * m[15] -
+             m[0]  * m[11] * m[14] -
+             m[8]  * m[2] * m[15] +
+             m[8]  * m[3] * m[14] +
+             m[12] * m[2] * m[11] -
+             m[12] * m[3] * m[10];
+
+    inv[9] = -m[0]  * m[9] * m[15] +
+              m[0]  * m[11] * m[13] +
+              m[8]  * m[1] * m[15] -
+              m[8]  * m[3] * m[13] -
+              m[12] * m[1] * m[11] +
+              m[12] * m[3] * m[9];
+
+    inv[13] = m[0]  * m[9] * m[14] -
+              m[0]  * m[10] * m[13] -
+              m[8]  * m[1] * m[14] +
+              m[8]  * m[2] * m[13] +
+              m[12] * m[1] * m[10] -
+              m[12] * m[2] * m[9];
+
+    inv[2] = m[1]  * m[6] * m[15] -
+             m[1]  * m[7] * m[14] -
+             m[5]  * m[2] * m[15] +
+             m[5]  * m[3] * m[14] +
+             m[13] * m[2] * m[7] -
+             m[13] * m[3] * m[6];
+
+    inv[6] = -m[0]  * m[6] * m[15] +
+              m[0]  * m[7] * m[14] +
+              m[4]  * m[2] * m[15] -
+              m[4]  * m[3] * m[14] -
+              m[12] * m[2] * m[7] +
+              m[12] * m[3] * m[6];
+
+    inv[10] = m[0]  * m[5] * m[15] -
+              m[0]  * m[7] * m[13] -
+              m[4]  * m[1] * m[15] +
+              m[4]  * m[3] * m[13] +
+              m[12] * m[1] * m[7] -
+              m[12] * m[3] * m[5];
+
+    inv[14] = -m[0]  * m[5] * m[14] +
+               m[0]  * m[6] * m[13] +
+               m[4]  * m[1] * m[14] -
+               m[4]  * m[2] * m[13] -
+               m[12] * m[1] * m[6] +
+               m[12] * m[2] * m[5];
+
+    inv[3] = -m[1] * m[6] * m[11] +
+              m[1] * m[7] * m[10] +
+              m[5] * m[2] * m[11] -
+              m[5] * m[3] * m[10] -
+              m[9] * m[2] * m[7] +
+              m[9] * m[3] * m[6];
+
+    inv[7] = m[0] * m[6] * m[11] -
+             m[0] * m[7] * m[10] -
+             m[4] * m[2] * m[11] +
+             m[4] * m[3] * m[10] +
+             m[8] * m[2] * m[7] -
+             m[8] * m[3] * m[6];
+
+    inv[11] = -m[0] * m[5] * m[11] +
+               m[0] * m[7] * m[9] +
+               m[4] * m[1] * m[11] -
+               m[4] * m[3] * m[9] -
+               m[8] * m[1] * m[7] +
+               m[8] * m[3] * m[5];
+
+    inv[15] = m[0] * m[5] * m[10] -
+              m[0] * m[6] * m[9] -
+              m[4] * m[1] * m[10] +
+              m[4] * m[2] * m[9] +
+              m[8] * m[1] * m[6] -
+              m[8] * m[2] * m[5];
+
+    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (fabsf(det) <= 1.0e-8f) return false;
+
+    det = 1.0f / det;
+    for (int i = 0; i < 16; i++) inv_out[i] = inv[i] * det;
+    return true;
 }
 
 static bool renderer_create_shader_pipelines(Renderer* r) {
@@ -165,11 +289,27 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
         pd.cull_mode = SG_CULLMODE_NONE;
         pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
-        pd.colors[0].pixel_format = renderer_default_color_format();
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F;
         pd.colors[0].blend.enabled = false;
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "stochastic-accum-pipeline";
         r->accum_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.shader = sg_make_shader(taa_accum_shader_desc(sg_query_backend()));
+        pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+        pd.cull_mode = SG_CULLMODE_NONE;
+        pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
+        pd.color_count = 2;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F;
+        pd.colors[0].blend.enabled = false;
+        pd.colors[0].write_mask = SG_COLORMASK_RGBA;
+        pd.colors[1].pixel_format = SG_PIXELFORMAT_RGBA32F;
+        pd.colors[1].blend.enabled = false;
+        pd.colors[1].write_mask = SG_COLORMASK_RGBA;
+        pd.label = "stochastic-taa-accum-pipeline";
+        r->taa_accum_pipeline = sg_make_pipeline(&pd);
     }
     {
         sg_pipeline_desc pd = {};
@@ -305,7 +445,8 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
 
     bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
               r->cull_pipeline.id && r->cull_reset_pipeline.id &&
-              r->accum_pipeline.id && r->blit_pipeline.id && r->overlay_pipeline.id &&
+              r->accum_pipeline.id && r->taa_accum_pipeline.id &&
+              r->blit_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
               r->mesh_pipeline.id;
     if (!ok) {
@@ -327,6 +468,7 @@ bool renderer_init(Renderer* r) {
     r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
     r->stochastic_samples_per_frame = 1;
     r->stochastic_accumulation_enabled = true;
+    r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
     r->sh_lod_distance = 0.0f;    // distance LOD off by default
     r->mesh_transform.scale = 1.0f;
@@ -777,12 +919,14 @@ void renderer_reset_stochastic_accumulation(Renderer* r) {
     r->stochastic_accum_write_index = 0;
     r->stochastic_prev_cam_valid = false;
     r->stochastic_prev_effect_valid = false;
+    r->stochastic_taa_prev_view_proj_valid = false;
 }
 
 static void renderer_destroy_stochastic_targets(Renderer* r) {
     if (r->stochastic_sample_texture_view.id) sg_destroy_view(r->stochastic_sample_texture_view);
     if (r->stochastic_sample_color_view.id)   sg_destroy_view(r->stochastic_sample_color_view);
     if (r->stochastic_sample_image.id)        sg_destroy_image(r->stochastic_sample_image);
+    if (r->stochastic_depth_texture_view.id)  sg_destroy_view(r->stochastic_depth_texture_view);
     if (r->stochastic_depth_view.id)          sg_destroy_view(r->stochastic_depth_view);
     if (r->stochastic_depth_image.id)         sg_destroy_image(r->stochastic_depth_image);
     for (int i = 0; i < 2; ++i) {
@@ -792,10 +936,17 @@ static void renderer_destroy_stochastic_targets(Renderer* r) {
         r->stochastic_accum_texture_views[i] = {};
         r->stochastic_accum_color_views[i] = {};
         r->stochastic_accum_images[i] = {};
+        if (r->stochastic_taa_xyz_texture_views[i].id) sg_destroy_view(r->stochastic_taa_xyz_texture_views[i]);
+        if (r->stochastic_taa_xyz_color_views[i].id)   sg_destroy_view(r->stochastic_taa_xyz_color_views[i]);
+        if (r->stochastic_taa_xyz_images[i].id)        sg_destroy_image(r->stochastic_taa_xyz_images[i]);
+        r->stochastic_taa_xyz_texture_views[i] = {};
+        r->stochastic_taa_xyz_color_views[i] = {};
+        r->stochastic_taa_xyz_images[i] = {};
     }
     r->stochastic_sample_texture_view = {};
     r->stochastic_sample_color_view = {};
     r->stochastic_sample_image = {};
+    r->stochastic_depth_texture_view = {};
     r->stochastic_depth_view = {};
     r->stochastic_depth_image = {};
     r->stochastic_width = 0;
@@ -821,7 +972,8 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
     if (width <= 0 || height <= 0) return false;
     if (r->stochastic_width == (uint32_t)width && r->stochastic_height == (uint32_t)height &&
         r->stochastic_sample_image.id && r->stochastic_depth_image.id &&
-        r->stochastic_accum_images[0].id && r->stochastic_accum_images[1].id) {
+        r->stochastic_accum_images[0].id && r->stochastic_accum_images[1].id &&
+        r->stochastic_taa_xyz_images[0].id && r->stochastic_taa_xyz_images[1].id) {
         return true;
     }
 
@@ -842,11 +994,17 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
     r->stochastic_sample_color_view = make_color_attachment_view(r->stochastic_sample_image, "stochastic-sample-color-att-view");
     r->stochastic_sample_texture_view = make_texture_view(r->stochastic_sample_image, "stochastic-sample-tex-view");
 
+    color_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
     for (int i = 0; i < 2; ++i) {
         color_desc.label = i == 0 ? "stochastic-accum-a" : "stochastic-accum-b";
         r->stochastic_accum_images[i] = sg_make_image(&color_desc);
         r->stochastic_accum_color_views[i] = make_color_attachment_view(r->stochastic_accum_images[i], i == 0 ? "stochastic-accum-a-att-view" : "stochastic-accum-b-att-view");
         r->stochastic_accum_texture_views[i] = make_texture_view(r->stochastic_accum_images[i], i == 0 ? "stochastic-accum-a-tex-view" : "stochastic-accum-b-tex-view");
+
+        color_desc.label = i == 0 ? "stochastic-taa-xyz-a" : "stochastic-taa-xyz-b";
+        r->stochastic_taa_xyz_images[i] = sg_make_image(&color_desc);
+        r->stochastic_taa_xyz_color_views[i] = make_color_attachment_view(r->stochastic_taa_xyz_images[i], i == 0 ? "stochastic-taa-xyz-a-att-view" : "stochastic-taa-xyz-b-att-view");
+        r->stochastic_taa_xyz_texture_views[i] = make_texture_view(r->stochastic_taa_xyz_images[i], i == 0 ? "stochastic-taa-xyz-a-tex-view" : "stochastic-taa-xyz-b-tex-view");
     }
 
     sg_image_desc depth_desc = {};
@@ -865,6 +1023,7 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
     dvd.depth_stencil_attachment.image = r->stochastic_depth_image;
     dvd.label = "stochastic-depth-stencil-att-view";
     r->stochastic_depth_view = sg_make_view(&dvd);
+    r->stochastic_depth_texture_view = make_texture_view(r->stochastic_depth_image, "stochastic-depth-tex-view");
 
     r->stochastic_width = (uint32_t)width;
     r->stochastic_height = (uint32_t)height;
@@ -872,10 +1031,14 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
 
     return r->stochastic_sample_image.id && r->stochastic_sample_color_view.id &&
            r->stochastic_sample_texture_view.id && r->stochastic_depth_image.id &&
-           r->stochastic_depth_view.id && r->stochastic_accum_images[0].id &&
+           r->stochastic_depth_view.id && r->stochastic_depth_texture_view.id &&
+           r->stochastic_accum_images[0].id &&
            r->stochastic_accum_images[1].id && r->stochastic_accum_color_views[0].id &&
            r->stochastic_accum_color_views[1].id && r->stochastic_accum_texture_views[0].id &&
-           r->stochastic_accum_texture_views[1].id;
+           r->stochastic_accum_texture_views[1].id &&
+           r->stochastic_taa_xyz_images[0].id && r->stochastic_taa_xyz_images[1].id &&
+           r->stochastic_taa_xyz_color_views[0].id && r->stochastic_taa_xyz_color_views[1].id &&
+           r->stochastic_taa_xyz_texture_views[0].id && r->stochastic_taa_xyz_texture_views[1].id;
 }
 
 // Draws mesh + splats + (optional) panorama overlay + (optional) wireframe
@@ -1245,8 +1408,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
         SplatEffectParams empty_effect = {};
         const SplatEffectParams* effect_for_compare = splat_effect ? splat_effect : &empty_effect;
-        if ((r->stochastic_prev_cam_valid && memcmp(&r->stochastic_prev_cam, cam, sizeof(*cam)) != 0) ||
-            (r->stochastic_prev_effect_valid && memcmp(&r->stochastic_prev_effect, effect_for_compare, sizeof(*effect_for_compare)) != 0)) {
+        bool cam_changed = r->stochastic_prev_cam_valid && memcmp(&r->stochastic_prev_cam, cam, sizeof(*cam)) != 0;
+        bool effect_changed = r->stochastic_prev_effect_valid && memcmp(&r->stochastic_prev_effect, effect_for_compare, sizeof(*effect_for_compare)) != 0;
+        if ((!r->stochastic_taa_enabled && cam_changed) || effect_changed) {
             renderer_reset_stochastic_accumulation(r);
         }
         memcpy(&r->stochastic_prev_cam, cam, sizeof(*cam));
@@ -1256,6 +1420,17 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         uint32_t samples_per_frame = r->stochastic_samples_per_frame;
         if (samples_per_frame < 1) samples_per_frame = 1;
         if (samples_per_frame > 16) samples_per_frame = 16;
+
+        const bool use_taa = r->stochastic_taa_enabled && samples_per_frame == 1;
+        float view_proj[16];
+        float inv_view_proj[16];
+        if (use_taa) {
+            math_mat4_mul(cam->proj, cam->view, view_proj);
+            if (!mat4_inverse(view_proj, inv_view_proj)) {
+                renderer_reset_stochastic_accumulation(r);
+                memcpy(inv_view_proj, view_proj, sizeof(inv_view_proj));
+            }
+        }
 
         uint32_t write_index = r->stochastic_accum_write_index & 1u;
         bool display_accum_texture = false;
@@ -1267,7 +1442,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sample_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
             sample_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
             sample_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
-            sample_pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+            sample_pass.action.depth.store_action = use_taa ? SG_STOREACTION_STORE : SG_STOREACTION_DONTCARE;
             sample_pass.action.depth.clear_value = 1.0f;
             sample_pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
             sample_pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
@@ -1279,7 +1454,47 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted);
             sg_end_pass();
 
-            if (r->stochastic_accumulation_enabled || samples_per_frame > 1) {
+            if (use_taa) {
+                write_index = r->stochastic_accum_write_index & 1u;
+                uint32_t read_index = (write_index + 1u) & 1u;
+
+                sg_pass taa_pass = {};
+                taa_pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE;
+                taa_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+                taa_pass.action.colors[1].load_action = SG_LOADACTION_DONTCARE;
+                taa_pass.action.colors[1].store_action = SG_STOREACTION_STORE;
+                taa_pass.attachments.colors[0] = r->stochastic_accum_color_views[write_index];
+                taa_pass.attachments.colors[1] = r->stochastic_taa_xyz_color_views[write_index];
+                sg_begin_pass(&taa_pass);
+                sg_apply_pipeline(r->taa_accum_pipeline);
+                sg_bindings taa_bnd = {};
+                taa_bnd.views[VIEW_current_color_tex] = r->stochastic_sample_texture_view;
+                taa_bnd.samplers[SMP_current_color_smp] = r->accum_sampler;
+                taa_bnd.views[VIEW_current_depth_tex] = r->stochastic_depth_texture_view;
+                taa_bnd.samplers[SMP_current_depth_smp] = r->accum_sampler;
+                taa_bnd.views[VIEW_history_color_tex] = r->stochastic_accum_texture_views[read_index];
+                taa_bnd.samplers[SMP_history_color_smp] = r->accum_sampler;
+                taa_bnd.views[VIEW_history_xyz_tex] = r->stochastic_taa_xyz_texture_views[read_index];
+                taa_bnd.samplers[SMP_history_xyz_smp] = r->accum_sampler;
+                sg_apply_bindings(&taa_bnd);
+
+                TaaAccumUBO_t taa_ubo = {};
+                memcpy(taa_ubo.inv_view_proj, inv_view_proj, sizeof(taa_ubo.inv_view_proj));
+                memcpy(taa_ubo.prev_view_proj,
+                       r->stochastic_taa_prev_view_proj_valid ? r->stochastic_taa_prev_view_proj : view_proj,
+                       sizeof(taa_ubo.prev_view_proj));
+                taa_ubo.history_valid = r->stochastic_taa_prev_view_proj_valid ? 1.0f : 0.0f;
+                taa_ubo.clip_z_01 = cam->clip_z_01;
+                sg_apply_uniforms(UB_TaaAccumUBO, SG_RANGE_REF(taa_ubo));
+                sg_draw(0, 3, 1);
+                sg_end_pass();
+
+                memcpy(r->stochastic_taa_prev_view_proj, view_proj, sizeof(r->stochastic_taa_prev_view_proj));
+                r->stochastic_taa_prev_view_proj_valid = true;
+                r->stochastic_sample_count++;
+                r->stochastic_accum_write_index = (write_index + 1u) & 1u;
+                display_accum_texture = true;
+            } else if (r->stochastic_accumulation_enabled || samples_per_frame > 1) {
                 uint32_t next_sample_count = r->stochastic_accumulation_enabled
                     ? r->stochastic_sample_count + 1
                     : sample_i + 1;

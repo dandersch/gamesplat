@@ -73,6 +73,7 @@ struct Renderer {
     sg_pipeline     radix_prefix_pipeline;
     sg_pipeline     radix_scatter_pipeline;
     sg_pipeline     accum_pipeline;
+    sg_pipeline     taa_accum_pipeline;
     sg_pipeline     blit_pipeline;
     sg_pipeline     overlay_pipeline;
     sg_pipeline     darken_pipeline;     // fullscreen dim of FPS view behind map overlay
@@ -124,9 +125,13 @@ struct Renderer {
     sg_view         stochastic_sample_texture_view;
     sg_image        stochastic_depth_image;
     sg_view         stochastic_depth_view;
+    sg_view         stochastic_depth_texture_view;
     sg_image        stochastic_accum_images[2];
     sg_view         stochastic_accum_color_views[2];
     sg_view         stochastic_accum_texture_views[2];
+    sg_image        stochastic_taa_xyz_images[2];
+    sg_view         stochastic_taa_xyz_color_views[2];
+    sg_view         stochastic_taa_xyz_texture_views[2];
     uint32_t        stochastic_width;
     uint32_t        stochastic_height;
     uint32_t        stochastic_sample_count;
@@ -135,9 +140,12 @@ struct Renderer {
     uint32_t        stochastic_accum_write_index;
     CameraUniforms  stochastic_prev_cam;
     SplatEffectParams stochastic_prev_effect;
+    float           stochastic_taa_prev_view_proj[16];
     bool            stochastic_prev_effect_valid;
     bool            stochastic_prev_cam_valid;
     bool            stochastic_accumulation_enabled;
+    bool            stochastic_taa_enabled;
+    bool            stochastic_taa_prev_view_proj_valid;
 };
 
 bool renderer_init(Renderer* r);
