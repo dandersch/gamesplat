@@ -909,26 +909,22 @@ static void app_frame(void) {
             int samples_per_frame = (int)state->renderer.stochastic_samples_per_frame;
             if (ImGui::SliderInt("ST Samples / Frame", &samples_per_frame, 1, 16)) {
                 state->renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
-                if (samples_per_frame > 1) {
-                    state->renderer.stochastic_taa_enabled = false;
-                }
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
             if (ImGui::Checkbox("ST TAA", &state->renderer.stochastic_taa_enabled)) {
-                if (state->renderer.stochastic_taa_enabled) {
-                    state->renderer.stochastic_samples_per_frame = 1;
-                }
-                renderer_reset_stochastic_accumulation(&state->renderer);
-            }
-            if (ImGui::Checkbox("ST Accumulation", &state->renderer.stochastic_accumulation_enabled)) {
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
             if (state->renderer.stochastic_taa_enabled) {
                 ImGui::Text("ST TAA samples: %u", state->renderer.stochastic_sample_count);
-            } else if (state->renderer.stochastic_accumulation_enabled) {
-                ImGui::Text("ST accumulated samples: %u", state->renderer.stochastic_sample_count);
             } else {
-                ImGui::Text("ST accumulation off: averaging current-frame samples only");
+                if (ImGui::Checkbox("ST Accumulation", &state->renderer.stochastic_accumulation_enabled)) {
+                    renderer_reset_stochastic_accumulation(&state->renderer);
+                }
+                if (state->renderer.stochastic_accumulation_enabled) {
+                    ImGui::Text("ST accumulated samples: %u", state->renderer.stochastic_sample_count);
+                } else {
+                    ImGui::Text("ST accumulation off: averaging current-frame samples only");
+                }
             }
         }
         if (ImGui::Button("Shockwave Burst")) {

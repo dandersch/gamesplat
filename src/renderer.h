@@ -132,6 +132,9 @@ struct Renderer {
     sg_image        stochastic_taa_xyz_images[2];
     sg_view         stochastic_taa_xyz_color_views[2];
     sg_view         stochastic_taa_xyz_texture_views[2];
+    sg_image        stochastic_frame_avg_images[2];
+    sg_view         stochastic_frame_avg_color_views[2];
+    sg_view         stochastic_frame_avg_texture_views[2];
     uint32_t        stochastic_width;
     uint32_t        stochastic_height;
     uint32_t        stochastic_sample_count;
