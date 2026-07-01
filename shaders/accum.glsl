@@ -108,6 +108,38 @@ vec2 project_prev_uv(vec3 world_pos) {
     return px / viewport_orthographic.xy;
 }
 
+vec4 sample_history_color_bilinear(vec2 in_uv) {
+    ivec2 size_i = textureSize(sampler2D(history_color_tex, history_color_smp), 0);
+    vec2 size = vec2(size_i);
+    vec2 p = in_uv * size - 0.5;
+    ivec2 p0 = ivec2(floor(p));
+    ivec2 p1 = p0 + ivec2(1);
+    vec2 f = fract(p);
+    ivec2 lo = ivec2(0);
+    ivec2 hi = size_i - ivec2(1);
+    vec4 c00 = texelFetch(sampler2D(history_color_tex, history_color_smp), clamp(p0, lo, hi), 0);
+    vec4 c10 = texelFetch(sampler2D(history_color_tex, history_color_smp), clamp(ivec2(p1.x, p0.y), lo, hi), 0);
+    vec4 c01 = texelFetch(sampler2D(history_color_tex, history_color_smp), clamp(ivec2(p0.x, p1.y), lo, hi), 0);
+    vec4 c11 = texelFetch(sampler2D(history_color_tex, history_color_smp), clamp(p1, lo, hi), 0);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+vec4 sample_history_xyz_bilinear(vec2 in_uv) {
+    ivec2 size_i = textureSize(sampler2D(history_xyz_tex, history_xyz_smp), 0);
+    vec2 size = vec2(size_i);
+    vec2 p = in_uv * size - 0.5;
+    ivec2 p0 = ivec2(floor(p));
+    ivec2 p1 = p0 + ivec2(1);
+    vec2 f = fract(p);
+    ivec2 lo = ivec2(0);
+    ivec2 hi = size_i - ivec2(1);
+    vec4 c00 = texelFetch(sampler2D(history_xyz_tex, history_xyz_smp), clamp(p0, lo, hi), 0);
+    vec4 c10 = texelFetch(sampler2D(history_xyz_tex, history_xyz_smp), clamp(ivec2(p1.x, p0.y), lo, hi), 0);
+    vec4 c01 = texelFetch(sampler2D(history_xyz_tex, history_xyz_smp), clamp(ivec2(p0.x, p1.y), lo, hi), 0);
+    vec4 c11 = texelFetch(sampler2D(history_xyz_tex, history_xyz_smp), clamp(p1, lo, hi), 0);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
 void main() {
     vec4 current_color = texture(sampler2D(current_color_tex, current_color_smp), uv);
     float depth = texture(sampler2D(current_depth_tex, current_depth_smp), uv).r;
@@ -123,8 +155,8 @@ void main() {
     vec4 history_color = vec4(0.0);
     vec3 history_xyz = vec3(0.0);
     if (valid_history) {
-        history_color = texture(sampler2D(history_color_tex, history_color_smp), prev_uv);
-        history_xyz = texture(sampler2D(history_xyz_tex, history_xyz_smp), prev_uv).xyz;
+        history_color = sample_history_color_bilinear(prev_uv);
+        history_xyz = sample_history_xyz_bilinear(prev_uv).xyz;
         valid_history = history_color.a > 0.0 && (view_changed == 0.0 || length(world.xyz - history_xyz) < 100.0);
     }
 
