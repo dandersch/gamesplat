@@ -467,6 +467,7 @@ bool renderer_init(Renderer* r) {
     memset(r, 0, sizeof(*r));
     r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
     r->stochastic_samples_per_frame = 1;
+    r->stochastic_taa_current_samples = 4;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -1440,6 +1441,12 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         if (samples_per_frame > 16) samples_per_frame = 16;
 
         const bool use_taa = r->stochastic_taa_enabled;
+        uint32_t render_samples = samples_per_frame;
+        if (use_taa) {
+            render_samples = r->stochastic_taa_current_samples;
+            if (render_samples < 1) render_samples = 1;
+            if (render_samples > 16) render_samples = 16;
+        }
         float inv_view[16];
         if (use_taa) {
             if (!mat4_inverse(cam->view, inv_view)) {
@@ -1451,7 +1458,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
         uint32_t write_index = r->stochastic_accum_write_index & 1u;
         bool display_accum_texture = false;
-        for (uint32_t sample_i = 0; sample_i < samples_per_frame; ++sample_i) {
+        for (uint32_t sample_i = 0; sample_i < render_samples; ++sample_i) {
             r->stochastic_frame_seed++;
 
             sg_pass sample_pass = {};
@@ -1471,7 +1478,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted);
             sg_end_pass();
 
-            if (use_taa && samples_per_frame > 1) {
+            if (use_taa && render_samples > 1) {
                 uint32_t avg_write_index = sample_i & 1u;
                 uint32_t avg_read_index = (avg_write_index + 1u) & 1u;
 
@@ -1495,7 +1502,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
                 sg_apply_uniforms(UB_AccumUBO, SG_RANGE_REF(avg_ubo));
                 sg_draw(0, 3, 1);
                 sg_end_pass();
-            } else if (!use_taa && (r->stochastic_accumulation_enabled || samples_per_frame > 1)) {
+            } else if (!use_taa && (r->stochastic_accumulation_enabled || render_samples > 1)) {
                 uint32_t next_sample_count = r->stochastic_accumulation_enabled
                     ? r->stochastic_sample_count + 1
                     : sample_i + 1;
@@ -1536,8 +1543,8 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         if (use_taa) {
             write_index = r->stochastic_accum_write_index & 1u;
             uint32_t read_index = (write_index + 1u) & 1u;
-            sg_view current_taa_view = samples_per_frame > 1
-                ? r->stochastic_frame_avg_texture_views[(samples_per_frame - 1u) & 1u]
+            sg_view current_taa_view = render_samples > 1
+                ? r->stochastic_frame_avg_texture_views[(render_samples - 1u) & 1u]
                 : r->stochastic_sample_texture_view;
 
             sg_pass taa_pass = {};

@@ -906,17 +906,22 @@ static void app_frame(void) {
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
         if (state->renderer.splat_render_mode == SplatRenderMode::StochasticUnsorted) {
-            int samples_per_frame = (int)state->renderer.stochastic_samples_per_frame;
-            if (ImGui::SliderInt("ST Samples / Frame", &samples_per_frame, 1, 16)) {
-                state->renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
-                renderer_reset_stochastic_accumulation(&state->renderer);
-            }
             if (ImGui::Checkbox("ST TAA", &state->renderer.stochastic_taa_enabled)) {
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
             if (state->renderer.stochastic_taa_enabled) {
+                int taa_current_samples = (int)state->renderer.stochastic_taa_current_samples;
+                if (ImGui::SliderInt("ST TAA Current Samples", &taa_current_samples, 1, 16)) {
+                    state->renderer.stochastic_taa_current_samples = (uint32_t)taa_current_samples;
+                    renderer_reset_stochastic_accumulation(&state->renderer);
+                }
                 ImGui::Text("ST TAA samples: %u", state->renderer.stochastic_sample_count);
             } else {
+                int samples_per_frame = (int)state->renderer.stochastic_samples_per_frame;
+                if (ImGui::SliderInt("ST Samples / Frame", &samples_per_frame, 1, 16)) {
+                    state->renderer.stochastic_samples_per_frame = (uint32_t)samples_per_frame;
+                    renderer_reset_stochastic_accumulation(&state->renderer);
+                }
                 if (ImGui::Checkbox("ST Accumulation", &state->renderer.stochastic_accumulation_enabled)) {
                     renderer_reset_stochastic_accumulation(&state->renderer);
                 }

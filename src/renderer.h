@@ -139,6 +139,7 @@ struct Renderer {
     uint32_t        stochastic_height;
     uint32_t        stochastic_sample_count;
     uint32_t        stochastic_samples_per_frame;
+    uint32_t        stochastic_taa_current_samples;
     uint32_t        stochastic_frame_seed;
     uint32_t        stochastic_accum_write_index;
     CameraUniforms  stochastic_prev_cam;
