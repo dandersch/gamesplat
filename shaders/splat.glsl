@@ -24,6 +24,7 @@ layout(binding = 1) readonly buffer SplatIdBuffer {
 
 layout(binding = 0) uniform SplatDrawUBO {
     vec2 viewport;
+    vec2 jitter_px;
     float clip_y_sign;
 };
 
@@ -56,7 +57,7 @@ void main() {
     ProjectedSplatData projected = projected_splats[splat_id];
     vec2 raster_center_px = projected.center_radius.xy;
     vec2 radius = projected.center_radius.zw;
-    vec2 pos_px = raster_center_px + corner * radius;
+    vec2 pos_px = raster_center_px + corner * radius + jitter_px;
 
     vec2 ndc = vec2(
         2.0 * pos_px.x / viewport.x - 1.0,
@@ -67,7 +68,7 @@ void main() {
     frag_color = projected.color_opacity.rgb;
     frag_opacity = projected.color_opacity.a;
     frag_alpha_power_cutoff = log((1.0 / 255.0) / max(projected.color_opacity.a, 1.0e-8));
-    frag_center = raster_center_px;
+    frag_center = raster_center_px + jitter_px;
     frag_conic = projected.conic_depth.xyz;
     frag_splat_id = splat_id;
 }

@@ -197,6 +197,17 @@ static bool mat4_inverse(const float m[16], float inv_out[16]) {
     return true;
 }
 
+static float halton(uint32_t index, uint32_t base) {
+    float f = 1.0f;
+    float r = 0.0f;
+    while (index > 0) {
+        f /= (float)base;
+        r += f * (float)(index % base);
+        index /= base;
+    }
+    return r;
+}
+
 static bool renderer_create_shader_pipelines(Renderer* r) {
     // --- Splat pipeline -------------------------------------------------
     {
@@ -1062,7 +1073,8 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
 // drawn here; the caller is responsible for that after this returns.
 static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam,
                        const OverlayParams* overlay, const NodeRenderParams* nodes,
-                       const SplatEffectParams* splat_effect, SplatRenderMode splat_mode) {
+                       const SplatEffectParams* splat_effect, SplatRenderMode splat_mode,
+                       const float* splat_jitter_px = NULL) {
     (void)splat_effect;
     // VP shared by both mesh slots and the wireframe pass.
     float vp[16];
@@ -1143,6 +1155,10 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         SplatDrawUBO_t draw_ubo = {};
         draw_ubo.viewport[0] = cam->viewport[0];
         draw_ubo.viewport[1] = cam->viewport[1];
+        if (splat_jitter_px) {
+            draw_ubo.jitter_px[0] = splat_jitter_px[0];
+            draw_ubo.jitter_px[1] = splat_jitter_px[1];
+        }
         draw_ubo.clip_y_sign = cam->clip_y_sign;
         sg_apply_uniforms(UB_SplatDrawUBO, SG_RANGE_REF(draw_ubo));
         if (splat_mode == SplatRenderMode::StochasticUnsorted) {
@@ -1460,6 +1476,12 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         bool display_accum_texture = false;
         for (uint32_t sample_i = 0; sample_i < render_samples; ++sample_i) {
             r->stochastic_frame_seed++;
+            float splat_jitter_px[2] = { 0.0f, 0.0f };
+            if (use_taa) {
+                uint32_t jitter_index = (r->stochastic_frame_seed % 1024u) + 1u;
+                splat_jitter_px[0] = halton(jitter_index, 2u) - 0.5f;
+                splat_jitter_px[1] = halton(jitter_index, 3u) - 0.5f;
+            }
 
             sg_pass sample_pass = {};
             sample_pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
@@ -1475,7 +1497,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sample_pass.attachments.depth_stencil = r->stochastic_depth_view;
 
             sg_begin_pass(&sample_pass);
-            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted);
+            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted, splat_jitter_px);
             sg_end_pass();
 
             if (use_taa && render_samples > 1) {
