@@ -45,7 +45,10 @@ struct SplatEffectParams {
 
 enum class SplatRenderMode {
     AlphaBlendSorted = 0,
-    StochasticUnsorted = 1,
+    StochasticSplats = 1,
+    // Placeholder for the compute/atomic Gaussian Point Splatting backend.
+    // Not exposed in the UI until the pipeline exists.
+    GaussianPointSplatting = 2,
 };
 
 // Per-mesh GPU resources. The renderer owns one of these for the animated

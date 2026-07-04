@@ -1143,7 +1143,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     if (scene->visible_count > 0 && r->projected_splat_buffer_view.id && splat_id_buffer_view.id) {
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
-        sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticUnsorted
+        sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticSplats
             ? r->splat_stochastic_pipeline
             : r->splat_pipeline);
 
@@ -1161,7 +1161,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         }
         draw_ubo.clip_y_sign = cam->clip_y_sign;
         sg_apply_uniforms(UB_SplatDrawUBO, SG_RANGE_REF(draw_ubo));
-        if (splat_mode == SplatRenderMode::StochasticUnsorted) {
+        if (splat_mode == SplatRenderMode::StochasticSplats) {
             StochasticUBO_t stochastic_ubo = {};
             stochastic_ubo.frame_seed = (float)r->stochastic_frame_seed;
             sg_apply_uniforms(UB_StochasticUBO, SG_RANGE_REF(stochastic_ubo));
@@ -1403,7 +1403,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     (void)wireframe_occlusion; // see splat-pipeline blend comment in renderer_init
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
 
-    const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticUnsorted);
+    const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticSplats);
 
     if (scene->gaussian_count > 0) {
         PROFILE("gaussian gpu cull/project") {
@@ -1497,7 +1497,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sample_pass.attachments.depth_stencil = r->stochastic_depth_view;
 
             sg_begin_pass(&sample_pass);
-            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticUnsorted, splat_jitter_px);
+            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticSplats, splat_jitter_px);
             sg_end_pass();
 
             if (use_taa && render_samples > 1) {

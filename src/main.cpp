@@ -900,12 +900,12 @@ static void app_frame(void) {
     if (state->scene_loaded) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
         int render_mode = (int)state->renderer.splat_render_mode;
-        const char* render_mode_labels[] = { "Alpha Blend / Sorted", "Stochastic / Unsorted" };
+        const char* render_mode_labels[] = { "Alpha Blend / Sorted", "StochasticSplats" };
         if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 2)) {
             state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
-        if (state->renderer.splat_render_mode == SplatRenderMode::StochasticUnsorted) {
+        if (state->renderer.splat_render_mode == SplatRenderMode::StochasticSplats) {
             if (ImGui::Checkbox("ST TAA", &state->renderer.stochastic_taa_enabled)) {
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
