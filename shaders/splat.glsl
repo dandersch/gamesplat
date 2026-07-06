@@ -8,6 +8,7 @@ struct ProjectedSplatData {
     vec4 color_opacity; // rgb color, a opacity
     vec4 center_radius; // xy raster-space center, zw raster-space radius
     vec4 conic_depth;   // xyz inverse covariance/conic, w ndc depth
+    vec4 covariance_det; // xyz screen-space covariance (a,b,c), w determinant
 };
 
 struct SplatIdData {

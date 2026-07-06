@@ -709,7 +709,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = scene->gaussian_count * sizeof(float) * 12u;
+    bd.size = scene->gaussian_count * sizeof(float) * 16u;
     bd.label = "projected-splat-storage-buffer";
     r->projected_splat_buffer = sg_make_buffer(&bd);
 

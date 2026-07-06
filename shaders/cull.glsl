@@ -13,6 +13,7 @@ struct CullProjectedSplatData {
     vec4 color_opacity; // rgb color, a opacity
     vec4 center_radius; // xy raster-space center, zw raster-space radius
     vec4 conic_depth;   // xyz inverse covariance/conic, w ndc depth
+    vec4 covariance_det; // xyz screen-space covariance (a,b,c), w determinant
 };
 
 layout(binding = 0) uniform CullUBO {
@@ -157,6 +158,7 @@ void main() {
         projected_splats[idx].color_opacity = vec4(0.0);
         projected_splats[idx].center_radius = vec4(0.0);
         projected_splats[idx].conic_depth = vec4(1.0, 0.0, 1.0, 1.0);
+        projected_splats[idx].covariance_det = vec4(0.0);
         return;
     }
 
@@ -331,6 +333,7 @@ void main() {
     projected_splats[idx].color_opacity = vec4(color, opacity);
     projected_splats[idx].center_radius = vec4(raster_center_px, radius_x, radius_y);
     projected_splats[idx].conic_depth = vec4(raster_conic, ndc_z);
+    projected_splats[idx].covariance_det = vec4(a, b * clip_y_sign, c, det);
 }
 @end
 
