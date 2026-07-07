@@ -731,7 +731,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = sizeof(uint32_t) * 4u;
+    bd.size = sizeof(uint32_t) * 8u;
     bd.label = "splat-diagnostics-storage-buffer";
     r->splat_diagnostics_buffer = sg_make_buffer(&bd);
 
@@ -773,7 +773,7 @@ static void renderer_read_splat_diagnostics(Renderer* r) {
     glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous_buffer);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, info.buf[info.active_slot]);
 
-    uint32_t stats[4] = {};
+    uint32_t stats[8] = {};
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(stats), stats);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
@@ -782,6 +782,10 @@ static void renderer_read_splat_diagnostics(Renderer* r) {
     r->splat_diagnostics.max_quad_px = stats[1];
     r->splat_diagnostics.splats_over_1k_px = stats[2];
     r->splat_diagnostics.splats_over_16k_px = stats[3];
+    r->splat_diagnostics.total_gps_kpoints = stats[4];
+    r->splat_diagnostics.max_gps_points = stats[5];
+    r->splat_diagnostics.gps_splats_over_1k_points = stats[6];
+    r->splat_diagnostics.gps_splats_over_16k_points = stats[7];
     r->splat_diagnostics.valid = true;
 #endif
 }

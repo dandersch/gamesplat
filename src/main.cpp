@@ -967,6 +967,13 @@ static void app_frame(void) {
                     : 0.0);
                 ImGui::Text("Max quad area: %u px", diag.max_quad_px);
                 ImGui::Text(">1K px: %u, >16K px: %u", diag.splats_over_1k_px, diag.splats_over_16k_px);
+                ImGui::Text("GPS estimated points: %.1f M", (double)diag.total_gps_kpoints * 1024.0 / 1000000.0);
+                ImGui::Text("GPS avg points/splat: %.1f", state->scene.visible_count > 0
+                    ? ((double)diag.total_gps_kpoints * 1024.0 / (double)state->scene.visible_count)
+                    : 0.0);
+                ImGui::Text("GPS max points/splat: %u", diag.max_gps_points);
+                ImGui::Text("GPS >1K pts: %u, >16K pts: %u",
+                    diag.gps_splats_over_1k_points, diag.gps_splats_over_16k_points);
             } else {
                 ImGui::Text("Projected quad area: unavailable");
             }

@@ -89,6 +89,18 @@ vec3 hash31(float p) {
     ) * 2.0 - 1.0;
 }
 
+// Numerical fit to the dilogarithm Li2(x) for x in [0,1], matching the
+// Gaussian Point Splatting reference. GPS uses 2*pi*sqrt(det(cov))*Li2(alpha)
+// as the opacity-corrected expected point count for a projected Gaussian.
+float dilog(float x) {
+    float s = 1.0 - x;
+    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
+                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
+                    1.992765336) * x + 6.74195669e-05);
+    y += (s > 0.0) ? (s * log(s)) : 0.0;
+    return y;
+}
+
 vec4 fetch_vec4(uint splat_id, int k) {
     int base = k * 4;
     return vec4(
@@ -239,6 +251,17 @@ void main() {
         if (quad_area_px > 16384u) {
             atomicAdd(splat_diagnostics[3].count, 1u);
         }
+
+        float gps_points = 6.28318530718 * sqrt(max(det, 0.0)) * dilog(clamp(opacity, 0.0, 1.0));
+        uint gps_point_count = uint(min(ceil(gps_points), 4294967295.0));
+        atomicAdd(splat_diagnostics[4].count, (gps_point_count + 1023u) >> 10u);
+        atomicMax(splat_diagnostics[5].count, gps_point_count);
+        if (gps_point_count > 1024u) {
+            atomicAdd(splat_diagnostics[6].count, 1u);
+        }
+        if (gps_point_count > 16384u) {
+            atomicAdd(splat_diagnostics[7].count, 1u);
+        }
     }
 
     float ndc_z = (proj[2][2] * p_view.z + proj[3][2]) / (-p_view.z);
@@ -374,6 +397,10 @@ void main() {
         splat_diagnostics[1].count = 0u;
         splat_diagnostics[2].count = 0u;
         splat_diagnostics[3].count = 0u;
+        splat_diagnostics[4].count = 0u;
+        splat_diagnostics[5].count = 0u;
+        splat_diagnostics[6].count = 0u;
+        splat_diagnostics[7].count = 0u;
     }
     if (idx < uint(sort_count)) {
         output_splat_ids[idx].count = 0xFFFFFFFFu;

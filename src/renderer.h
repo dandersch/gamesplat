@@ -30,6 +30,10 @@ struct SplatDiagnostics {
     uint32_t max_quad_px;           // largest projected bbox area in pixels
     uint32_t splats_over_1k_px;     // projected bbox area > 1K pixels
     uint32_t splats_over_16k_px;    // projected bbox area > 16K pixels
+    uint32_t total_gps_kpoints;     // estimated Gaussian Point Splatting points / 1024
+    uint32_t max_gps_points;        // largest estimated GPS point count
+    uint32_t gps_splats_over_1k_points;
+    uint32_t gps_splats_over_16k_points;
     bool     valid;
 };
 
