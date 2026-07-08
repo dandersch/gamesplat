@@ -208,6 +208,11 @@ static float halton(uint32_t index, uint32_t base) {
     return r;
 }
 
+struct StochasticSampleViews {
+    sg_view color_texture;
+    sg_view depth_texture;
+};
+
 static bool renderer_create_shader_pipelines(Renderer* r) {
     // --- Splat pipeline -------------------------------------------------
     {
@@ -1504,6 +1509,11 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticSplats, splat_jitter_px);
             sg_end_pass();
 
+            StochasticSampleViews current_sample = {
+                r->stochastic_sample_texture_view,
+                r->stochastic_depth_texture_view,
+            };
+
             if (use_taa && render_samples > 1) {
                 uint32_t avg_write_index = sample_i & 1u;
                 uint32_t avg_read_index = (avg_write_index + 1u) & 1u;
@@ -1516,10 +1526,10 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
                 sg_begin_pass(&avg_pass);
                 sg_apply_pipeline(r->accum_pipeline);
                 sg_bindings avg_bnd = {};
-                avg_bnd.views[VIEW_sample_tex] = r->stochastic_sample_texture_view;
+                avg_bnd.views[VIEW_sample_tex] = current_sample.color_texture;
                 avg_bnd.samplers[SMP_sample_smp] = r->accum_sampler;
                 avg_bnd.views[VIEW_history_tex] = (sample_i == 0)
-                    ? r->stochastic_sample_texture_view
+                    ? current_sample.color_texture
                     : r->stochastic_frame_avg_texture_views[avg_read_index];
                 avg_bnd.samplers[SMP_history_smp] = r->accum_sampler;
                 sg_apply_bindings(&avg_bnd);
@@ -1545,10 +1555,10 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
                 sg_begin_pass(&accum_pass);
                 sg_apply_pipeline(r->accum_pipeline);
                 sg_bindings accum_bnd = {};
-                accum_bnd.views[VIEW_sample_tex] = r->stochastic_sample_texture_view;
+                accum_bnd.views[VIEW_sample_tex] = current_sample.color_texture;
                 accum_bnd.samplers[SMP_sample_smp] = r->accum_sampler;
                 accum_bnd.views[VIEW_history_tex] = (next_sample_count == 1)
-                    ? r->stochastic_sample_texture_view
+                    ? current_sample.color_texture
                     : r->stochastic_accum_texture_views[read_index];
                 accum_bnd.samplers[SMP_history_smp] = r->accum_sampler;
                 sg_apply_bindings(&accum_bnd);
@@ -1582,10 +1592,14 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             taa_pass.attachments.colors[1] = r->stochastic_taa_xyz_color_views[write_index];
             sg_begin_pass(&taa_pass);
             sg_apply_pipeline(r->taa_accum_pipeline);
+            StochasticSampleViews current_sample = {
+                current_taa_view,
+                r->stochastic_depth_texture_view,
+            };
             sg_bindings taa_bnd = {};
-            taa_bnd.views[VIEW_current_color_tex] = current_taa_view;
+            taa_bnd.views[VIEW_current_color_tex] = current_sample.color_texture;
             taa_bnd.samplers[SMP_current_color_smp] = r->accum_sampler;
-            taa_bnd.views[VIEW_current_depth_tex] = r->stochastic_depth_texture_view;
+            taa_bnd.views[VIEW_current_depth_tex] = current_sample.depth_texture;
             taa_bnd.samplers[SMP_current_depth_smp] = r->accum_sampler;
             taa_bnd.views[VIEW_history_color_tex] = r->stochastic_accum_texture_views[read_index];
             taa_bnd.samplers[SMP_history_color_smp] = r->accum_sampler;
