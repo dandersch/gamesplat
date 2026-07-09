@@ -981,6 +981,24 @@ static void renderer_destroy_stochastic_targets(Renderer* r) {
     renderer_reset_stochastic_accumulation(r);
 }
 
+static void gps_gpu_release(GaussianPointSplatGpu* gps) {
+    if (gps->point_count_buffer_view.id) sg_destroy_view(gps->point_count_buffer_view);
+    if (gps->point_count_buffer.id)      sg_destroy_buffer(gps->point_count_buffer);
+    if (gps->point_offset_buffer_view.id) sg_destroy_view(gps->point_offset_buffer_view);
+    if (gps->point_offset_buffer.id)      sg_destroy_buffer(gps->point_offset_buffer);
+    if (gps->point_work_buffer_view.id) sg_destroy_view(gps->point_work_buffer_view);
+    if (gps->point_work_buffer.id)      sg_destroy_buffer(gps->point_work_buffer);
+    if (gps->atomic_color_depth_storage_view.id) sg_destroy_view(gps->atomic_color_depth_storage_view);
+    if (gps->atomic_color_depth_image.id)        sg_destroy_image(gps->atomic_color_depth_image);
+    if (gps->resolved_color_texture_view.id) sg_destroy_view(gps->resolved_color_texture_view);
+    if (gps->resolved_color_view.id)         sg_destroy_view(gps->resolved_color_view);
+    if (gps->resolved_color_image.id)        sg_destroy_image(gps->resolved_color_image);
+    if (gps->resolved_depth_texture_view.id) sg_destroy_view(gps->resolved_depth_texture_view);
+    if (gps->resolved_depth_view.id)         sg_destroy_view(gps->resolved_depth_view);
+    if (gps->resolved_depth_image.id)        sg_destroy_image(gps->resolved_depth_image);
+    *gps = {};
+}
+
 static sg_view make_texture_view(sg_image image, const char* label) {
     sg_view_desc vd = {};
     vd.texture.image = image;
@@ -1720,6 +1738,7 @@ void renderer_destroy(Renderer* r) {
     if (r->splat_diagnostics_buffer_view.id) sg_destroy_view(r->splat_diagnostics_buffer_view);
     if (r->splat_diagnostics_buffer.id) sg_destroy_buffer(r->splat_diagnostics_buffer);
     renderer_destroy_stochastic_targets(r);
+    gps_gpu_release(&r->gps_gpu);
     if (r->cube_vertex_buffer.id) sg_destroy_buffer(r->cube_vertex_buffer);
     if (r->cube_index_buffer.id)  sg_destroy_buffer(r->cube_index_buffer);
     if (r->unsorted_index_buffer_view.id) sg_destroy_view(r->unsorted_index_buffer_view);

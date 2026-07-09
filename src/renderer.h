@@ -70,6 +70,30 @@ struct MeshGpu {
     uint32_t     submesh_count;
 };
 
+// Reserved resource bucket for the future Gaussian Point Splatting backend.
+// GPS will use compute passes rather than the current quad fragment pipeline:
+// per-Gaussian point counts -> distributed point work -> atomic point buffer ->
+// resolved stochastic color/depth sample consumed by the existing accumulation.
+struct GaussianPointSplatGpu {
+    sg_buffer point_count_buffer;
+    sg_view   point_count_buffer_view;
+    sg_buffer point_offset_buffer;
+    sg_view   point_offset_buffer_view;
+    sg_buffer point_work_buffer;
+    sg_view   point_work_buffer_view;
+    sg_image  atomic_color_depth_image;
+    sg_view   atomic_color_depth_storage_view;
+    sg_image  resolved_color_image;
+    sg_view   resolved_color_view;
+    sg_view   resolved_color_texture_view;
+    sg_image  resolved_depth_image;
+    sg_view   resolved_depth_view;
+    sg_view   resolved_depth_texture_view;
+    uint32_t  width;
+    uint32_t  height;
+    uint32_t  max_points;
+};
+
 struct Renderer {
     SplatRenderMode splat_render_mode;
     sg_pipeline     splat_pipeline;
@@ -111,6 +135,7 @@ struct Renderer {
     MeshGpu         mesh_gpu;               // primary animated mesh (--mesh)
     MeshGpu         object_gpu;             // static scene object (--object)
     sg_sampler      mesh_sampler;
+    GaussianPointSplatGpu gps_gpu;
     MeshTransform   mesh_transform;         // translation/rotation/scale applied each frame to mesh_gpu
     MeshTransform   object_transform;       // applied each frame to object_gpu (identity by default)
     sg_buffer       unsorted_index_buffer;  // GPU-written per-instance visible-index storage buffer
