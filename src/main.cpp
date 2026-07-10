@@ -905,6 +905,16 @@ static void app_frame(void) {
             state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
+        const GpsCapabilities& gps_caps = state->renderer.gps_capabilities;
+        ImGui::TextDisabled("GPS backend: %s", gps_caps.supported ? "available (not implemented)" : "unavailable");
+        if (!gps_caps.supported && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Requires compute, storage images, shader int64, and 64-bit atomic min.\n"
+                              "Detected: compute=%d storage_images=%d shader_int64=%d atomic_min_64=%d",
+                              gps_caps.compute ? 1 : 0,
+                              gps_caps.storage_images ? 1 : 0,
+                              gps_caps.shader_int64 ? 1 : 0,
+                              gps_caps.atomic_min_64 ? 1 : 0);
+        }
         if (state->renderer.splat_render_mode == SplatRenderMode::StochasticSplats) {
             if (ImGui::Checkbox("ST TAA", &state->renderer.stochastic_taa_enabled)) {
                 renderer_reset_stochastic_accumulation(&state->renderer);

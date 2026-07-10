@@ -37,6 +37,14 @@ struct SplatDiagnostics {
     bool     valid;
 };
 
+struct GpsCapabilities {
+    bool compute;
+    bool storage_images;
+    bool shader_int64;
+    bool atomic_min_64;
+    bool supported;
+};
+
 // Shader-only splat effect parameters. The vec4-style layout mirrors the
 // SplatEffectUBO in shaders/splat.glsl and keeps uniform packing simple:
 // center_radius.xyz = effect center, .w = scene radius;
@@ -145,6 +153,7 @@ struct Renderer {
     uint32_t        gaussian_count;
     bool            splat_diagnostics_enabled;
     SplatDiagnostics splat_diagnostics;
+    GpsCapabilities gps_capabilities;
     // SH degree cap (0..3) applied in the cull compute shader; lower degrees
     // skip the corresponding sh_rest fetches and basis-term ALU.
     int             sh_degree;

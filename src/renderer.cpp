@@ -197,6 +197,43 @@ static bool mat4_inverse(const float m[16], float inv_out[16]) {
     return true;
 }
 
+#if defined(SOKOL_GLCORE)
+static bool gl_has_extension(const char* name) {
+    GLint extension_count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+    for (GLint i = 0; i < extension_count; ++i) {
+        const char* extension = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (extension && strcmp(extension, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+static GpsCapabilities renderer_query_gps_capabilities(void) {
+    GpsCapabilities caps = {};
+    sg_features features = sg_query_features();
+    sg_limits limits = sg_query_limits();
+
+    caps.compute = features.compute;
+    caps.storage_images = limits.max_storage_image_bindings_per_stage > 0;
+
+#if defined(SOKOL_GLCORE)
+    // GPS needs 64-bit packed depth/color atomics. Sokol exposes compute and
+    // storage-image limits, but not shader-int64/64-bit atomic support, so GL
+    // backends query the relevant extensions directly. Other backends stay
+    // unsupported until their shader/codegen path is explicitly validated.
+    caps.shader_int64 = gl_has_extension("GL_ARB_gpu_shader_int64");
+    caps.atomic_min_64 = gl_has_extension("GL_NV_shader_atomic_int64") ||
+                         gl_has_extension("GL_EXT_shader_image_int64");
+#endif
+
+    caps.supported = caps.compute && caps.storage_images &&
+                     caps.shader_int64 && caps.atomic_min_64;
+    return caps;
+}
+
 static float halton(uint32_t index, uint32_t base) {
     float f = 1.0f;
     float r = 0.0f;
@@ -495,6 +532,15 @@ bool renderer_init(Renderer* r) {
     if (!renderer_create_shader_pipelines(r)) {
         return false;
     }
+
+    r->gps_capabilities = renderer_query_gps_capabilities();
+    LOG(INFO|RENDERER|INIT,
+        "GPS capabilities: compute=%d storage_images=%d shader_int64=%d atomic_min_64=%d supported=%d",
+        r->gps_capabilities.compute ? 1 : 0,
+        r->gps_capabilities.storage_images ? 1 : 0,
+        r->gps_capabilities.shader_int64 ? 1 : 0,
+        r->gps_capabilities.atomic_min_64 ? 1 : 0,
+        r->gps_capabilities.supported ? 1 : 0);
 
     // --- Samplers -------------------------------------------------------
     {
