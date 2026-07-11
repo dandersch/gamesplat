@@ -64,6 +64,7 @@ _Pragma ("GCC diagnostic pop")
 #include "shaders/mesh.glsl.h"
 #include "shaders/splat.glsl.h"
 #include "shaders/accum.glsl.h"
+#include "shaders/gps.glsl.h"
 
 #if defined(_MSC_VER)
   #define GSPLAT_HOTRELOAD_EXPORT extern "C" __declspec(dllexport)

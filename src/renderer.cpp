@@ -30,6 +30,7 @@
 #include "shaders/cull.glsl.h"
 #include "shaders/sort.glsl.h"
 #include "shaders/accum.glsl.h"
+#include "shaders/gps.glsl.h"
 
 sg_pixel_format renderer_default_color_format(void) {
     if (sg_isvalid()) {
@@ -54,6 +55,9 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->radix_hist_pipeline);
     renderer_destroy_shader_pipeline(&r->radix_prefix_pipeline);
     renderer_destroy_shader_pipeline(&r->radix_scatter_pipeline);
+    renderer_destroy_shader_pipeline(&r->gps_clear_pipeline);
+    renderer_destroy_shader_pipeline(&r->gps_splat_pipeline);
+    renderer_destroy_shader_pipeline(&r->gps_resolve_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
     renderer_destroy_shader_pipeline(&r->taa_accum_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
@@ -335,6 +339,38 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->radix_scatter_pipeline = sg_make_pipeline(&pd);
     }
 
+    // --- Experimental Gaussian Point Splatting prototype pipelines -------
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(gps_clear_shader_desc(sg_query_backend()));
+        pd.label = "gps-clear-pipeline";
+        r->gps_clear_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.compute = true;
+        pd.shader = sg_make_shader(gps_splat_shader_desc(sg_query_backend()));
+        pd.label = "gps-splat-pipeline";
+        r->gps_splat_pipeline = sg_make_pipeline(&pd);
+    }
+    {
+        sg_pipeline_desc pd = {};
+        pd.shader = sg_make_shader(gps_resolve_shader_desc(sg_query_backend()));
+        pd.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+        pd.cull_mode = SG_CULLMODE_NONE;
+        pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
+        pd.color_count = 2;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F;
+        pd.colors[0].blend.enabled = false;
+        pd.colors[0].write_mask = SG_COLORMASK_RGBA;
+        pd.colors[1].pixel_format = SG_PIXELFORMAT_R32F;
+        pd.colors[1].blend.enabled = false;
+        pd.colors[1].write_mask = SG_COLORMASK_R;
+        pd.label = "gps-resolve-pipeline";
+        r->gps_resolve_pipeline = sg_make_pipeline(&pd);
+    }
+
     // --- Fullscreen accumulation/display pipelines ----------------------
     {
         sg_pipeline_desc pd = {};
@@ -498,6 +534,8 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
 
     bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
               r->cull_pipeline.id && r->cull_reset_pipeline.id &&
+              r->gps_clear_pipeline.id && r->gps_splat_pipeline.id &&
+              r->gps_resolve_pipeline.id &&
               r->accum_pipeline.id && r->taa_accum_pipeline.id &&
               r->blit_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
@@ -1028,6 +1066,10 @@ static void renderer_destroy_stochastic_targets(Renderer* r) {
 }
 
 static void gps_gpu_release(GaussianPointSplatGpu* gps) {
+    if (gps->depth_key_buffer_view.id) sg_destroy_view(gps->depth_key_buffer_view);
+    if (gps->depth_key_buffer.id)      sg_destroy_buffer(gps->depth_key_buffer);
+    if (gps->color_buffer_view.id) sg_destroy_view(gps->color_buffer_view);
+    if (gps->color_buffer.id)      sg_destroy_buffer(gps->color_buffer);
     if (gps->point_count_buffer_view.id) sg_destroy_view(gps->point_count_buffer_view);
     if (gps->point_count_buffer.id)      sg_destroy_buffer(gps->point_count_buffer);
     if (gps->point_offset_buffer_view.id) sg_destroy_view(gps->point_offset_buffer_view);
@@ -1057,6 +1099,70 @@ static sg_view make_color_attachment_view(sg_image image, const char* label) {
     vd.color_attachment.image = image;
     vd.label = label;
     return sg_make_view(&vd);
+}
+
+static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+
+    GaussianPointSplatGpu* gps = &r->gps_gpu;
+    if (gps->width == (uint32_t)width && gps->height == (uint32_t)height &&
+        gps->depth_key_buffer.id && gps->color_buffer.id &&
+        gps->resolved_color_image.id && gps->resolved_depth_image.id) {
+        return true;
+    }
+
+    gps_gpu_release(gps);
+
+    const uint32_t pixel_count = (uint32_t)width * (uint32_t)height;
+
+    sg_buffer_desc bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = pixel_count * sizeof(uint32_t);
+    bd.label = "gps-depth-key-buffer";
+    gps->depth_key_buffer = sg_make_buffer(&bd);
+
+    sg_view_desc vd = {};
+    vd.storage_buffer.buffer = gps->depth_key_buffer;
+    vd.label = "gps-depth-key-buffer-view";
+    gps->depth_key_buffer_view = sg_make_view(&vd);
+
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = pixel_count * sizeof(uint32_t);
+    bd.label = "gps-color-buffer";
+    gps->color_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = gps->color_buffer;
+    vd.label = "gps-color-buffer-view";
+    gps->color_buffer_view = sg_make_view(&vd);
+
+    sg_image_desc color_desc = {};
+    color_desc.type = SG_IMAGETYPE_2D;
+    color_desc.width = width;
+    color_desc.height = height;
+    color_desc.num_slices = 1;
+    color_desc.num_mipmaps = 1;
+    color_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    color_desc.usage.color_attachment = true;
+    color_desc.label = "gps-resolved-color";
+    gps->resolved_color_image = sg_make_image(&color_desc);
+    gps->resolved_color_view = make_color_attachment_view(gps->resolved_color_image, "gps-resolved-color-att-view");
+    gps->resolved_color_texture_view = make_texture_view(gps->resolved_color_image, "gps-resolved-color-tex-view");
+
+    sg_image_desc depth_desc = color_desc;
+    depth_desc.pixel_format = SG_PIXELFORMAT_R32F;
+    depth_desc.label = "gps-resolved-depth";
+    gps->resolved_depth_image = sg_make_image(&depth_desc);
+    gps->resolved_depth_view = make_color_attachment_view(gps->resolved_depth_image, "gps-resolved-depth-att-view");
+    gps->resolved_depth_texture_view = make_texture_view(gps->resolved_depth_image, "gps-resolved-depth-tex-view");
+
+    gps->width = (uint32_t)width;
+    gps->height = (uint32_t)height;
+
+    return gps->depth_key_buffer_view.id && gps->color_buffer_view.id &&
+           gps->resolved_color_view.id && gps->resolved_color_texture_view.id &&
+           gps->resolved_depth_view.id && gps->resolved_depth_texture_view.id;
 }
 
 static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int height) {
@@ -1469,6 +1575,76 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
     }
 }
 
+static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam) {
+    GaussianPointSplatGpu* gps = &r->gps_gpu;
+    const uint32_t pixel_count = gps->width * gps->height;
+    if (pixel_count == 0 || !r->gps_clear_pipeline.id || !r->gps_splat_pipeline.id ||
+        !r->gps_resolve_pipeline.id || !gps->depth_key_buffer_view.id ||
+        !gps->color_buffer_view.id || !r->projected_splat_buffer_view.id ||
+        !r->unsorted_index_buffer_view.id) {
+        return false;
+    }
+
+    {
+        sg_pass pass = {};
+        pass.compute = true;
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->gps_clear_pipeline);
+        sg_bindings bnd = {};
+        bnd.views[VIEW_GpsClearDepthKeys] = gps->depth_key_buffer_view;
+        bnd.views[VIEW_GpsClearColors] = gps->color_buffer_view;
+        sg_apply_bindings(&bnd);
+        GpsClearUBO_t u = {};
+        u.pixel_count = (int)pixel_count;
+        sg_apply_uniforms(UB_GpsClearUBO, SG_RANGE_REF(u));
+        sg_dispatch((int)((pixel_count + 255u) / 256u), 1, 1);
+        sg_end_pass();
+    }
+
+    if (scene->gaussian_count > 0) {
+        sg_pass pass = {};
+        pass.compute = true;
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->gps_splat_pipeline);
+        sg_bindings bnd = {};
+        bnd.views[VIEW_GpsProjectedSplatBuffer] = r->projected_splat_buffer_view;
+        bnd.views[VIEW_GpsSplatIdBuffer] = r->unsorted_index_buffer_view;
+        bnd.views[VIEW_GpsDepthKeys] = gps->depth_key_buffer_view;
+        bnd.views[VIEW_GpsColors] = gps->color_buffer_view;
+        sg_apply_bindings(&bnd);
+        GpsSplatUBO_t u = {};
+        u.viewport[0] = cam->viewport[0];
+        u.viewport[1] = cam->viewport[1];
+        u.gaussian_count = (int)scene->gaussian_count;
+        u.clip_z_01 = cam->clip_z_01;
+        sg_apply_uniforms(UB_GpsSplatUBO, SG_RANGE_REF(u));
+        sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
+        sg_end_pass();
+    }
+
+    sg_pass pass = {};
+    pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE;
+    pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+    pass.action.colors[1].load_action = SG_LOADACTION_DONTCARE;
+    pass.action.colors[1].store_action = SG_STOREACTION_STORE;
+    pass.attachments.colors[0] = gps->resolved_color_view;
+    pass.attachments.colors[1] = gps->resolved_depth_view;
+    sg_begin_pass(&pass);
+    sg_apply_pipeline(r->gps_resolve_pipeline);
+    sg_bindings bnd = {};
+    bnd.views[VIEW_GpsResolveDepthKeys] = gps->depth_key_buffer_view;
+    bnd.views[VIEW_GpsResolveColors] = gps->color_buffer_view;
+    sg_apply_bindings(&bnd);
+    GpsResolveUBO_t u = {};
+    u.viewport[0] = cam->viewport[0];
+    u.viewport[1] = cam->viewport[1];
+    sg_apply_uniforms(UB_GpsResolveUBO, SG_RANGE_REF(u));
+    sg_draw(0, 3, 1);
+    sg_end_pass();
+
+    return true;
+}
+
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
                          const OverlayParams* overlay, const NodeRenderParams* nodes,
                          const SplatEffectParams* splat_effect,
@@ -1477,6 +1653,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
 
     const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticSplats);
+    const bool gps = (r->splat_render_mode == SplatRenderMode::GaussianPointSplatting);
 
     if (scene->gaussian_count > 0) {
         PROFILE("gaussian gpu cull/project") {
@@ -1484,9 +1661,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         renderer_cull_gaussians_gpu(r, scene, cam, splat_effect);
         }
         }
-        if (stochastic) {
+        if (stochastic || gps) {
             // Sokol doesn't expose an indirect draw count here, so stochastic
-            // mode draws one instance per gaussian; the shader skips UINT_MAX
+            // modes draw one instance per gaussian; the shader skips UINT_MAX
             // entries written by the cull/project pass.
             scene->visible_count = scene->gaussian_count;
         } else {
@@ -1504,6 +1681,78 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
     int win_w = sapp_width();
     int win_h = sapp_height();
+
+    if (gps) {
+        if (!r->gps_capabilities.compute || !renderer_ensure_stochastic_targets(r, win_w, win_h) ||
+            !renderer_ensure_gps_targets(r, win_w, win_h)) {
+            LOG(ERROR|RENDERER|RESOURCE, "Failed to create GPS prototype targets");
+            return;
+        }
+
+        if (r->stochastic_prev_cam_valid && memcmp(&r->stochastic_prev_cam, cam, sizeof(*cam)) != 0) {
+            renderer_reset_stochastic_accumulation(r);
+        }
+        memcpy(&r->stochastic_prev_cam, cam, sizeof(*cam));
+        r->stochastic_prev_cam_valid = true;
+
+        if (!renderer_draw_gps_sample(r, scene, cam)) {
+            LOG(ERROR|RENDERER|RESOURCE, "Failed to draw GPS prototype sample");
+            return;
+        }
+
+        uint32_t write_index = r->stochastic_accum_write_index & 1u;
+        uint32_t read_index = (write_index + 1u) & 1u;
+        uint32_t next_sample_count = r->stochastic_sample_count + 1u;
+
+        sg_pass accum_pass = {};
+        accum_pass.action.colors[0].load_action = (next_sample_count == 1u) ? SG_LOADACTION_CLEAR : SG_LOADACTION_DONTCARE;
+        accum_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+        accum_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        accum_pass.attachments.colors[0] = r->stochastic_accum_color_views[write_index];
+        sg_begin_pass(&accum_pass);
+        sg_apply_pipeline(r->accum_pipeline);
+        sg_bindings accum_bnd = {};
+        accum_bnd.views[VIEW_sample_tex] = r->gps_gpu.resolved_color_texture_view;
+        accum_bnd.samplers[SMP_sample_smp] = r->accum_sampler;
+        accum_bnd.views[VIEW_history_tex] = (next_sample_count == 1u)
+            ? r->gps_gpu.resolved_color_texture_view
+            : r->stochastic_accum_texture_views[read_index];
+        accum_bnd.samplers[SMP_history_smp] = r->accum_sampler;
+        sg_apply_bindings(&accum_bnd);
+        AccumUBO_t accum_ubo = {};
+        accum_ubo.sample_count = (float)next_sample_count;
+        sg_apply_uniforms(UB_AccumUBO, SG_RANGE_REF(accum_ubo));
+        sg_draw(0, 3, 1);
+        sg_end_pass();
+
+        r->stochastic_sample_count = next_sample_count;
+        r->stochastic_accum_write_index = (write_index + 1u) & 1u;
+
+        sg_pass pass = {};
+        pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+        pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+        pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        pass.swapchain = sglue_swapchain();
+
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->blit_pipeline);
+        sg_bindings blit_bnd = {};
+        blit_bnd.views[VIEW_display_tex] = r->stochastic_accum_texture_views[write_index];
+        blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
+        sg_apply_bindings(&blit_bnd);
+        sg_draw(0, 3, 1);
+        PROFILE("render imgui pass") {
+        PROFILE_GPU("imgui pass") {
+        simgui_render();
+        }
+        }
+        sg_end_pass();
+        PROFILE("render commit") {
+        sg_commit();
+        PROFILE_GPU_COLLECT();
+        }
+        return;
+    }
 
     if (stochastic) {
         if (!renderer_ensure_stochastic_targets(r, win_w, win_h)) {

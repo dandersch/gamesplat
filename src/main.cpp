@@ -900,15 +900,16 @@ static void app_frame(void) {
     if (state->scene_loaded) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
         int render_mode = (int)state->renderer.splat_render_mode;
-        const char* render_mode_labels[] = { "Alpha Blend / Sorted", "StochasticSplats" };
-        if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 2)) {
+        const char* render_mode_labels[] = { "Alpha Blend / Sorted", "StochasticSplats", "GPS Prototype" };
+        if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 3)) {
             state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
         const GpsCapabilities& gps_caps = state->renderer.gps_capabilities;
-        ImGui::TextDisabled("GPS backend: %s", gps_caps.supported ? "available (not implemented)" : "unavailable");
+        ImGui::TextDisabled("GPS backend: %s", gps_caps.compute ? "prototype available" : "unavailable");
         if (!gps_caps.supported && ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Requires compute, storage images, shader int64, and 64-bit atomic min.\n"
+                              "Prototype mode currently requires compute only.\n"
                               "Detected: compute=%d storage_images=%d shader_int64=%d atomic_min_64=%d",
                               gps_caps.compute ? 1 : 0,
                               gps_caps.storage_images ? 1 : 0,
