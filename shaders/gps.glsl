@@ -52,6 +52,10 @@ layout(binding = 0) uniform GpsSplatUBO {
     vec2 viewport;
     int gaussian_count;
     float clip_z_01;
+    int samples_per_gaussian;
+    float frame_seed;
+    float splat_pad0;
+    float splat_pad1;
 };
 
 layout(binding = 0) readonly buffer GpsProjectedSplatBuffer {
@@ -72,12 +76,6 @@ layout(binding = 3) buffer GpsColors {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-uint pack_rgb8(vec3 color) {
-    vec3 c = clamp(color, vec3(0.0), vec3(1.0));
-    uvec3 rgb = uvec3(round(c * 255.0));
-    return rgb.r | (rgb.g << 8u) | (rgb.b << 16u) | 0xFF000000u;
-}
-
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uint(gaussian_count)) return;
@@ -85,20 +83,55 @@ void main() {
     uint splat_id = splat_ids[idx].count;
     if (splat_id == 0xFFFFFFFFu) return;
 
-    GpsProjectedSplatData projected = projected_splats[splat_id];
-    if (projected.color_opacity.a <= 0.0) return;
+    vec4 color_opacity = projected_splats[splat_id].color_opacity;
+    if (color_opacity.a <= 0.0) return;
 
-    ivec2 pixel = ivec2(floor(projected.center_radius.xy + vec2(0.5)));
+    vec3 color = color_opacity.rgb;
+    vec2 mean = projected_splats[splat_id].center_radius.xy;
+    vec4 covariance_det = projected_splats[splat_id].covariance_det;
+    float ndc_depth = projected_splats[splat_id].conic_depth.w;
+    float cov_a = max(covariance_det.x, 1.0e-5);
+    float cov_b = covariance_det.y;
+    float cov_c = max(covariance_det.z, 1.0e-5);
+    float l00 = sqrt(cov_a);
+    float l10 = cov_b / l00;
+    float l11 = sqrt(max(cov_c - l10 * l10, 1.0e-5));
+
     ivec2 extent = ivec2(viewport);
-    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= extent.x || pixel.y >= extent.y) return;
-
-    float z = projected.conic_depth.w;
+    float z = ndc_depth;
     z = mix(z * 0.5 + 0.5, z, clip_z_01);
     uint depth_key = uint(clamp(z, 0.0, 1.0) * 4294967294.0);
-    uint pixel_index = uint(pixel.y * extent.x + pixel.x);
-    uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
-    if (depth_key < old_key) {
-        gps_colors[pixel_index].count = pack_rgb8(projected.color_opacity.rgb);
+    vec3 clamped_color = clamp(color, vec3(0.0), vec3(1.0));
+    uvec3 rgb = uvec3(round(clamped_color * 255.0));
+    uint packed_color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u) | 0xFF000000u;
+
+    uvec2 seed = uvec2(
+        splat_id * 747796405u + uint(frame_seed) * 2891336453u,
+        splat_id * 277803737u + 0x9E3779B9u
+    );
+    for (int i = 0; i < 4; ++i) {
+        seed.x += uint(i) * 374761393u;
+        seed = 1664525u * seed + 1013904223u;
+        seed.x += 1664525u * seed.y;
+        seed.y += 1664525u * seed.x;
+        seed ^= (seed >> 16u);
+        seed.x += 1664525u * seed.y;
+        seed.y += 1664525u * seed.x;
+        seed ^= (seed >> 16u);
+        vec2 rands = vec2(seed) * 2.32830643654e-10;
+        float arg = max(1.0e-7, 1.0 - rands.x);
+        float radius = sqrt(-2.0 * log(arg));
+        float azimuth = 6.28318530718 * rands.y;
+        vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
+        vec2 point = mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y);
+        ivec2 pixel = ivec2(floor(point + vec2(0.5)));
+        if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
+            uint pixel_index = uint(pixel.y * extent.x + pixel.x);
+            uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
+            if (depth_key < old_key) {
+                gps_colors[pixel_index].count = packed_color;
+            }
+        }
     }
 }
 @end
