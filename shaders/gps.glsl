@@ -76,6 +76,15 @@ layout(binding = 3) buffer GpsColors {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+float dilog(float x) {
+    float s = 1.0 - x;
+    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
+                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
+                    1.992765336) * x + 6.74195669e-05);
+    y += (s > 0.0) ? (s * log(s)) : 0.0;
+    return y;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uint(gaussian_count)) return;
@@ -109,7 +118,26 @@ void main() {
         splat_id * 747796405u + uint(frame_seed) * 2891336453u,
         splat_id * 277803737u + 0x9E3779B9u
     );
-    for (int i = 0; i < 4; ++i) {
+
+    seed = 1664525u * seed + 1013904223u;
+    seed.x += 1664525u * seed.y;
+    seed.y += 1664525u * seed.x;
+    seed ^= (seed >> 16u);
+    seed.x += 1664525u * seed.y;
+    seed.y += 1664525u * seed.x;
+    seed ^= (seed >> 16u);
+
+    float expected_points = 6.28318530718 * sqrt(max(covariance_det.w, 0.0)) *
+        dilog(clamp(color_opacity.a, 0.0, 1.0));
+    int point_count = int(floor(expected_points));
+    float fractional_point = expected_points - float(point_count);
+    if (float(seed.x) * 2.32830643654e-10 < fractional_point) {
+        point_count += 1;
+    }
+    point_count = clamp(point_count, 0, max(samples_per_gaussian, 0));
+
+    for (int i = 0; i < 32; ++i) {
+        if (i >= point_count) break;
         seed.x += uint(i) * 374761393u;
         seed = 1664525u * seed + 1013904223u;
         seed.x += 1664525u * seed.y;

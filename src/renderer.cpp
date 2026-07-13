@@ -1617,7 +1617,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         u.viewport[1] = cam->viewport[1];
         u.gaussian_count = (int)scene->gaussian_count;
         u.clip_z_01 = cam->clip_z_01;
-        u.samples_per_gaussian = 4;
+        u.samples_per_gaussian = 16;
         u.frame_seed = (float)r->stochastic_frame_seed;
         sg_apply_uniforms(UB_GpsSplatUBO, SG_RANGE_REF(u));
         sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
