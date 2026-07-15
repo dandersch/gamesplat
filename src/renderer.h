@@ -116,6 +116,7 @@ struct Renderer {
     sg_pipeline     radix_prefix_pipeline;
     sg_pipeline     radix_scatter_pipeline;
     sg_pipeline     gps_clear_pipeline;
+    sg_pipeline     gps_count_pipeline;
     sg_pipeline     gps_splat_pipeline;
     sg_pipeline     gps_resolve_pipeline;
     sg_pipeline     accum_pipeline;

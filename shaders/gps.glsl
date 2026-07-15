@@ -32,6 +32,72 @@ void main() {
 
 @program gps_clear gps_clear_cs
 
+@cs gps_count_cs
+struct GpsCountProjectedSplatData {
+    vec4 color_opacity; // rgb color, a opacity
+    vec4 center_radius; // xy raster-space center, zw raster-space radius
+    vec4 conic_depth;   // xyz inverse covariance/conic, w ndc depth
+    vec4 covariance_det; // xyz screen-space covariance (a,b,c), w determinant
+};
+
+struct GpsCountSplatIdData {
+    uint count;
+};
+
+struct GpsCountUIntData {
+    uint count;
+};
+
+layout(binding = 0) uniform GpsCountUBO {
+    int gaussian_count;
+    int max_points_per_gaussian;
+    float count_pad0;
+    float count_pad1;
+};
+
+layout(binding = 0) readonly buffer GpsCountProjectedSplatBuffer {
+    GpsCountProjectedSplatData projected_splats[];
+};
+
+layout(binding = 1) readonly buffer GpsCountSplatIdBuffer {
+    GpsCountSplatIdData splat_ids[];
+};
+
+layout(binding = 2) buffer GpsPointCounts {
+    GpsCountUIntData point_counts[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+float dilog(float x) {
+    float s = 1.0 - x;
+    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
+                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
+                    1.992765336) * x + 6.74195669e-05);
+    y += (s > 0.0) ? (s * log(s)) : 0.0;
+    return y;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(gaussian_count)) return;
+
+    uint splat_id = splat_ids[idx].count;
+    if (splat_id == 0xFFFFFFFFu) {
+        point_counts[idx].count = 0u;
+        return;
+    }
+
+    vec4 color_opacity = projected_splats[splat_id].color_opacity;
+    float expected_points = 6.28318530718 * sqrt(max(projected_splats[splat_id].covariance_det.w, 0.0)) *
+        dilog(clamp(color_opacity.a, 0.0, 1.0));
+    uint point_count = uint(clamp(ceil(expected_points), 0.0, float(max(max_points_per_gaussian, 0))));
+    point_counts[idx].count = point_count;
+}
+@end
+
+@program gps_count gps_count_cs
+
 @cs gps_splat_cs
 struct GpsProjectedSplatData {
     vec4 color_opacity; // rgb color, a opacity
@@ -52,9 +118,9 @@ layout(binding = 0) uniform GpsSplatUBO {
     vec2 viewport;
     int gaussian_count;
     float clip_z_01;
-    int samples_per_gaussian;
+    int max_points_per_gaussian;
     float frame_seed;
-    float splat_pad0;
+    int work_items_per_row;
     float splat_pad1;
 };
 
@@ -74,20 +140,19 @@ layout(binding = 3) buffer GpsColors {
     GpsSplatUIntData gps_colors[];
 };
 
+layout(binding = 4) readonly buffer GpsSplatPointCounts {
+    GpsSplatUIntData point_counts[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-float dilog(float x) {
-    float s = 1.0 - x;
-    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
-                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
-                    1.992765336) * x + 6.74195669e-05);
-    y += (s > 0.0) ? (s * log(s)) : 0.0;
-    return y;
-}
-
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
+    uint work_idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(work_items_per_row);
+    uint max_points = uint(max(max_points_per_gaussian, 1));
+    uint idx = work_idx / max_points;
+    uint sample_idx = work_idx - idx * max_points;
     if (idx >= uint(gaussian_count)) return;
+    if (sample_idx >= point_counts[idx].count) return;
 
     uint splat_id = splat_ids[idx].count;
     if (splat_id == 0xFFFFFFFFu) return;
@@ -119,6 +184,7 @@ void main() {
         splat_id * 277803737u + 0x9E3779B9u
     );
 
+    seed.x += sample_idx * 374761393u;
     seed = 1664525u * seed + 1013904223u;
     seed.x += 1664525u * seed.y;
     seed.y += 1664525u * seed.x;
@@ -126,39 +192,18 @@ void main() {
     seed.x += 1664525u * seed.y;
     seed.y += 1664525u * seed.x;
     seed ^= (seed >> 16u);
-
-    float expected_points = 6.28318530718 * sqrt(max(covariance_det.w, 0.0)) *
-        dilog(clamp(color_opacity.a, 0.0, 1.0));
-    int point_count = int(floor(expected_points));
-    float fractional_point = expected_points - float(point_count);
-    if (float(seed.x) * 2.32830643654e-10 < fractional_point) {
-        point_count += 1;
-    }
-    point_count = clamp(point_count, 0, max(samples_per_gaussian, 0));
-
-    for (int i = 0; i < 32; ++i) {
-        if (i >= point_count) break;
-        seed.x += uint(i) * 374761393u;
-        seed = 1664525u * seed + 1013904223u;
-        seed.x += 1664525u * seed.y;
-        seed.y += 1664525u * seed.x;
-        seed ^= (seed >> 16u);
-        seed.x += 1664525u * seed.y;
-        seed.y += 1664525u * seed.x;
-        seed ^= (seed >> 16u);
-        vec2 rands = vec2(seed) * 2.32830643654e-10;
-        float arg = max(1.0e-7, 1.0 - rands.x);
-        float radius = sqrt(-2.0 * log(arg));
-        float azimuth = 6.28318530718 * rands.y;
-        vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
-        vec2 point = mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y);
-        ivec2 pixel = ivec2(floor(point + vec2(0.5)));
-        if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
-            uint pixel_index = uint(pixel.y * extent.x + pixel.x);
-            uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
-            if (depth_key < old_key) {
-                gps_colors[pixel_index].count = packed_color;
-            }
+    vec2 rands = vec2(seed) * 2.32830643654e-10;
+    float arg = max(1.0e-7, 1.0 - rands.x);
+    float radius = sqrt(-2.0 * log(arg));
+    float azimuth = 6.28318530718 * rands.y;
+    vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
+    vec2 point = mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y);
+    ivec2 pixel = ivec2(floor(point + vec2(0.5)));
+    if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
+        uint pixel_index = uint(pixel.y * extent.x + pixel.x);
+        uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
+        if (depth_key < old_key) {
+            gps_colors[pixel_index].count = packed_color;
         }
     }
 }
