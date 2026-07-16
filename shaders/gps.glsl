@@ -205,6 +205,22 @@ layout(binding = 4) readonly buffer GpsSplatPointWork {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+float dilog_sample(float x) {
+    float s = 1.0 - x;
+    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
+                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
+                    1.992765336) * x + 6.74195669e-05);
+    y += (s > 0.0) ? (s * log(s)) : 0.0;
+    return y;
+}
+
+float inv_dilog(float x) {
+    return ((((((((((-0.322192871 * x + 2.562830719) * x - 8.669815892) * x +
+                    16.243561492) * x - 18.394710417) * x + 12.891925084) * x -
+                    5.501796628) * x + 1.361194673) * x - 0.417517201) * x +
+                    1.008071981) * x - 6.39879974e-05);
+}
+
 void main() {
     uint work_idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(work_items_per_row);
     if (work_idx >= uint(work_count)) return;
@@ -250,7 +266,10 @@ void main() {
     seed.y += 1664525u * seed.x;
     seed ^= (seed >> 16u);
     vec2 rands = vec2(seed) * 2.32830643654e-10;
-    float arg = max(1.0e-7, 1.0 - rands.x);
+    float alpha = clamp(color_opacity.a, 1.0e-6, 1.0);
+    float dilog_alpha = dilog_sample(alpha);
+    float arg = inv_dilog((1.0 - rands.x) * dilog_alpha) / alpha;
+    arg = clamp(arg, 1.0e-7, 1.0);
     float radius = sqrt(-2.0 * log(arg));
     float azimuth = 6.28318530718 * rands.y;
     vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
