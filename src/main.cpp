@@ -952,13 +952,13 @@ static void app_frame(void) {
                 state->renderer.gps_gpu.supersample_factor = 0;
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
-            int gps_max_points = (int)state->renderer.gps_max_points_per_gaussian;
-            if (ImGui::SliderInt("GPS Max Points / Gaussian", &gps_max_points, 1, 256)) {
-                state->renderer.gps_max_points_per_gaussian = (uint32_t)gps_max_points;
+            int gps_work_budget_m = (int)(state->renderer.gps_max_work_items / (1024u * 1024u));
+            if (ImGui::SliderInt("GPS Work Budget", &gps_work_budget_m, 1, 250, "%dM")) {
+                state->renderer.gps_max_work_items = (uint32_t)gps_work_budget_m * 1024u * 1024u;
                 renderer_upload_gaussians(&state->renderer, &state->scene);
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
-            ImGui::TextDisabled("Higher values allocate larger GPS atomic buffers and emit more points.");
+            ImGui::TextDisabled("Prototype global buffer cap, not a per-Gaussian GPS parameter.");
         }
         if (ImGui::Button("Shockwave Burst")) {
             g_splat_effect_active = true;

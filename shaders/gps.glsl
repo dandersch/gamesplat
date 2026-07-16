@@ -1,7 +1,7 @@
 // Experimental Gaussian Point Splatting prototype.
-// This validates the compute-splat -> resolve -> stochastic display path with
-// one point per projected Gaussian. It intentionally does not implement the
-// final opacity-corrected point counts or 64-bit packed depth/color atomics.
+// This validates the compute-splat -> resolve -> stochastic display path.
+// It still uses a prototype global work budget and does not implement the
+// final 64-bit packed depth/color atomic path.
 
 @cs gps_clear_cs
 struct GpsUIntData {
@@ -60,9 +60,9 @@ struct GpsCountUIntData {
 
 layout(binding = 0) uniform GpsCountUBO {
     int gaussian_count;
-    int max_points_per_gaussian;
     float supersample_factor;
-    float count_pad1;
+    float point_scale;
+    float count_pad0;
 };
 
 layout(binding = 0) readonly buffer GpsCountProjectedSplatBuffer {
@@ -88,6 +88,15 @@ float dilog(float x) {
     return y;
 }
 
+float hash01(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return float(x) * (1.0 / 4294967296.0);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uint(gaussian_count)) return;
@@ -102,7 +111,11 @@ void main() {
     float ss = max(supersample_factor, 1.0);
     float expected_points = ss * ss * 6.28318530718 * sqrt(max(projected_splats[splat_id].covariance_det.w, 0.0)) *
         dilog(clamp(color_opacity.a, 0.0, 1.0));
-    uint point_count = uint(clamp(ceil(expected_points), 0.0, float(max(max_points_per_gaussian, 0))));
+    float scaled_points = max(expected_points * clamp(point_scale, 0.0, 1.0), 0.0);
+    uint point_count = uint(clamp(floor(scaled_points), 0.0, 4294967295.0));
+    if (hash01(splat_id + 0x9e3779b9u) < fract(scaled_points) && point_count < 0xFFFFFFFFu) {
+        point_count += 1u;
+    }
     point_counts[idx].count = point_count;
 }
 @end
@@ -121,7 +134,7 @@ struct GpsWorkData {
 
 layout(binding = 0) uniform GpsExpandUBO {
     int gaussian_count;
-    int expand_pad0;
+    int max_work_items;
     float expand_pad1;
     float expand_pad2;
 };
@@ -149,6 +162,7 @@ void main() {
 
     uint base = atomicAdd(work_count[0].count, count);
     for (uint i = 0u; i < count; ++i) {
+        if (base + i >= uint(max_work_items)) break;
         point_work[base + i].gaussian_id = idx;
         point_work[base + i].sample_id = i;
     }

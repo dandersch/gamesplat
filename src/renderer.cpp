@@ -580,7 +580,7 @@ bool renderer_init(Renderer* r) {
     r->stochastic_samples_per_frame = 1;
     r->stochastic_taa_current_samples = 4;
     r->gps_supersample_factor = 2;
-    r->gps_max_points_per_gaussian = 16;
+    r->gps_max_work_items = 8u * 1024u * 1024u;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -889,10 +889,9 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     bd = {};
     bd.usage.storage_buffer = true;
-    uint32_t max_points_per_gaussian = r->gps_max_points_per_gaussian;
-    if (max_points_per_gaussian < 1u) max_points_per_gaussian = 1u;
-    if (max_points_per_gaussian > 256u) max_points_per_gaussian = 256u;
-    bd.size = scene->gaussian_count * max_points_per_gaussian * sizeof(uint32_t) * 2u;
+    uint32_t max_work_items = r->gps_max_work_items;
+    if (max_work_items < 1u) max_work_items = 1u;
+    bd.size = (size_t)max_work_items * sizeof(uint32_t) * 2u;
     bd.label = "gps-point-work-buffer";
     r->gps_gpu.point_work_buffer = sg_make_buffer(&bd);
 
@@ -900,7 +899,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.storage_buffer.buffer = r->gps_gpu.point_work_buffer;
     vd.label = "gps-point-work-buffer-view";
     r->gps_gpu.point_work_buffer_view = sg_make_view(&vd);
-    r->gps_gpu.max_points = scene->gaussian_count * max_points_per_gaussian;
+    r->gps_gpu.max_work_items = max_work_items;
 
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
@@ -908,7 +907,8 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
 static void renderer_read_splat_diagnostics(Renderer* r) {
     r->splat_diagnostics.valid = false;
-    if (!r->splat_diagnostics_enabled || !r->splat_diagnostics_buffer.id) {
+    const bool gps_needs_diagnostics = r->splat_render_mode == SplatRenderMode::GaussianPointSplatting;
+    if ((!r->splat_diagnostics_enabled && !gps_needs_diagnostics) || !r->splat_diagnostics_buffer.id) {
         return;
     }
 
@@ -960,7 +960,7 @@ static uint32_t renderer_read_gps_work_count(Renderer* r) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
     return count;
 #else
-    return r->gps_gpu.max_points;
+    return r->gps_gpu.max_work_items;
 #endif
 }
 
@@ -1578,7 +1578,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     u.ortho_focal = cam->ortho_focal;
     u.clip_y_sign = cam->clip_y_sign;
     u.clip_z_01 = cam->clip_z_01;
-    u.collect_stats = r->splat_diagnostics_enabled ? 1 : 0;
+    u.collect_stats = (r->splat_diagnostics_enabled || r->splat_render_mode == SplatRenderMode::GaussianPointSplatting) ? 1 : 0;
     u.sh_degree = r->sh_degree;
     u.sh_lod_distance = r->sh_lod_distance;
     sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
@@ -1691,12 +1691,19 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 
 static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam) {
     GaussianPointSplatGpu* gps = &r->gps_gpu;
-    uint32_t max_points_per_gaussian = r->gps_max_points_per_gaussian;
-    if (max_points_per_gaussian < 1u) max_points_per_gaussian = 1u;
-    if (max_points_per_gaussian > 256u) max_points_per_gaussian = 256u;
+    uint32_t max_work_items = gps->max_work_items;
+    if (max_work_items < 1u) max_work_items = 1u;
     uint32_t supersample = r->gps_supersample_factor;
     if (supersample < 1u) supersample = 1u;
     if (supersample > 4u) supersample = 4u;
+    float point_scale = 1.0f;
+    if (r->splat_diagnostics.valid && r->splat_diagnostics.total_gps_kpoints > 0u) {
+        const double estimated_points = (double)r->splat_diagnostics.total_gps_kpoints * 1024.0 *
+                                        (double)supersample * (double)supersample;
+        if (estimated_points > (double)max_work_items) {
+            point_scale = (float)((double)max_work_items / estimated_points);
+        }
+    }
     const uint32_t gps_width = gps->width * supersample;
     const uint32_t gps_height = gps->height * supersample;
     const uint32_t pixel_count = gps_width * gps_height;
@@ -1743,8 +1750,8 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_apply_bindings(&bnd);
             GpsCountUBO_t u = {};
             u.gaussian_count = (int)scene->gaussian_count;
-            u.max_points_per_gaussian = (int)max_points_per_gaussian;
             u.supersample_factor = (float)supersample;
+            u.point_scale = point_scale;
             sg_apply_uniforms(UB_GpsCountUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
@@ -1762,14 +1769,15 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_apply_bindings(&bnd);
             GpsExpandUBO_t u = {};
             u.gaussian_count = (int)scene->gaussian_count;
+            u.max_work_items = (int)max_work_items;
             sg_apply_uniforms(UB_GpsExpandUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
         }
 
         uint32_t compact_work_count = renderer_read_gps_work_count(r);
-        if (compact_work_count > gps->max_points) {
-            compact_work_count = gps->max_points;
+        if (compact_work_count > gps->max_work_items) {
+            compact_work_count = gps->max_work_items;
         }
 
         if (compact_work_count > 0u) {
