@@ -943,6 +943,17 @@ static void app_frame(void) {
                 }
             }
         }
+        if (state->renderer.splat_render_mode == SplatRenderMode::GaussianPointSplatting) {
+            int gps_ss = (int)state->renderer.gps_supersample_factor;
+            if (ImGui::SliderInt("GPS Supersampling", &gps_ss, 1, 4, "%dx")) {
+                state->renderer.gps_supersample_factor = (uint32_t)gps_ss;
+                state->renderer.gps_gpu.width = 0;
+                state->renderer.gps_gpu.height = 0;
+                state->renderer.gps_gpu.supersample_factor = 0;
+                renderer_reset_stochastic_accumulation(&state->renderer);
+            }
+            ImGui::TextDisabled("Higher values allocate larger GPS atomic buffers and emit more points.");
+        }
         if (ImGui::Button("Shockwave Burst")) {
             g_splat_effect_active = true;
             g_splat_effect_start_time = g_app_time;

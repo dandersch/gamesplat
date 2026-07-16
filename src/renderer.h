@@ -103,6 +103,7 @@ struct GaussianPointSplatGpu {
     sg_view   resolved_depth_texture_view;
     uint32_t  width;
     uint32_t  height;
+    uint32_t  supersample_factor;
     uint32_t  max_points;
 };
 
@@ -190,6 +191,7 @@ struct Renderer {
     uint32_t        stochastic_sample_count;
     uint32_t        stochastic_samples_per_frame;
     uint32_t        stochastic_taa_current_samples;
+    uint32_t        gps_supersample_factor;
     uint32_t        stochastic_frame_seed;
     uint32_t        stochastic_accum_write_index;
     CameraUniforms  stochastic_prev_cam;

@@ -581,6 +581,7 @@ bool renderer_init(Renderer* r) {
     r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
     r->stochastic_samples_per_frame = 1;
     r->stochastic_taa_current_samples = 4;
+    r->gps_supersample_factor = 2;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -1187,7 +1188,11 @@ static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
     if (width <= 0 || height <= 0) return false;
 
     GaussianPointSplatGpu* gps = &r->gps_gpu;
+    uint32_t supersample = r->gps_supersample_factor;
+    if (supersample < 1u) supersample = 1u;
+    if (supersample > 4u) supersample = 4u;
     if (gps->width == (uint32_t)width && gps->height == (uint32_t)height &&
+        gps->supersample_factor == supersample &&
         gps->depth_key_buffer.id && gps->color_buffer.id &&
         gps->resolved_color_image.id && gps->resolved_depth_image.id) {
         return true;
@@ -1215,8 +1220,11 @@ static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
     gps->resolved_depth_image = {};
     gps->width = 0;
     gps->height = 0;
+    gps->supersample_factor = 0;
 
-    const uint32_t pixel_count = (uint32_t)width * (uint32_t)height;
+    const uint32_t gps_width = (uint32_t)width * supersample;
+    const uint32_t gps_height = (uint32_t)height * supersample;
+    const uint32_t pixel_count = gps_width * gps_height;
 
     sg_buffer_desc bd = {};
     bd.usage.storage_buffer = true;
@@ -1262,6 +1270,7 @@ static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
 
     gps->width = (uint32_t)width;
     gps->height = (uint32_t)height;
+    gps->supersample_factor = supersample;
 
     return gps->depth_key_buffer_view.id && gps->color_buffer_view.id &&
            gps->resolved_color_view.id && gps->resolved_color_texture_view.id &&
@@ -1681,7 +1690,12 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam) {
     GaussianPointSplatGpu* gps = &r->gps_gpu;
     const uint32_t max_points_per_gaussian = 16u;
-    const uint32_t pixel_count = gps->width * gps->height;
+    uint32_t supersample = r->gps_supersample_factor;
+    if (supersample < 1u) supersample = 1u;
+    if (supersample > 4u) supersample = 4u;
+    const uint32_t gps_width = gps->width * supersample;
+    const uint32_t gps_height = gps->height * supersample;
+    const uint32_t pixel_count = gps_width * gps_height;
     if (pixel_count == 0 || !r->gps_clear_pipeline.id || !r->gps_count_pipeline.id || !r->gps_splat_pipeline.id ||
         !r->gps_resolve_pipeline.id || !gps->depth_key_buffer_view.id ||
         !gps->color_buffer_view.id || !gps->point_count_buffer_view.id ||
@@ -1703,8 +1717,12 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_apply_bindings(&bnd);
         GpsClearUBO_t u = {};
         u.pixel_count = (int)pixel_count;
+        uint64_t clear_group_count = ((uint64_t)pixel_count + 255u) / 256u;
+        uint32_t clear_groups_x = clear_group_count < 65535u ? (uint32_t)clear_group_count : 65535u;
+        uint32_t clear_groups_y = (uint32_t)((clear_group_count + clear_groups_x - 1u) / clear_groups_x);
+        u.pixels_per_row = (int)(clear_groups_x * 256u);
         sg_apply_uniforms(UB_GpsClearUBO, SG_RANGE_REF(u));
-        sg_dispatch((int)((pixel_count + 255u) / 256u), 1, 1);
+        sg_dispatch((int)clear_groups_x, (int)clear_groups_y, 1);
         sg_end_pass();
     }
 
@@ -1722,6 +1740,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             GpsCountUBO_t u = {};
             u.gaussian_count = (int)scene->gaussian_count;
             u.max_points_per_gaussian = (int)max_points_per_gaussian;
+            u.supersample_factor = (float)supersample;
             sg_apply_uniforms(UB_GpsCountUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
@@ -1762,11 +1781,12 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             bnd.views[VIEW_GpsSplatPointWork] = gps->point_work_buffer_view;
             sg_apply_bindings(&bnd);
             GpsSplatUBO_t u = {};
-            u.viewport[0] = cam->viewport[0];
-            u.viewport[1] = cam->viewport[1];
+            u.viewport[0] = (float)gps_width;
+            u.viewport[1] = (float)gps_height;
             u.work_count = (int)compact_work_count;
             u.clip_z_01 = cam->clip_z_01;
             u.frame_seed = (float)r->stochastic_frame_seed;
+            u.supersample_factor = (float)supersample;
             uint64_t work_count = compact_work_count;
             uint64_t group_count = (work_count + 255u) / 256u;
             uint32_t groups_x = group_count < 65535u ? (uint32_t)group_count : 65535u;
@@ -1794,6 +1814,9 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     GpsResolveUBO_t u = {};
     u.viewport[0] = cam->viewport[0];
     u.viewport[1] = cam->viewport[1];
+    u.gps_viewport[0] = (float)gps_width;
+    u.gps_viewport[1] = (float)gps_height;
+    u.supersample_factor = (int)supersample;
     sg_apply_uniforms(UB_GpsResolveUBO, SG_RANGE_REF(u));
     sg_draw(0, 3, 1);
     sg_end_pass();

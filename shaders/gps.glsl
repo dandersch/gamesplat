@@ -10,6 +10,9 @@ struct GpsUIntData {
 
 layout(binding = 0) uniform GpsClearUBO {
     int pixel_count;
+    int pixels_per_row;
+    float clear_pad0;
+    float clear_pad1;
 };
 
 layout(binding = 0) buffer GpsClearDepthKeys {
@@ -27,7 +30,7 @@ layout(binding = 2) buffer GpsClearWorkCount {
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
+    uint idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(pixels_per_row);
     if (idx >= uint(pixel_count)) return;
     if (idx == 0u) {
         work_count[0].count = 0u;
@@ -58,7 +61,7 @@ struct GpsCountUIntData {
 layout(binding = 0) uniform GpsCountUBO {
     int gaussian_count;
     int max_points_per_gaussian;
-    float count_pad0;
+    float supersample_factor;
     float count_pad1;
 };
 
@@ -96,7 +99,8 @@ void main() {
     }
 
     vec4 color_opacity = projected_splats[splat_id].color_opacity;
-    float expected_points = 6.28318530718 * sqrt(max(projected_splats[splat_id].covariance_det.w, 0.0)) *
+    float ss = max(supersample_factor, 1.0);
+    float expected_points = ss * ss * 6.28318530718 * sqrt(max(projected_splats[splat_id].covariance_det.w, 0.0)) *
         dilog(clamp(color_opacity.a, 0.0, 1.0));
     uint point_count = uint(clamp(ceil(expected_points), 0.0, float(max(max_points_per_gaussian, 0))));
     point_counts[idx].count = point_count;
@@ -180,7 +184,7 @@ layout(binding = 0) uniform GpsSplatUBO {
     float clip_z_01;
     float frame_seed;
     int work_items_per_row;
-    float splat_pad1;
+    float supersample_factor;
 };
 
 layout(binding = 0) readonly buffer GpsProjectedSplatBuffer {
@@ -273,7 +277,7 @@ void main() {
     float radius = sqrt(-2.0 * log(arg));
     float azimuth = 6.28318530718 * rands.y;
     vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
-    vec2 point = mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y);
+    vec2 point = (mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y)) * max(supersample_factor, 1.0);
     ivec2 pixel = ivec2(floor(point + vec2(0.5)));
     if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
         uint pixel_index = uint(pixel.y * extent.x + pixel.x);
@@ -304,8 +308,11 @@ struct GpsResolveUIntData {
 
 layout(binding = 0) uniform GpsResolveUBO {
     vec2 viewport;
+    vec2 gps_viewport;
+    int supersample_factor;
     float resolve_pad0;
     float resolve_pad1;
+    float resolve_pad2;
 };
 
 layout(binding = 0) readonly buffer GpsResolveDepthKeys {
@@ -330,17 +337,38 @@ vec3 unpack_rgb8(uint packed) {
 
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
-    ivec2 extent = ivec2(viewport);
-    uint idx = uint(pixel.y * extent.x + pixel.x);
-    uint depth_key = gps_depth_keys[idx].count;
-    if (depth_key == 0xFFFFFFFFu) {
+    ivec2 gps_extent = ivec2(gps_viewport);
+    int ss = clamp(supersample_factor, 1, 4);
+    ivec2 base = pixel * ss;
+
+    vec3 color_sum = vec3(0.0);
+    float valid_count = 0.0;
+    uint min_depth_key = 0xFFFFFFFFu;
+
+    for (int y = 0; y < 4; ++y) {
+        if (y >= ss) break;
+        for (int x = 0; x < 4; ++x) {
+            if (x >= ss) break;
+            ivec2 sp = base + ivec2(x, y);
+            if (sp.x >= gps_extent.x || sp.y >= gps_extent.y) continue;
+            uint idx = uint(sp.y * gps_extent.x + sp.x);
+            uint depth_key = gps_depth_keys[idx].count;
+            if (depth_key != 0xFFFFFFFFu) {
+                color_sum += unpack_rgb8(gps_colors[idx].count);
+                valid_count += 1.0;
+                min_depth_key = min(min_depth_key, depth_key);
+            }
+        }
+    }
+
+    if (valid_count <= 0.0) {
         out_color = vec4(0.1, 0.1, 0.1, 0.0);
         out_depth = vec4(1.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    out_color = vec4(unpack_rgb8(gps_colors[idx].count), 1.0);
-    out_depth = vec4(float(depth_key) / 4294967294.0, 0.0, 0.0, 0.0);
+    out_color = vec4(color_sum / valid_count, 1.0);
+    out_depth = vec4(float(min_depth_key) / 4294967294.0, 0.0, 0.0, 0.0);
 }
 @end
 
