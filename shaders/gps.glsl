@@ -20,11 +20,18 @@ layout(binding = 1) buffer GpsClearColors {
     GpsUIntData gps_colors[];
 };
 
+layout(binding = 2) buffer GpsClearWorkCount {
+    GpsUIntData work_count[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uint(pixel_count)) return;
+    if (idx == 0u) {
+        work_count[0].count = 0u;
+    }
     gps_depth_keys[idx].count = 0xFFFFFFFFu;
     gps_colors[idx].count = 0u;
 }
@@ -98,6 +105,54 @@ void main() {
 
 @program gps_count gps_count_cs
 
+@cs gps_expand_cs
+struct GpsExpandUIntData {
+    uint count;
+};
+
+struct GpsWorkData {
+    uint gaussian_id;
+    uint sample_id;
+};
+
+layout(binding = 0) uniform GpsExpandUBO {
+    int gaussian_count;
+    int expand_pad0;
+    float expand_pad1;
+    float expand_pad2;
+};
+
+layout(binding = 0) readonly buffer GpsExpandPointCounts {
+    GpsExpandUIntData point_counts[];
+};
+
+layout(binding = 1) buffer GpsExpandWorkCount {
+    GpsExpandUIntData work_count[];
+};
+
+layout(binding = 2) buffer GpsPointWork {
+    GpsWorkData point_work[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(gaussian_count)) return;
+
+    uint count = point_counts[idx].count;
+    if (count == 0u) return;
+
+    uint base = atomicAdd(work_count[0].count, count);
+    for (uint i = 0u; i < count; ++i) {
+        point_work[base + i].gaussian_id = idx;
+        point_work[base + i].sample_id = i;
+    }
+}
+@end
+
+@program gps_expand gps_expand_cs
+
 @cs gps_splat_cs
 struct GpsProjectedSplatData {
     vec4 color_opacity; // rgb color, a opacity
@@ -114,11 +169,15 @@ struct GpsSplatUIntData {
     uint count;
 };
 
+struct GpsSplatWorkData {
+    uint gaussian_id;
+    uint sample_id;
+};
+
 layout(binding = 0) uniform GpsSplatUBO {
     vec2 viewport;
-    int gaussian_count;
+    int work_count;
     float clip_z_01;
-    int max_points_per_gaussian;
     float frame_seed;
     int work_items_per_row;
     float splat_pad1;
@@ -140,19 +199,17 @@ layout(binding = 3) buffer GpsColors {
     GpsSplatUIntData gps_colors[];
 };
 
-layout(binding = 4) readonly buffer GpsSplatPointCounts {
-    GpsSplatUIntData point_counts[];
+layout(binding = 4) readonly buffer GpsSplatPointWork {
+    GpsSplatWorkData point_work[];
 };
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
     uint work_idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(work_items_per_row);
-    uint max_points = uint(max(max_points_per_gaussian, 1));
-    uint idx = work_idx / max_points;
-    uint sample_idx = work_idx - idx * max_points;
-    if (idx >= uint(gaussian_count)) return;
-    if (sample_idx >= point_counts[idx].count) return;
+    if (work_idx >= uint(work_count)) return;
+    uint idx = point_work[work_idx].gaussian_id;
+    uint sample_idx = point_work[work_idx].sample_id;
 
     uint splat_id = splat_ids[idx].count;
     if (splat_id == 0xFFFFFFFFu) return;
