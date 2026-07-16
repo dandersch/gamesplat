@@ -69,8 +69,6 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->mesh_pipeline);
 }
 
-static const uint32_t GPS_MAX_POINTS_PER_GAUSSIAN = 16u;
-
 static uint32_t next_power_of_two_u32(uint32_t v) {
     if (v <= 1u) return 1u;
     v--;
@@ -582,6 +580,7 @@ bool renderer_init(Renderer* r) {
     r->stochastic_samples_per_frame = 1;
     r->stochastic_taa_current_samples = 4;
     r->gps_supersample_factor = 2;
+    r->gps_max_points_per_gaussian = 16;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -890,7 +889,10 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = scene->gaussian_count * GPS_MAX_POINTS_PER_GAUSSIAN * sizeof(uint32_t) * 2u;
+    uint32_t max_points_per_gaussian = r->gps_max_points_per_gaussian;
+    if (max_points_per_gaussian < 1u) max_points_per_gaussian = 1u;
+    if (max_points_per_gaussian > 256u) max_points_per_gaussian = 256u;
+    bd.size = scene->gaussian_count * max_points_per_gaussian * sizeof(uint32_t) * 2u;
     bd.label = "gps-point-work-buffer";
     r->gps_gpu.point_work_buffer = sg_make_buffer(&bd);
 
@@ -898,7 +900,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     vd.storage_buffer.buffer = r->gps_gpu.point_work_buffer;
     vd.label = "gps-point-work-buffer-view";
     r->gps_gpu.point_work_buffer_view = sg_make_view(&vd);
-    r->gps_gpu.max_points = scene->gaussian_count * GPS_MAX_POINTS_PER_GAUSSIAN;
+    r->gps_gpu.max_points = scene->gaussian_count * max_points_per_gaussian;
 
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
@@ -1689,7 +1691,9 @@ static void renderer_sort_gaussians_gpu(Renderer* r) {
 
 static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam) {
     GaussianPointSplatGpu* gps = &r->gps_gpu;
-    const uint32_t max_points_per_gaussian = 16u;
+    uint32_t max_points_per_gaussian = r->gps_max_points_per_gaussian;
+    if (max_points_per_gaussian < 1u) max_points_per_gaussian = 1u;
+    if (max_points_per_gaussian > 256u) max_points_per_gaussian = 256u;
     uint32_t supersample = r->gps_supersample_factor;
     if (supersample < 1u) supersample = 1u;
     if (supersample > 4u) supersample = 4u;

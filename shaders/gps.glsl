@@ -341,8 +341,8 @@ void main() {
     int ss = clamp(supersample_factor, 1, 4);
     ivec2 base = pixel * ss;
 
-    vec3 color_sum = vec3(0.0);
-    float valid_count = 0.0;
+    vec3 premul_color_sum = vec3(0.0);
+    float coverage_count = 0.0;
     uint min_depth_key = 0xFFFFFFFFu;
 
     for (int y = 0; y < 4; ++y) {
@@ -354,20 +354,22 @@ void main() {
             uint idx = uint(sp.y * gps_extent.x + sp.x);
             uint depth_key = gps_depth_keys[idx].count;
             if (depth_key != 0xFFFFFFFFu) {
-                color_sum += unpack_rgb8(gps_colors[idx].count);
-                valid_count += 1.0;
+                premul_color_sum += unpack_rgb8(gps_colors[idx].count);
+                coverage_count += 1.0;
                 min_depth_key = min(min_depth_key, depth_key);
             }
         }
     }
 
-    if (valid_count <= 0.0) {
+    if (coverage_count <= 0.0) {
         out_color = vec4(0.1, 0.1, 0.1, 0.0);
         out_depth = vec4(1.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    out_color = vec4(color_sum / valid_count, 1.0);
+    float subpixel_count = float(ss * ss);
+    float coverage = coverage_count / subpixel_count;
+    out_color = vec4(premul_color_sum / subpixel_count, coverage);
     out_depth = vec4(float(min_depth_key) / 4294967294.0, 0.0, 0.0, 0.0);
 }
 @end

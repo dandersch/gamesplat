@@ -952,6 +952,12 @@ static void app_frame(void) {
                 state->renderer.gps_gpu.supersample_factor = 0;
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
+            int gps_max_points = (int)state->renderer.gps_max_points_per_gaussian;
+            if (ImGui::SliderInt("GPS Max Points / Gaussian", &gps_max_points, 1, 256)) {
+                state->renderer.gps_max_points_per_gaussian = (uint32_t)gps_max_points;
+                renderer_upload_gaussians(&state->renderer, &state->scene);
+                renderer_reset_stochastic_accumulation(&state->renderer);
+            }
             ImGui::TextDisabled("Higher values allocate larger GPS atomic buffers and emit more points.");
         }
         if (ImGui::Button("Shockwave Burst")) {
