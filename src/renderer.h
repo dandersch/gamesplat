@@ -193,6 +193,10 @@ struct Renderer {
     uint32_t        stochastic_taa_current_samples;
     uint32_t        gps_supersample_factor;
     uint32_t        gps_max_work_items;
+    uint64_t        gps_estimated_work_items;
+    uint32_t        gps_emitted_work_items;
+    float           gps_point_scale;
+    bool            gps_work_overflowed;
     uint32_t        stochastic_frame_seed;
     uint32_t        stochastic_accum_write_index;
     CameraUniforms  stochastic_prev_cam;

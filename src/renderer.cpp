@@ -581,6 +581,7 @@ bool renderer_init(Renderer* r) {
     r->stochastic_taa_current_samples = 4;
     r->gps_supersample_factor = 2;
     r->gps_max_work_items = 8u * 1024u * 1024u;
+    r->gps_point_scale = 1.0f;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -1697,13 +1698,19 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     if (supersample < 1u) supersample = 1u;
     if (supersample > 4u) supersample = 4u;
     float point_scale = 1.0f;
+    uint64_t estimated_work_items = 0;
     if (r->splat_diagnostics.valid && r->splat_diagnostics.total_gps_kpoints > 0u) {
         const double estimated_points = (double)r->splat_diagnostics.total_gps_kpoints * 1024.0 *
                                         (double)supersample * (double)supersample;
+        estimated_work_items = (uint64_t)estimated_points;
         if (estimated_points > (double)max_work_items) {
             point_scale = (float)((double)max_work_items / estimated_points);
         }
     }
+    r->gps_estimated_work_items = estimated_work_items;
+    r->gps_point_scale = point_scale;
+    r->gps_emitted_work_items = 0;
+    r->gps_work_overflowed = false;
     const uint32_t gps_width = gps->width * supersample;
     const uint32_t gps_height = gps->height * supersample;
     const uint32_t pixel_count = gps_width * gps_height;
@@ -1777,8 +1784,10 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
 
         uint32_t compact_work_count = renderer_read_gps_work_count(r);
         if (compact_work_count > gps->max_work_items) {
+            r->gps_work_overflowed = true;
             compact_work_count = gps->max_work_items;
         }
+        r->gps_emitted_work_items = compact_work_count;
 
         if (compact_work_count > 0u) {
             sg_pass pass = {};
