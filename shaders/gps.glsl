@@ -34,6 +34,8 @@ void main() {
     if (idx >= uint(pixel_count)) return;
     if (idx == 0u) {
         work_count[0].count = 0u;
+        work_count[1].count = 0u;
+        work_count[2].count = 0u;
     }
     gps_depth_keys[idx].count = 0xFFFFFFFFu;
     gps_colors[idx].count = 0u;
@@ -77,6 +79,10 @@ layout(binding = 2) buffer GpsPointCounts {
     GpsCountUIntData point_counts[];
 };
 
+layout(binding = 3) buffer GpsCountWorkStats {
+    GpsCountUIntData work_stats[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 float dilog(float x) {
@@ -117,6 +123,12 @@ void main() {
         point_count += 1u;
     }
     point_counts[idx].count = point_count;
+    if (point_count > 0u) {
+        uint old_low = atomicAdd(work_stats[1].count, point_count);
+        if (old_low + point_count < old_low) {
+            atomicAdd(work_stats[2].count, 1u);
+        }
+    }
 }
 @end
 
