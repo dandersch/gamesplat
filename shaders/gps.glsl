@@ -115,7 +115,12 @@ void main() {
 
     vec4 color_opacity = projected_splats[splat_id].color_opacity;
     float ss = max(supersample_factor, 1.0);
-    float expected_points = ss * ss * 6.28318530718 * sqrt(max(projected_splats[splat_id].covariance_det.w, 0.0)) *
+    vec4 covariance_det = projected_splats[splat_id].covariance_det;
+    float cov_a = covariance_det.x + 0.3;
+    float cov_b = covariance_det.y;
+    float cov_c = covariance_det.z + 0.3;
+    float det = cov_a * cov_c - cov_b * cov_b;
+    float expected_points = ss * ss * 6.28318530718 * sqrt(max(det, 0.0)) *
         dilog(clamp(color_opacity.a, 0.0, 1.0));
     float scaled_points = max(expected_points * clamp(point_scale, 0.0, 1.0), 0.0);
     uint point_count = uint(clamp(floor(scaled_points), 0.0, 4294967295.0));
@@ -267,9 +272,9 @@ void main() {
     vec2 mean = projected_splats[splat_id].center_radius.xy;
     vec4 covariance_det = projected_splats[splat_id].covariance_det;
     float ndc_depth = projected_splats[splat_id].conic_depth.w;
-    float cov_a = max(covariance_det.x, 1.0e-5);
+    float cov_a = max(covariance_det.x + 0.3, 1.0e-5);
     float cov_b = covariance_det.y;
-    float cov_c = max(covariance_det.z, 1.0e-5);
+    float cov_c = max(covariance_det.z + 0.3, 1.0e-5);
     float l00 = sqrt(cov_a);
     float l10 = cov_b / l00;
     float l11 = sqrt(max(cov_c - l10 * l10, 1.0e-5));
