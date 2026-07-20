@@ -952,6 +952,14 @@ static void app_frame(void) {
                 state->renderer.gps_gpu.supersample_factor = 0;
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
+            if (ImGui::Checkbox("GPS Accumulation", &state->renderer.stochastic_accumulation_enabled)) {
+                renderer_reset_stochastic_accumulation(&state->renderer);
+            }
+            if (state->renderer.stochastic_accumulation_enabled) {
+                ImGui::Text("GPS accumulated samples: %u", state->renderer.stochastic_sample_count);
+            } else {
+                ImGui::Text("GPS accumulation off: displaying current noisy frame");
+            }
             int gps_work_budget_m = (int)(state->renderer.gps_max_work_items / (1024u * 1024u));
             if (ImGui::SliderInt("GPS Work Budget", &gps_work_budget_m, 1, 250, "%dM")) {
                 state->renderer.gps_max_work_items = (uint32_t)gps_work_budget_m * 1024u * 1024u;

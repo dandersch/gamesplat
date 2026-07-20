@@ -1912,6 +1912,35 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             return;
         }
 
+        if (!r->stochastic_accumulation_enabled) {
+            r->stochastic_sample_count = 0;
+
+            sg_pass pass = {};
+            pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+            pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+            pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+            pass.swapchain = sglue_swapchain();
+
+            sg_begin_pass(&pass);
+            sg_apply_pipeline(r->blit_pipeline);
+            sg_bindings blit_bnd = {};
+            blit_bnd.views[VIEW_display_tex] = r->gps_gpu.resolved_color_texture_view;
+            blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
+            sg_apply_bindings(&blit_bnd);
+            sg_draw(0, 3, 1);
+            PROFILE("render imgui pass") {
+            PROFILE_GPU("imgui pass") {
+            simgui_render();
+            }
+            }
+            sg_end_pass();
+            PROFILE("render commit") {
+            sg_commit();
+            PROFILE_GPU_COLLECT();
+            }
+            return;
+        }
+
         uint32_t write_index = r->stochastic_accum_write_index & 1u;
         uint32_t read_index = (write_index + 1u) & 1u;
         uint32_t next_sample_count = r->stochastic_sample_count + 1u;
