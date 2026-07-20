@@ -959,10 +959,10 @@ static void app_frame(void) {
                 renderer_reset_stochastic_accumulation(&state->renderer);
             }
             ImGui::TextDisabled("Prototype global buffer cap, not a per-Gaussian GPS parameter.");
-            ImGui::Text("GPS wanted: %.1f M", (double)state->renderer.gps_estimated_work_items / 1000000.0);
+            ImGui::Text("GPS wanted work: %.1f M", (double)state->renderer.gps_estimated_work_items / 1000000.0);
             ImGui::Text("GPS budget: %.1f M", (double)state->renderer.gps_max_work_items / 1000000.0);
             ImGui::Text("GPS emitting: %.1f%%", (double)state->renderer.gps_point_scale * 100.0);
-            ImGui::Text("GPS emitted: %.1f M", (double)state->renderer.gps_emitted_work_items / 1000000.0);
+            ImGui::Text("GPS emitted work: %.1f M", (double)state->renderer.gps_emitted_work_items / 1000000.0);
             if (state->renderer.gps_work_overflowed) {
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.2f, 1.0f), "GPS work buffer overflowed after scaling");
             }

@@ -122,15 +122,16 @@ void main() {
     float det = cov_a * cov_c - cov_b * cov_b;
     float expected_points = ss * ss * 6.28318530718 * sqrt(max(det, 0.0)) *
         dilog(clamp(color_opacity.a, 0.0, 1.0));
-    float scaled_points = max(expected_points * clamp(point_scale, 0.0, 1.0), 0.0);
-    uint point_count = uint(clamp(floor(scaled_points), 0.0, 4294967295.0));
-    if (hash01(splat_id + 0x9e3779b9u) < fract(scaled_points) && point_count < 0xFFFFFFFFu) {
-        point_count += 1u;
+    float points_per_work_item = max(ss * ss, 1.0);
+    float scaled_work_items = max((expected_points / points_per_work_item) * clamp(point_scale, 0.0, 1.0), 0.0);
+    uint work_item_count = uint(clamp(floor(scaled_work_items), 0.0, 4294967295.0));
+    if (hash01(splat_id + 0x9e3779b9u) < fract(scaled_work_items) && work_item_count < 0xFFFFFFFFu) {
+        work_item_count += 1u;
     }
-    point_counts[idx].count = point_count;
-    if (point_count > 0u) {
-        uint old_low = atomicAdd(work_stats[1].count, point_count);
-        if (old_low + point_count < old_low) {
+    point_counts[idx].count = work_item_count;
+    if (work_item_count > 0u) {
+        uint old_low = atomicAdd(work_stats[1].count, work_item_count);
+        if (old_low + work_item_count < old_low) {
             atomicAdd(work_stats[2].count, 1u);
         }
     }
@@ -292,29 +293,33 @@ void main() {
         splat_id * 277803737u + 0x9E3779B9u
     );
 
-    seed.x += sample_idx * 374761393u;
-    seed = 1664525u * seed + 1013904223u;
-    seed.x += 1664525u * seed.y;
-    seed.y += 1664525u * seed.x;
-    seed ^= (seed >> 16u);
-    seed.x += 1664525u * seed.y;
-    seed.y += 1664525u * seed.x;
-    seed ^= (seed >> 16u);
-    vec2 rands = vec2(seed) * 2.32830643654e-10;
+    int points_per_work_item = max(int(round(supersample_factor * supersample_factor)), 1);
     float alpha = clamp(color_opacity.a, 1.0e-6, 1.0);
     float dilog_alpha = dilog_sample(alpha);
-    float arg = inv_dilog((1.0 - rands.x) * dilog_alpha) / alpha;
-    arg = clamp(arg, 1.0e-7, 1.0);
-    float radius = sqrt(-2.0 * log(arg));
-    float azimuth = 6.28318530718 * rands.y;
-    vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
-    vec2 point = (mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y)) * max(supersample_factor, 1.0);
-    ivec2 pixel = ivec2(floor(point + vec2(0.5)));
-    if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
-        uint pixel_index = uint(pixel.y * extent.x + pixel.x);
-        uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
-        if (depth_key < old_key) {
-            gps_colors[pixel_index].count = packed_color;
+    for (int p = 0; p < points_per_work_item; ++p) {
+        uvec2 point_seed = seed;
+        point_seed.x += (sample_idx * uint(points_per_work_item) + uint(p)) * 374761393u;
+        point_seed = 1664525u * point_seed + 1013904223u;
+        point_seed.x += 1664525u * point_seed.y;
+        point_seed.y += 1664525u * point_seed.x;
+        point_seed ^= (point_seed >> 16u);
+        point_seed.x += 1664525u * point_seed.y;
+        point_seed.y += 1664525u * point_seed.x;
+        point_seed ^= (point_seed >> 16u);
+        vec2 rands = vec2(point_seed) * 2.32830643654e-10;
+        float arg = inv_dilog((1.0 - rands.x) * dilog_alpha) / alpha;
+        arg = clamp(arg, 1.0e-7, 1.0);
+        float radius = sqrt(-2.0 * log(arg));
+        float azimuth = 6.28318530718 * rands.y;
+        vec2 local = vec2(cos(azimuth), sin(azimuth)) * radius;
+        vec2 point = (mean + vec2(l00 * local.x, l10 * local.x + l11 * local.y)) * max(supersample_factor, 1.0);
+        ivec2 pixel = ivec2(floor(point + vec2(0.5)));
+        if (pixel.x >= 0 && pixel.y >= 0 && pixel.x < extent.x && pixel.y < extent.y) {
+            uint pixel_index = uint(pixel.y * extent.x + pixel.x);
+            uint old_key = atomicMin(gps_depth_keys[pixel_index].count, depth_key);
+            if (depth_key < old_key) {
+                gps_colors[pixel_index].count = packed_color;
+            }
         }
     }
 }
