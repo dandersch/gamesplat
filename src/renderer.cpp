@@ -581,7 +581,6 @@ bool renderer_init(Renderer* r) {
     r->stochastic_taa_current_samples = 4;
     r->gps_supersample_factor = 2;
     r->gps_max_work_items = 8u * 1024u * 1024u;
-    r->gps_point_scale = 1.0f;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)
@@ -879,7 +878,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = 3u * sizeof(uint32_t);
+    bd.size = sizeof(uint32_t);
     bd.label = "gps-work-count-buffer";
     r->gps_gpu.point_offset_buffer = sg_make_buffer(&bd);
 
@@ -940,7 +939,7 @@ static void renderer_read_splat_diagnostics(Renderer* r) {
 #endif
 }
 
-static uint32_t renderer_read_gps_counter(Renderer* r, uint32_t counter_index) {
+static uint32_t renderer_read_gps_work_count(Renderer* r) {
     if (!r->gps_gpu.point_offset_buffer.id) {
         return 0;
     }
@@ -956,19 +955,13 @@ static uint32_t renderer_read_gps_counter(Renderer* r, uint32_t counter_index) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, info.buf[info.active_slot]);
 
     uint32_t count = 0;
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, (GLintptr)(counter_index * sizeof(uint32_t)), sizeof(count), &count);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(count), &count);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
     return count;
 #else
-    return counter_index == 0u ? r->gps_gpu.max_work_items : 0u;
+    return r->gps_gpu.max_work_items;
 #endif
-}
-
-static uint64_t renderer_read_gps_u64_counter(Renderer* r, uint32_t low_index, uint32_t high_index) {
-    uint64_t low = renderer_read_gps_counter(r, low_index);
-    uint64_t high = renderer_read_gps_counter(r, high_index);
-    return low | (high << 32u);
 }
 
 // Release everything held by a MeshGpu and zero it. Safe to call on an
@@ -1703,11 +1696,6 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     uint32_t supersample = r->gps_supersample_factor;
     if (supersample < 1u) supersample = 1u;
     if (supersample > 4u) supersample = 4u;
-    float point_scale = 1.0f;
-    r->gps_estimated_work_items = 0;
-    r->gps_point_scale = point_scale;
-    r->gps_emitted_work_items = 0;
-    r->gps_work_overflowed = false;
     const uint32_t gps_width = gps->width * supersample;
     const uint32_t gps_height = gps->height * supersample;
     const uint32_t pixel_count = gps_width * gps_height;
@@ -1741,7 +1729,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_end_pass();
     };
 
-    auto count_gps_points = [&](float scale) {
+    auto count_gps_points = [&]() {
         sg_pass pass = {};
         pass.compute = true;
         sg_begin_pass(&pass);
@@ -1750,12 +1738,10 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         bnd.views[VIEW_GpsCountProjectedSplatBuffer] = r->projected_splat_buffer_view;
         bnd.views[VIEW_GpsCountSplatIdBuffer] = r->unsorted_index_buffer_view;
         bnd.views[VIEW_GpsPointCounts] = gps->point_count_buffer_view;
-        bnd.views[VIEW_GpsCountWorkStats] = gps->point_offset_buffer_view;
         sg_apply_bindings(&bnd);
         GpsCountUBO_t u = {};
         u.gaussian_count = (int)scene->gaussian_count;
         u.supersample_factor = (float)supersample;
-        u.point_scale = scale;
         sg_apply_uniforms(UB_GpsCountUBO, SG_RANGE_REF(u));
         sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
         sg_end_pass();
@@ -1764,16 +1750,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     clear_gps_buffers();
 
     if (scene->gaussian_count > 0) {
-        count_gps_points(1.0f);
-        const uint64_t estimated_work_items = renderer_read_gps_u64_counter(r, 1u, 2u);
-        r->gps_estimated_work_items = estimated_work_items;
-        if (estimated_work_items > max_work_items) {
-            point_scale = (float)((double)max_work_items / (double)estimated_work_items);
-        }
-        r->gps_point_scale = point_scale;
-
-        clear_gps_buffers();
-        count_gps_points(point_scale);
+        count_gps_points();
 
         {
             sg_pass pass = {};
@@ -1793,12 +1770,10 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_end_pass();
         }
 
-        uint32_t compact_work_count = renderer_read_gps_counter(r, 0u);
+        uint32_t compact_work_count = renderer_read_gps_work_count(r);
         if (compact_work_count > gps->max_work_items) {
-            r->gps_work_overflowed = true;
             compact_work_count = gps->max_work_items;
         }
-        r->gps_emitted_work_items = compact_work_count;
 
         if (compact_work_count > 0u) {
             sg_pass pass = {};
