@@ -907,8 +907,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
 
 static void renderer_read_splat_diagnostics(Renderer* r) {
     r->splat_diagnostics.valid = false;
-    const bool gps_needs_diagnostics = r->splat_render_mode == SplatRenderMode::GaussianPointSplatting;
-    if ((!r->splat_diagnostics_enabled && !gps_needs_diagnostics) || !r->splat_diagnostics_buffer.id) {
+    if (!r->splat_diagnostics_enabled || !r->splat_diagnostics_buffer.id) {
         return;
     }
 
@@ -1578,7 +1577,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     u.ortho_focal = cam->ortho_focal;
     u.clip_y_sign = cam->clip_y_sign;
     u.clip_z_01 = cam->clip_z_01;
-    u.collect_stats = (r->splat_diagnostics_enabled || r->splat_render_mode == SplatRenderMode::GaussianPointSplatting) ? 1 : 0;
+    u.collect_stats = r->splat_diagnostics_enabled ? 1 : 0;
     u.sh_degree = r->sh_degree;
     u.sh_lod_distance = r->sh_lod_distance;
     sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
