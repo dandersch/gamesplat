@@ -938,31 +938,6 @@ static void renderer_read_splat_diagnostics(Renderer* r) {
 #endif
 }
 
-static uint32_t renderer_read_gps_work_count(Renderer* r) {
-    if (!r->gps_gpu.point_offset_buffer.id) {
-        return 0;
-    }
-
-#if defined(SOKOL_GLCORE)
-    sg_gl_buffer_info info = sg_gl_query_buffer_info(r->gps_gpu.point_offset_buffer);
-    if (info.active_slot < 0 || info.active_slot >= SG_NUM_INFLIGHT_FRAMES || info.buf[info.active_slot] == 0) {
-        return 0;
-    }
-
-    GLint previous_buffer = 0;
-    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous_buffer);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, info.buf[info.active_slot]);
-
-    uint32_t count = 0;
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(count), &count);
-
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
-    return count;
-#else
-    return r->gps_gpu.max_work_items;
-#endif
-}
-
 // Release everything held by a MeshGpu and zero it. Safe to call on an
 // already-empty MeshGpu (all fields NULL/0).
 static void mesh_gpu_release(MeshGpu* m) {
@@ -1769,39 +1744,32 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_end_pass();
         }
 
-        uint32_t compact_work_count = renderer_read_gps_work_count(r);
-        if (compact_work_count > gps->max_work_items) {
-            compact_work_count = gps->max_work_items;
-        }
-
-        if (compact_work_count > 0u) {
-            sg_pass pass = {};
-            pass.compute = true;
-            sg_begin_pass(&pass);
-            sg_apply_pipeline(r->gps_splat_pipeline);
-            sg_bindings bnd = {};
-            bnd.views[VIEW_GpsProjectedSplatBuffer] = r->projected_splat_buffer_view;
-            bnd.views[VIEW_GpsSplatIdBuffer] = r->unsorted_index_buffer_view;
-            bnd.views[VIEW_GpsDepthKeys] = gps->depth_key_buffer_view;
-            bnd.views[VIEW_GpsColors] = gps->color_buffer_view;
-            bnd.views[VIEW_GpsSplatPointWork] = gps->point_work_buffer_view;
-            sg_apply_bindings(&bnd);
-            GpsSplatUBO_t u = {};
-            u.viewport[0] = (float)gps_width;
-            u.viewport[1] = (float)gps_height;
-            u.work_count = (int)compact_work_count;
-            u.clip_z_01 = cam->clip_z_01;
-            u.frame_seed = (float)r->stochastic_frame_seed;
-            u.supersample_factor = (float)supersample;
-            uint64_t work_count = compact_work_count;
-            uint64_t group_count = (work_count + 255u) / 256u;
-            uint32_t groups_x = group_count < 65535u ? (uint32_t)group_count : 65535u;
-            uint32_t groups_y = (uint32_t)((group_count + groups_x - 1u) / groups_x);
-            u.work_items_per_row = (int)(groups_x * 256u);
-            sg_apply_uniforms(UB_GpsSplatUBO, SG_RANGE_REF(u));
-            sg_dispatch((int)groups_x, (int)groups_y, 1);
-            sg_end_pass();
-        }
+        sg_pass pass = {};
+        pass.compute = true;
+        sg_begin_pass(&pass);
+        sg_apply_pipeline(r->gps_splat_pipeline);
+        sg_bindings bnd = {};
+        bnd.views[VIEW_GpsProjectedSplatBuffer] = r->projected_splat_buffer_view;
+        bnd.views[VIEW_GpsSplatIdBuffer] = r->unsorted_index_buffer_view;
+        bnd.views[VIEW_GpsDepthKeys] = gps->depth_key_buffer_view;
+        bnd.views[VIEW_GpsColors] = gps->color_buffer_view;
+        bnd.views[VIEW_GpsSplatPointWork] = gps->point_work_buffer_view;
+        bnd.views[VIEW_GpsSplatWorkCount] = gps->point_offset_buffer_view;
+        sg_apply_bindings(&bnd);
+        GpsSplatUBO_t u = {};
+        u.viewport[0] = (float)gps_width;
+        u.viewport[1] = (float)gps_height;
+        u.max_work_items = (int)max_work_items;
+        u.clip_z_01 = cam->clip_z_01;
+        u.frame_seed = (float)r->stochastic_frame_seed;
+        u.supersample_factor = (float)supersample;
+        uint64_t group_count = ((uint64_t)max_work_items + 255u) / 256u;
+        uint32_t groups_x = group_count < 65535u ? (uint32_t)group_count : 65535u;
+        uint32_t groups_y = (uint32_t)((group_count + groups_x - 1u) / groups_x);
+        u.work_items_per_row = (int)(groups_x * 256u);
+        sg_apply_uniforms(UB_GpsSplatUBO, SG_RANGE_REF(u));
+        sg_dispatch((int)groups_x, (int)groups_y, 1);
+        sg_end_pass();
     }
 
     sg_pass pass = {};

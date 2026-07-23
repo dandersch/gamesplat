@@ -200,7 +200,7 @@ struct GpsSplatWorkData {
 
 layout(binding = 0) uniform GpsSplatUBO {
     vec2 viewport;
-    int work_count;
+    int max_work_items;
     float clip_z_01;
     float frame_seed;
     int work_items_per_row;
@@ -227,6 +227,10 @@ layout(binding = 4) readonly buffer GpsSplatPointWork {
     GpsSplatWorkData point_work[];
 };
 
+layout(binding = 5) readonly buffer GpsSplatWorkCount {
+    GpsSplatUIntData work_count[];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 float dilog_sample(float x) {
@@ -247,7 +251,8 @@ float inv_dilog(float x) {
 
 void main() {
     uint work_idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(work_items_per_row);
-    if (work_idx >= uint(work_count)) return;
+    uint actual_work_count = min(work_count[0].count, uint(max_work_items));
+    if (work_idx >= actual_work_count) return;
     uint idx = point_work[work_idx].gaussian_id;
     uint sample_idx = point_work[work_idx].sample_id;
 
