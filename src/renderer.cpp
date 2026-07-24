@@ -1683,6 +1683,8 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     }
 
     auto clear_gps_buffers = [&]() {
+        PROFILE("gps clear") {
+        PROFILE_GPU("gps clear") {
         sg_pass pass = {};
         pass.compute = true;
         sg_begin_pass(&pass);
@@ -1701,9 +1703,13 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_apply_uniforms(UB_GpsClearUBO, SG_RANGE_REF(u));
         sg_dispatch((int)clear_groups_x, (int)clear_groups_y, 1);
         sg_end_pass();
+        }
+        }
     };
 
     auto count_gps_points = [&]() {
+        PROFILE("gps count") {
+        PROFILE_GPU("gps count") {
         sg_pass pass = {};
         pass.compute = true;
         sg_begin_pass(&pass);
@@ -1719,6 +1725,8 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_apply_uniforms(UB_GpsCountUBO, SG_RANGE_REF(u));
         sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
         sg_end_pass();
+        }
+        }
     };
 
     clear_gps_buffers();
@@ -1727,6 +1735,8 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         count_gps_points();
 
         {
+            PROFILE("gps expand") {
+            PROFILE_GPU("gps expand") {
             sg_pass pass = {};
             pass.compute = true;
             sg_begin_pass(&pass);
@@ -1742,8 +1752,12 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_apply_uniforms(UB_GpsExpandUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
+            }
+            }
         }
 
+        PROFILE("gps splat") {
+        PROFILE_GPU("gps splat") {
         sg_pass pass = {};
         pass.compute = true;
         sg_begin_pass(&pass);
@@ -1770,8 +1784,12 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_apply_uniforms(UB_GpsSplatUBO, SG_RANGE_REF(u));
         sg_dispatch((int)groups_x, (int)groups_y, 1);
         sg_end_pass();
+        }
+        }
     }
 
+    PROFILE("gps resolve") {
+    PROFILE_GPU("gps resolve") {
     sg_pass pass = {};
     pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE;
     pass.action.colors[0].store_action = SG_STOREACTION_STORE;
@@ -1794,6 +1812,8 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     sg_apply_uniforms(UB_GpsResolveUBO, SG_RANGE_REF(u));
     sg_draw(0, 3, 1);
     sg_end_pass();
+    }
+    }
 
     return true;
 }
