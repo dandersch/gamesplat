@@ -5,10 +5,10 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 PROFILE_SECONDS="${PROFILE_SECONDS:-15}"
-PROFILE_PREPARE_SECONDS="${PROFILE_PREPARE_SECONDS:-8}"
 PROFILE_WARMUP_FRAMES="${PROFILE_WARMUP_FRAMES:-120}"
 PROFILE_OUTPUT_DIR="${PROFILE_OUTPUT_DIR:-build/profiles}"
 PROFILE_PORT="${PROFILE_PORT:-}"
+PROFILE_RENDER_MODE="${PROFILE_RENDER_MODE:-alpha}"
 WINE="${WINE:-wine}"
 BUILD=1
 LABEL="renderer"
@@ -26,7 +26,7 @@ print steady-state CPU/GPU zone statistics.
 
 Options:
   -s, --seconds N          Capture duration after connection (default: 15)
-      --prepare-seconds N  Delay after launching gsplat (default: 8)
+  -r, --render-mode MODE   Startup mode: alpha, stochastic, or gps (default: alpha)
   -p, --port N             Tracy port (default: discover from launched gsplat)
   -w, --warmup-frames N    Complete frames to discard (default: 120)
   -o, --output DIR         Profile output root (default: build/profiles)
@@ -37,11 +37,12 @@ Options:
 
 Examples:
   ./profile.sh
+  ./profile.sh --render-mode gps --label gps
   ./profile.sh --seconds 20 --warmup-frames 100 -- ply=res/scene.sog
   ./profile.sh --analyze bin/tracy/gsplat.tracy --warmup-frames 30
 
-During a live capture, configure the renderer and move the camera normally.
-Keep splat diagnostics disabled when measuring GPS because they perturb timing.
+During a live capture, move the camera normally. Keep splat diagnostics
+disabled when measuring GPS because they perturb timing.
 EOF
 }
 
@@ -68,9 +69,9 @@ while (($# > 0)); do
             PROFILE_WARMUP_FRAMES="$2"
             shift 2
             ;;
-        --prepare-seconds)
+        -r|--render-mode)
             (($# >= 2)) || die "$1 requires a value"
-            PROFILE_PREPARE_SECONDS="$2"
+            PROFILE_RENDER_MODE="$2"
             shift 2
             ;;
         -p|--port)
@@ -114,9 +115,12 @@ while (($# > 0)); do
 done
 
 require_uint "capture seconds" "$PROFILE_SECONDS"
-require_uint "preparation seconds" "$PROFILE_PREPARE_SECONDS"
 require_uint "warm-up frame count" "$PROFILE_WARMUP_FRAMES"
 ((PROFILE_SECONDS > 0)) || die "capture seconds must be greater than zero"
+case "$PROFILE_RENDER_MODE" in
+    alpha|stochastic|gps) ;;
+    *) die "render mode must be alpha, stochastic, or gps" ;;
+esac
 if [[ -n "$PROFILE_PORT" ]]; then
     require_uint "Tracy port" "$PROFILE_PORT"
     ((PROFILE_PORT > 0 && PROFILE_PORT < 65536)) || die "Tracy port must be between 1 and 65535"
@@ -197,7 +201,7 @@ else
     fi
     [[ -x ./gsplat ]] || die "./gsplat is missing or not executable"
 
-    ./gsplat "${APP_ARGS[@]}" >"$run_dir/gsplat.log" 2>&1 &
+    ./gsplat "render_mode=$PROFILE_RENDER_MODE" "${APP_ARGS[@]}" >"$run_dir/gsplat.log" 2>&1 &
     app_pid=$!
     if [[ -n "$PROFILE_PORT" ]]; then
         tracy_port="$PROFILE_PORT"
@@ -210,15 +214,6 @@ else
     fi
 
     echo "gsplat Tracy endpoint: 127.0.0.1:$tracy_port"
-    echo "Prepare the renderer for ${PROFILE_PREPARE_SECONDS}s..."
-    for ((second = 0; second < PROFILE_PREPARE_SECONDS; ++second)); do
-        if ! kill -0 "$app_pid" 2>/dev/null; then
-            cat "$run_dir/gsplat.log" >&2
-            die "gsplat exited before capture started"
-        fi
-        sleep 1
-    done
-
     trace_path="$run_dir/renderer.tracy"
     trace_windows="$(WINEDEBUG=-all winepath -w "$trace_path" 2>/dev/null | tail -n 1 | tr -d '\r')"
     [[ -n "$trace_windows" ]] || die "winepath failed to convert '$trace_path'"

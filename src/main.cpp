@@ -139,9 +139,10 @@ static void app_init(void) {
     state->colmap_dir  = sargs_value("colmap");
     state->mesh_path   = sargs_value("mesh");
     state->object_path = sargs_value("object");
+    const char* render_mode = sargs_value("render_mode");
 
     // Set defaults. Native and web builds can override these with sokol_args:
-    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb
+    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb render_mode=gps
     //   index.html?ply=res/export_n01.sog&colmap=res/colmap&mesh=res/foo.glb
     state->ply_path    = state->ply_path[0]    ? state->ply_path    : "res/export_n01.sog";
     //state->object_path = state->object_path ? state->object_path : "res/priest.glb";
@@ -184,6 +185,15 @@ static void app_init(void) {
         LOG(ERROR|RENDERER|INIT, "Renderer init failed");
         sapp_quit();
         return;
+    }
+    if (SDL_strcmp(render_mode, "stochastic") == 0) {
+        state->renderer.splat_render_mode = SplatRenderMode::StochasticSplats;
+    } else if (SDL_strcmp(render_mode, "gps") == 0) {
+        state->renderer.splat_render_mode = SplatRenderMode::GaussianPointSplatting;
+    } else if (render_mode[0] != '\0' && SDL_strcmp(render_mode, "alpha") != 0) {
+        LOG(WARN|RENDERER|INIT,
+            "Unknown render_mode '%s' (expected alpha, stochastic, or gps); using alpha",
+            render_mode);
     }
 
     // Scene
