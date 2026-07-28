@@ -1,248 +1,467 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Renderer profiling automation plan
-# ===================================
-#
-# Goal
-# ----
-# Replace the current manual Tracy workflow with one command that:
-#
-#   1. Builds gsplat with Tracy enabled.
-#   2. Starts a headless Tracy capture under Wine.
-#   3. Launches gsplat and records a fixed-duration profiling session.
-#   4. Saves the session as a .tracy file.
-#   5. Exports individual CPU and GPU zones as CSV.
-#   6. Discards warm-up/incomplete frames and aggregates steady-state frames.
-#   7. Prints median, mean, and p90 timings plus a representative frame.
-#
-# This file is currently documentation/a scaffold, not an active script. Keep
-# the commands below commented until the capture and analysis steps have been
-# validated against a manually inspected Tracy session.
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+PROFILE_SECONDS="${PROFILE_SECONDS:-15}"
+PROFILE_PREPARE_SECONDS="${PROFILE_PREPARE_SECONDS:-8}"
+PROFILE_WARMUP_FRAMES="${PROFILE_WARMUP_FRAMES:-120}"
+PROFILE_OUTPUT_DIR="${PROFILE_OUTPUT_DIR:-build/profiles}"
+PROFILE_PORT="${PROFILE_PORT:-}"
+WINE="${WINE:-wine}"
+BUILD=1
+LABEL="renderer"
+ANALYZE_TRACE=""
+APP_ARGS=()
+capture_pid=""
+app_pid=""
+
+usage() {
+    cat <<'EOF'
+Usage: ./profile.sh [options] [-- gsplat-arguments...]
+
+Build gsplat with Tracy, capture a timed interactive renderer session, and
+print steady-state CPU/GPU zone statistics.
+
+Options:
+  -s, --seconds N          Capture duration after connection (default: 15)
+      --prepare-seconds N  Delay after launching gsplat (default: 8)
+  -p, --port N             Tracy port (default: discover from launched gsplat)
+  -w, --warmup-frames N    Complete frames to discard (default: 120)
+  -o, --output DIR         Profile output root (default: build/profiles)
+  -l, --label NAME         Label used in the run directory (default: renderer)
+      --no-build           Use the existing profiler-enabled ./gsplat binary
+      --analyze TRACE      Analyze an existing .tracy file without capturing
+  -h, --help               Show this help
+
+Examples:
+  ./profile.sh
+  ./profile.sh --seconds 20 --warmup-frames 100 -- ply=res/scene.sog
+  ./profile.sh --analyze bin/tracy/gsplat.tracy --warmup-frames 30
+
+During a live capture, configure the renderer and move the camera normally.
+Keep splat diagnostics disabled when measuring GPS because they perturb timing.
+EOF
+}
+
+die() {
+    echo "profile.sh: $*" >&2
+    exit 1
+}
+
+require_uint() {
+    local name="$1"
+    local value="$2"
+    [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be a non-negative integer"
+}
+
+while (($# > 0)); do
+    case "$1" in
+        -s|--seconds)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_SECONDS="$2"
+            shift 2
+            ;;
+        -w|--warmup-frames)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_WARMUP_FRAMES="$2"
+            shift 2
+            ;;
+        --prepare-seconds)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_PREPARE_SECONDS="$2"
+            shift 2
+            ;;
+        -p|--port)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_PORT="$2"
+            shift 2
+            ;;
+        -o|--output)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -l|--label)
+            (($# >= 2)) || die "$1 requires a value"
+            LABEL="$2"
+            shift 2
+            ;;
+        --no-build)
+            BUILD=0
+            shift
+            ;;
+        --analyze)
+            (($# >= 2)) || die "$1 requires a trace path"
+            ANALYZE_TRACE="$2"
+            BUILD=0
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            APP_ARGS=("$@")
+            break
+            ;;
+        *)
+            die "unknown option '$1' (pass gsplat arguments after --)"
+            ;;
+    esac
+done
+
+require_uint "capture seconds" "$PROFILE_SECONDS"
+require_uint "preparation seconds" "$PROFILE_PREPARE_SECONDS"
+require_uint "warm-up frame count" "$PROFILE_WARMUP_FRAMES"
+((PROFILE_SECONDS > 0)) || die "capture seconds must be greater than zero"
+if [[ -n "$PROFILE_PORT" ]]; then
+    require_uint "Tracy port" "$PROFILE_PORT"
+    ((PROFILE_PORT > 0 && PROFILE_PORT < 65536)) || die "Tracy port must be between 1 and 65535"
+fi
+
+command -v "$WINE" >/dev/null 2>&1 || die "Wine executable '$WINE' was not found"
+command -v winepath >/dev/null 2>&1 || die "winepath was not found"
+command -v python3 >/dev/null 2>&1 || die "python3 was not found"
+[[ -f bin/tracy/tracy-capture.exe ]] || die "bin/tracy/tracy-capture.exe is missing"
+[[ -f bin/tracy/tracy-csvexport.exe ]] || die "bin/tracy/tracy-csvexport.exe is missing"
+
+safe_label="$(printf '%s' "$LABEL" | tr -cs '[:alnum:]_.-' '_')"
+safe_label="${safe_label#_}"
+safe_label="${safe_label%_}"
+[[ -n "$safe_label" ]] || safe_label="renderer"
+run_id="$(date +%Y%m%d-%H%M%S)-${safe_label}"
+run_dir="$PROFILE_OUTPUT_DIR/$run_id"
+mkdir -p "$run_dir"
+run_dir="$(realpath "$run_dir")"
+cpu_csv="$run_dir/cpu-events.csv"
+gpu_csv="$run_dir/gpu-events.csv"
+summary_csv="$run_dir/summary.csv"
+
+stop_process() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "-$signal" "$pid" 2>/dev/null || true
+        for _ in {1..20}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+cleanup() {
+    stop_process "$app_pid" TERM
+    stop_process "$capture_pid" INT
+}
+trap cleanup EXIT INT TERM
+
+discover_tracy_port() {
+    local pid="$1"
+    local port=""
+    command -v ss >/dev/null 2>&1 || return 1
+    for _ in {1..150}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        port="$(ss -H -ltnp 2>/dev/null | awk -v owner="pid=$pid," '
+            index($0, owner) {
+                count = split($4, address, ":")
+                print address[count]
+                exit
+            }
+        ')"
+        if [[ "$port" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+if [[ -n "$ANALYZE_TRACE" ]]; then
+    [[ -f "$ANALYZE_TRACE" ]] || die "trace '$ANALYZE_TRACE' does not exist"
+    trace_path="$(realpath "$ANALYZE_TRACE")"
+    echo "Analyzing existing trace: $trace_path"
+else
+    if ((BUILD)); then
+        echo "Building profiler-enabled gsplat..."
+        ENABLE_PROFILER=1 ./build.sh
+    fi
+    [[ -x ./gsplat ]] || die "./gsplat is missing or not executable"
+
+    ./gsplat "${APP_ARGS[@]}" >"$run_dir/gsplat.log" 2>&1 &
+    app_pid=$!
+    if [[ -n "$PROFILE_PORT" ]]; then
+        tracy_port="$PROFILE_PORT"
+    else
+        echo "Waiting for gsplat's Tracy endpoint..."
+        if ! tracy_port="$(discover_tracy_port "$app_pid")"; then
+            cat "$run_dir/gsplat.log" >&2
+            die "could not discover the Tracy port for gsplat; use --port to specify it"
+        fi
+    fi
+
+    echo "gsplat Tracy endpoint: 127.0.0.1:$tracy_port"
+    echo "Prepare the renderer for ${PROFILE_PREPARE_SECONDS}s..."
+    for ((second = 0; second < PROFILE_PREPARE_SECONDS; ++second)); do
+        if ! kill -0 "$app_pid" 2>/dev/null; then
+            cat "$run_dir/gsplat.log" >&2
+            die "gsplat exited before capture started"
+        fi
+        sleep 1
+    done
+
+    trace_path="$run_dir/renderer.tracy"
+    trace_windows="$(WINEDEBUG=-all winepath -w "$trace_path" 2>/dev/null | tail -n 1 | tr -d '\r')"
+    [[ -n "$trace_windows" ]] || die "winepath failed to convert '$trace_path'"
+
+    echo "Starting ${PROFILE_SECONDS}s Tracy capture. Exercise the renderer..."
+    WINEDEBUG=-all "$WINE" bin/tracy/tracy-capture.exe \
+        -a 127.0.0.1 \
+        -p "$tracy_port" \
+        -o "$trace_windows" \
+        -f \
+        -s "$PROFILE_SECONDS" \
+        >"$run_dir/capture.log" 2>&1 &
+    capture_pid=$!
+
+    set +e
+    wait "$capture_pid"
+    capture_status=$?
+    set -e
+    capture_pid=""
+
+    stop_process "$app_pid" TERM
+    app_pid=""
+
+    if ((capture_status != 0)); then
+        cat "$run_dir/capture.log" >&2
+        die "Tracy capture failed with status $capture_status"
+    fi
+    [[ -s "$trace_path" ]] || die "Tracy did not produce a non-empty trace"
+fi
+
+trace_windows="$(WINEDEBUG=-all winepath -w "$trace_path" 2>/dev/null | tail -n 1 | tr -d '\r')"
+[[ -n "$trace_windows" ]] || die "winepath failed to convert '$trace_path'"
+
+echo "Exporting CPU events..."
+if ! WINEDEBUG=-all "$WINE" bin/tracy/tracy-csvexport.exe -u "$trace_windows" \
+    >"$cpu_csv" 2>"$run_dir/cpu-export.log"; then
+    cat "$run_dir/cpu-export.log" >&2
+    die "CPU event export failed"
+fi
+
+echo "Exporting GPU events..."
+if ! WINEDEBUG=-all "$WINE" bin/tracy/tracy-csvexport.exe -g "$trace_windows" \
+    >"$gpu_csv" 2>"$run_dir/gpu-export.log"; then
+    cat "$run_dir/gpu-export.log" >&2
+    die "GPU event export failed"
+fi
+
+python3 - "$cpu_csv" "$gpu_csv" "$PROFILE_WARMUP_FRAMES" "$summary_csv" "$trace_path" <<'PY'
+import csv
+import math
+import statistics
+import sys
+from collections import defaultdict
+
+cpu_path, gpu_path, warmup_arg, summary_path, trace_path = sys.argv[1:]
+warmup = int(warmup_arg)
 
 
-# Proposed interface
-# ------------------
-#
-#   ./profile.sh --seconds 15 --warmup-frames 120 --output build/profiles
-#
-# Future deterministic benchmark support could add renderer-specific options:
-#
-#   ./profile.sh --frames 300 --warmup-frames 120 \
-#       --render-mode gps --gps-ss 2 --gps-budget-m 250
-#
-# Environment/command overrides should eventually include:
-#
-#   PROFILE_SECONDS="${PROFILE_SECONDS:-15}"
-#   PROFILE_WARMUP_FRAMES="${PROFILE_WARMUP_FRAMES:-120}"
-#   PROFILE_OUTPUT_DIR="${PROFILE_OUTPUT_DIR:-build/profiles}"
-#   WINE="${WINE:-wine}"
-#   GAMESPLAT_ARGS=("$@")
+def read_events(path, gpu=False):
+    events = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return events
+        for row in reader:
+            try:
+                if gpu:
+                    timestamp = int(row["Time from start of program"])
+                    duration = int(row["GPU execution time"])
+                else:
+                    timestamp = int(row["ns_since_start"])
+                    duration = int(row["exec_time_ns"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            name = (row.get("name") or "").strip()
+            if name and duration >= 0:
+                events.append((timestamp, duration, name))
+    return events
 
 
-# Dependencies and validation
-# ---------------------------
-#
-# The repository currently bundles matching Tracy 0.13.1 Windows tools:
-#
-#   bin/tracy/tracy-capture.exe
-#   bin/tracy/tracy-csvexport.exe
-#
-# The active implementation should verify that these commands exist:
-#
-#   command -v "$WINE" >/dev/null
-#   command -v python3 >/dev/null
-#   test -f bin/tracy/tracy-capture.exe
-#   test -f bin/tracy/tracy-csvexport.exe
-#
-# It should create a timestamped output directory so repeated runs do not
-# overwrite one another, for example:
-#
-#   run_id="$(date +%Y%m%d-%H%M%S)"
-#   run_dir="$PROFILE_OUTPUT_DIR/$run_id"
-#   mkdir -p "$run_dir"
-#   trace_path="$run_dir/renderer.tracy"
-#   cpu_csv="$run_dir/cpu-events.csv"
-#   gpu_csv="$run_dir/gpu-events.csv"
+def percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
 
 
-# Step 1: build the profiled application
-# --------------------------------------
-#
-#   ENABLE_PROFILER=1 ./build.sh
-#
-# The build must finish successfully before capture starts. Avoid rebuilding
-# between compared runs unless the code or profiler configuration changed.
+def stats(values):
+    return {
+        "count": len(values),
+        "total": sum(values),
+        "median": statistics.median(values),
+        "mean": statistics.fmean(values),
+        "p90": percentile(values, 0.90),
+        "min": min(values),
+        "max": max(values),
+    }
 
 
-# Step 2: start a headless Tracy capture
-# --------------------------------------
-#
-# tracy-capture waits for gsplat to connect. Its -s timer starts after the
-# connection succeeds. -f allows replacing the selected trace path.
-#
-# Wine usually accepts native paths, but converting the absolute output path
-# explicitly is less ambiguous:
-#
-#   trace_windows="$($WINE winepath -w "$(realpath -m "$trace_path")")"
-#   "$WINE" bin/tracy/tracy-capture.exe \
-#       -a 127.0.0.1 \
-#       -p 8086 \
-#       -o "$trace_windows" \
-#       -f \
-#       -s "$PROFILE_SECONDS" &
-#   capture_pid=$!
-#
-# Install a cleanup trap before launching either background process. It should
-# terminate only processes started by this script and should preserve the exit
-# status of a failed capture/export:
-#
-#   app_pid=""
-#   cleanup() {
-#       if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
-#           kill -TERM "$app_pid" 2>/dev/null || true
-#           wait "$app_pid" 2>/dev/null || true
-#       fi
-#       if [[ -n "${capture_pid:-}" ]] && kill -0 "$capture_pid" 2>/dev/null; then
-#           kill -INT "$capture_pid" 2>/dev/null || true
-#           wait "$capture_pid" 2>/dev/null || true
-#       fi
-#   }
-#   trap cleanup EXIT INT TERM
+def grouped(events, begin, end):
+    result = defaultdict(list)
+    for timestamp, duration, name in events:
+        if begin <= timestamp < end:
+            result[name].append((timestamp, duration))
+    for values in result.values():
+        values.sort()
+    return result
 
 
-# Step 3: launch and exercise gsplat
-# ----------------------------------
-#
-#   ./gsplat "${GAMESPLAT_ARGS[@]}" &
-#   app_pid=$!
-#
-# Initial implementation:
-#
-#   - Keep camera movement/manual interaction during PROFILE_SECONDS.
-#   - Print a prompt explaining that capture has started.
-#   - Do not enable splat diagnostics during measured GPS runs because their
-#     synchronous readback and shader atomics perturb the profile.
-#
-# This already eliminates manual Tracy connection, saving, frame-statistics
-# setup, and clipboard export. Camera automation should be added separately;
-# shell-driven xdotool input would be brittle and should not be the long-term
-# benchmark mechanism.
-#
-# Wait for tracy-capture to finish and save the trace, then stop gsplat:
-#
-#   wait "$capture_pid"
-#   capture_pid=""
-#   kill -TERM "$app_pid" 2>/dev/null || true
-#   wait "$app_pid" 2>/dev/null || true
-#   app_pid=""
-#
-# Do not SIGKILL tracy-capture. It writes/finalizes the .tracy file only after
-# its normal capture loop exits.
+def ordered_names(groups, preferred, minimum_count):
+    present = [name for name, values in groups.items() if len(values) >= minimum_count]
+    first = [name for name in preferred if name in present]
+    return first + sorted(set(present) - set(first))
 
 
-# Step 4: export individual CPU and GPU events
-# --------------------------------------------
-#
-# tracy-csvexport cannot restrict aggregate output to a frame/time range, so
-# export individual events and perform range selection ourselves:
-#
-#   "$WINE" bin/tracy/tracy-csvexport.exe -u "$trace_windows" > "$cpu_csv"
-#   "$WINE" bin/tracy/tracy-csvexport.exe -g "$trace_windows" > "$gpu_csv"
-#
-# CPU -u columns in Tracy 0.13.1:
-#
-#   name,src_file,src_line,ns_since_start,exec_time_ns,thread,value
-#
-# GPU -g columns:
-#
-#   name,src_file,Time from start of program,GPU execution time
-#
-# Redirected stdout is written by the Linux shell, so the CSV paths themselves
-# do not need Wine conversion.
+cpu_events = read_events(cpu_path)
+gpu_events = read_events(gpu_path, gpu=True)
+cpu_anchors = sorted(event for event in cpu_events if event[2] == "render submit")
+
+if len(cpu_anchors) < warmup + 2:
+    print(
+        f"profile.sh: trace has {len(cpu_anchors)} complete render anchors, "
+        f"not enough to discard {warmup} warm-up frames",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+# Exclude the final anchor because GPU query results for the last submitted
+# frame may not have been collected before capture ended.
+steady_anchors = cpu_anchors[warmup:-1]
+range_begin = steady_anchors[0][0]
+range_end = cpu_anchors[-1][0]
+cpu_groups = grouped(cpu_events, range_begin, range_end)
+gpu_groups = grouped(gpu_events, range_begin, range_end)
+frame_count = len(steady_anchors)
+minimum_count = max(1, frame_count // 2)
+
+cpu_preferred = [
+    "render submit",
+    "render commit",
+    "frame update",
+    "imgui",
+    "gaussian gpu cull/project",
+    "gaussian gpu sort",
+    "gps clear",
+    "gps count",
+    "gps expand",
+    "gps splat",
+    "gps resolve",
+    "render imgui pass",
+]
+gpu_preferred = [
+    "gaussian gpu cull/project",
+    "gaussian gpu sort",
+    "radix hist",
+    "radix prefix",
+    "radix scatter",
+    "gps clear",
+    "gps count",
+    "gps expand",
+    "gps splat",
+    "gps resolve",
+    "splat pass",
+    "mesh pass",
+    "overlay pass",
+    "wireframe pass",
+    "imgui pass",
+]
+
+cpu_names = ordered_names(cpu_groups, cpu_preferred, minimum_count)
+gpu_names = ordered_names(gpu_groups, gpu_preferred, minimum_count)
+rows = []
 
 
-# Step 5: aggregate frames with embedded Python
-# ---------------------------------------------
-#
-# Embed a dependency-free Python program in this script rather than requiring
-# pandas or a second repository script:
-#
-#   python3 - "$cpu_csv" "$gpu_csv" "$PROFILE_WARMUP_FRAMES" <<'PY'
-#   # Parse with csv.DictReader and aggregate with statistics.
-#   PY
-#
-# Analysis algorithm:
-#
-#   1. Read all CPU and GPU event rows and convert timestamps/durations to int.
-#   2. Sort every zone's occurrences by timestamp because csvexport groups
-#      records by source location rather than guaranteeing global time order.
-#   3. Use CPU "render submit" occurrences as CPU frame anchors.
-#   4. Use GPU "gaussian gpu cull/project" occurrences as GPU frame anchors.
-#   5. Associate one occurrence of each expected renderer zone with each anchor
-#      by timestamp/order. Discard incomplete first/last frames.
-#   6. Drop PROFILE_WARMUP_FRAMES complete frames before calculating results.
-#   7. Report count, median, mean, p90, min, and max for each available zone.
-#   8. Compute total measured GPU renderer time per frame and report the frame
-#      whose total is closest to the median as the representative frame.
-#
-# Start with these CPU zones:
-#
-#   render submit
-#   render commit
-#   gaussian gpu cull/project
-#   gps clear
-#   gps count
-#   gps expand
-#   gps splat
-#   gps resolve
-#   render imgui pass
-#
-# Start with these GPU zones:
-#
-#   gaussian gpu cull/project
-#   gps clear
-#   gps count
-#   gps expand
-#   gps splat
-#   gps resolve
-#   imgui pass
-#
-# Zones not present in a selected rendering mode should be shown as unavailable,
-# not treated as zero. The output should identify the trace path and all run
-# parameters so results can be reproduced.
-#
-# Prefer distributions across many steady-state frames over manually selecting
-# one frame. A proposed text table is:
-#
-#   Renderer profile: 300 steady-state frames
-#
-#   Zone                         median_ms   mean_ms    p90_ms
-#   CPU render submit                 2.41       2.53       2.88
-#   GPU gaussian cull/project         3.72       3.75       3.91
-#   GPU gps clear                     0.81       0.82       0.86
-#   GPU gps count                     0.34       0.35       0.38
-#   GPU gps expand                    1.20       1.24       1.35
-#   GPU gps splat                    18.42      18.57      19.30
-#   GPU gps resolve                   0.73       0.74       0.79
-#   GPU measured total               25.22      25.47      26.40
-#
-#   Representative steady-state frame: 184
-#   Trace: build/profiles/<run-id>/renderer.tracy
+def print_section(title, names, groups, domain):
+    if not names:
+        print(f"\n{title}: no recurring zones found")
+        return
+    print(f"\n{title}")
+    print(f"{'Zone':34} {'count':>7} {'median_ms':>11} {'mean_ms':>10} "
+          f"{'p90_ms':>10} {'min_ms':>10} {'max_ms':>10}")
+    for name in names:
+        durations = [duration for _, duration in groups[name]]
+        value = stats(durations)
+        print(
+            f"{name[:34]:34} {value['count']:7d} "
+            f"{value['median'] / 1e6:11.3f} {value['mean'] / 1e6:10.3f} "
+            f"{value['p90'] / 1e6:10.3f} {value['min'] / 1e6:10.3f} "
+            f"{value['max'] / 1e6:10.3f}"
+        )
+        rows.append({"domain": domain, "name": name, **value})
 
 
-# Future: deterministic renderer benchmark mode
-# ---------------------------------------------
-#
-# Fully reproducible runs require application support rather than synthetic
-# keyboard/mouse input. Add command-line arguments to gsplat for:
-#
-#   - Rendering mode.
-#   - GPS supersampling and work budget.
-#   - Accumulation/TAA settings.
-#   - Warm-up and measured frame counts.
-#   - A fixed camera or deterministic camera path.
-#   - Automatic exit after the measured frame count.
-#
-# Once available, profile.sh can sweep configurations such as 8M/32M/250M GPS
-# budgets and print a comparison table from one invocation. Until then, record
-# the manually selected renderer settings alongside every trace.
+print(f"\nRenderer profile: {frame_count} steady-state frames")
+print(f"Discarded warm-up frames: {warmup}")
+print_section("CPU instrumentation", cpu_names, cpu_groups, "CPU")
+print_section("GPU zones", gpu_names, gpu_groups, "GPU")
+
+# GPS stages occur once and in the same order each frame. Align them by
+# occurrence to identify an actual frame nearest the median measured GPS time.
+gps_names = [
+    "gaussian gpu cull/project",
+    "gps clear",
+    "gps count",
+    "gps expand",
+    "gps splat",
+    "gps resolve",
+]
+available_gps = [name for name in gps_names if name in gpu_groups]
+if len(available_gps) >= 2:
+    aligned_count = min(len(gpu_groups[name]) for name in available_gps)
+    frame_totals = [
+        sum(gpu_groups[name][index][1] for name in available_gps)
+        for index in range(aligned_count)
+    ]
+    median_total = statistics.median(frame_totals)
+    representative = min(
+        range(aligned_count), key=lambda index: abs(frame_totals[index] - median_total)
+    )
+    capture_frame = warmup + representative + 1
+    print(f"\nRepresentative steady-state frame: {capture_frame}")
+    print(f"Measured GPU total: {frame_totals[representative] / 1e6:.3f} ms")
+    for name in available_gps:
+        print(f"  {name:31} {gpu_groups[name][representative][1] / 1e6:8.3f} ms")
+
+with open(summary_path, "w", newline="", encoding="utf-8") as f:
+    fieldnames = ["domain", "name", "count", "total_ns", "median_ns", "mean_ns", "p90_ns", "min_ns", "max_ns"]
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            "domain": row["domain"],
+            "name": row["name"],
+            "count": row["count"],
+            "total_ns": row["total"],
+            "median_ns": row["median"],
+            "mean_ns": row["mean"],
+            "p90_ns": row["p90"],
+            "min_ns": row["min"],
+            "max_ns": row["max"],
+        })
+
+print(f"\nTrace: {trace_path}")
+print(f"Summary CSV: {summary_path}")
+PY
+
+echo "Raw CPU CSV: $cpu_csv"
+echo "Raw GPU CSV: $gpu_csv"
