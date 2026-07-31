@@ -73,6 +73,10 @@ struct AppState {
 
     Camera cam;
     bool   keys[9]; // W A S D Space LCtrl LShift E Q
+    bool   automated_look;
+    float  automated_look_time;
+    float  automated_look_base_yaw;
+    float  automated_look_base_pitch;
     float    refview_max_alpha;
     float    node_half_size;
     bool     show_node_boxes;
@@ -140,9 +144,10 @@ static void app_init(void) {
     state->mesh_path   = sargs_value("mesh");
     state->object_path = sargs_value("object");
     const char* render_mode = sargs_value("render_mode");
+    const char* camera_motion = sargs_value("camera_motion");
 
     // Set defaults. Native and web builds can override these with sokol_args:
-    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb render_mode=gps
+    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb render_mode=gps camera_motion=look
     //   index.html?ply=res/export_n01.sog&colmap=res/colmap&mesh=res/foo.glb
     state->ply_path    = state->ply_path[0]    ? state->ply_path    : "res/export_n01.sog";
     //state->object_path = state->object_path ? state->object_path : "res/priest.glb";
@@ -280,6 +285,15 @@ static void app_init(void) {
 
     // Camera
     camera_init(&state->cam);
+    state->automated_look = SDL_strcmp(camera_motion, "look") == 0;
+    state->automated_look_time = 0.0f;
+    state->automated_look_base_yaw = state->cam.yaw;
+    state->automated_look_base_pitch = state->cam.pitch;
+    if (camera_motion[0] != '\0' && SDL_strcmp(camera_motion, "none") != 0 && !state->automated_look) {
+        LOG(WARN|RENDERER|INIT,
+            "Unknown camera_motion '%s' (expected none or look); disabling automated motion",
+            camera_motion);
+    }
     sapp_lock_mouse(true); // start in camera mode
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
 
@@ -841,6 +855,11 @@ static void app_frame(void) {
         camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, dt);
     } else {
         camera_update(&state->cam, state->keys, mouse_dx, mouse_dy, 0);
+    }
+    if (state->automated_look) {
+        state->automated_look_time += dt;
+        state->cam.yaw = state->automated_look_base_yaw + state->automated_look_time * 0.35f;
+        state->cam.pitch = state->automated_look_base_pitch + sinf(state->automated_look_time * 0.7f) * 0.15f;
     }
 
     // Get framebuffer size
