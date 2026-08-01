@@ -10,6 +10,9 @@ PROFILE_OUTPUT_DIR="${PROFILE_OUTPUT_DIR:-build/profiles}"
 PROFILE_PORT="${PROFILE_PORT:-}"
 PROFILE_RENDER_MODE="${PROFILE_RENDER_MODE:-alpha}"
 PROFILE_CAMERA_MOTION="${PROFILE_CAMERA_MOTION:-look}"
+PROFILE_GPS_SS="${PROFILE_GPS_SS:-2}"
+PROFILE_GPS_BUDGET_M="${PROFILE_GPS_BUDGET_M:-8}"
+PROFILE_GPS_ACCUMULATION="${PROFILE_GPS_ACCUMULATION:-off}"
 WINE="${WINE:-wine}"
 BUILD=1
 LABEL="renderer"
@@ -29,6 +32,9 @@ Options:
   -s, --seconds N          Capture duration after connection (default: 15)
   -r, --render-mode MODE   Startup mode: alpha, stochastic, or gps (default: alpha)
   -c, --camera-motion MODE Camera motion: look or none (default: look)
+      --gps-ss N           GPS supersampling factor, 1..4 (default: 2)
+      --gps-budget-m N     GPS work budget in Mi items, 1..250 (default: 8)
+      --gps-accumulation M GPS accumulation: on or off (default: off)
   -p, --port N             Tracy port (default: discover from launched gsplat)
   -w, --warmup-frames N    Complete frames to discard (default: 120)
   -o, --output DIR         Profile output root (default: build/profiles)
@@ -39,7 +45,7 @@ Options:
 
 Examples:
   ./profile.sh
-  ./profile.sh --render-mode gps --label gps
+  ./profile.sh --render-mode gps --gps-budget-m 32 --label gps-32m
   ./profile.sh --render-mode gps --camera-motion none
   ./profile.sh --seconds 20 --warmup-frames 100 -- ply=res/scene.sog
   ./profile.sh --analyze bin/tracy/gsplat.tracy --warmup-frames 30
@@ -79,6 +85,21 @@ while (($# > 0)); do
         -c|--camera-motion)
             (($# >= 2)) || die "$1 requires a value"
             PROFILE_CAMERA_MOTION="$2"
+            shift 2
+            ;;
+        --gps-ss)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_GPS_SS="$2"
+            shift 2
+            ;;
+        --gps-budget-m)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_GPS_BUDGET_M="$2"
+            shift 2
+            ;;
+        --gps-accumulation)
+            (($# >= 2)) || die "$1 requires a value"
+            PROFILE_GPS_ACCUMULATION="$2"
             shift 2
             ;;
         -p|--port)
@@ -123,7 +144,11 @@ done
 
 require_uint "capture seconds" "$PROFILE_SECONDS"
 require_uint "warm-up frame count" "$PROFILE_WARMUP_FRAMES"
+require_uint "GPS supersampling factor" "$PROFILE_GPS_SS"
+require_uint "GPS work budget" "$PROFILE_GPS_BUDGET_M"
 ((PROFILE_SECONDS > 0)) || die "capture seconds must be greater than zero"
+((PROFILE_GPS_SS >= 1 && PROFILE_GPS_SS <= 4)) || die "GPS supersampling factor must be between 1 and 4"
+((PROFILE_GPS_BUDGET_M >= 1 && PROFILE_GPS_BUDGET_M <= 250)) || die "GPS work budget must be between 1 and 250"
 case "$PROFILE_RENDER_MODE" in
     alpha|stochastic|gps) ;;
     *) die "render mode must be alpha, stochastic, or gps" ;;
@@ -131,6 +156,10 @@ esac
 case "$PROFILE_CAMERA_MOTION" in
     look|none) ;;
     *) die "camera motion must be look or none" ;;
+esac
+case "$PROFILE_GPS_ACCUMULATION" in
+    on|off) ;;
+    *) die "GPS accumulation must be on or off" ;;
 esac
 if [[ -n "$PROFILE_PORT" ]]; then
     require_uint "Tracy port" "$PROFILE_PORT"
@@ -213,6 +242,8 @@ else
     [[ -x ./gsplat ]] || die "./gsplat is missing or not executable"
 
     ./gsplat "render_mode=$PROFILE_RENDER_MODE" "camera_motion=$PROFILE_CAMERA_MOTION" \
+        "gps_ss=$PROFILE_GPS_SS" "gps_budget_m=$PROFILE_GPS_BUDGET_M" \
+        "gps_accumulation=$PROFILE_GPS_ACCUMULATION" \
         "${APP_ARGS[@]}" >"$run_dir/gsplat.log" 2>&1 &
     app_pid=$!
     if [[ -n "$PROFILE_PORT" ]]; then

@@ -145,9 +145,12 @@ static void app_init(void) {
     state->object_path = sargs_value("object");
     const char* render_mode = sargs_value("render_mode");
     const char* camera_motion = sargs_value("camera_motion");
+    const char* gps_ss = sargs_value("gps_ss");
+    const char* gps_budget_m = sargs_value("gps_budget_m");
+    const char* gps_accumulation = sargs_value("gps_accumulation");
 
     // Set defaults. Native and web builds can override these with sokol_args:
-    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap mesh=res/foo.glb render_mode=gps camera_motion=look
+    //   ./gsplat ply=res/export_n01.sog colmap=res/colmap render_mode=gps camera_motion=look gps_ss=2 gps_budget_m=8 gps_accumulation=off
     //   index.html?ply=res/export_n01.sog&colmap=res/colmap&mesh=res/foo.glb
     state->ply_path    = state->ply_path[0]    ? state->ply_path    : "res/export_n01.sog";
     //state->object_path = state->object_path ? state->object_path : "res/priest.glb";
@@ -199,6 +202,33 @@ static void app_init(void) {
         LOG(WARN|RENDERER|INIT,
             "Unknown render_mode '%s' (expected alpha, stochastic, or gps); using alpha",
             render_mode);
+    }
+    if (gps_ss[0] != '\0') {
+        int value = SDL_atoi(gps_ss);
+        if (value >= 1 && value <= 4) {
+            state->renderer.gps_supersample_factor = (uint32_t)value;
+        } else {
+            LOG(WARN|RENDERER|INIT, "Invalid gps_ss '%s' (expected 1..4); using %u",
+                gps_ss, state->renderer.gps_supersample_factor);
+        }
+    }
+    if (gps_budget_m[0] != '\0') {
+        int value = SDL_atoi(gps_budget_m);
+        if (value >= 1 && value <= 250) {
+            state->renderer.gps_max_work_items = (uint32_t)value * 1024u * 1024u;
+        } else {
+            LOG(WARN|RENDERER|INIT, "Invalid gps_budget_m '%s' (expected 1..250); using %uM",
+                gps_budget_m, state->renderer.gps_max_work_items / (1024u * 1024u));
+        }
+    }
+    if (SDL_strcmp(gps_accumulation, "off") == 0) {
+        state->renderer.stochastic_accumulation_enabled = false;
+    } else if (SDL_strcmp(gps_accumulation, "on") == 0) {
+        state->renderer.stochastic_accumulation_enabled = true;
+    } else if (gps_accumulation[0] != '\0') {
+        LOG(WARN|RENDERER|INIT,
+            "Unknown gps_accumulation '%s' (expected on or off); using on",
+            gps_accumulation);
     }
 
     // Scene
