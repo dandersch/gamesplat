@@ -113,9 +113,9 @@ chunks which can be distributed independently.
 
 ### Persistent compact-list consumers
 
-**Date:** 2026-08-05  
+**Date:** 2026-08-05
 **Configuration:** 8M budget, 2x supersampling, accumulation off,
-deterministic look motion.  
+deterministic look motion.
 **Decision:** reverted.
 
 The goal was to dispatch a fixed pool rather than the full capacity while
@@ -146,6 +146,27 @@ future attempt needs a different synchronization scheme, evidence that it
 compiles for WGSL, and a reason it will preserve enough independent warps to
 hide atomic latency.
 
+### Hard-coded 2x supersampling loop
+
+**Date:** 2026-08-06
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The splat shader temporarily replaced its runtime-derived loop count and point
+scale with compile-time constants of 4 and 2.0. An immediate control capture
+restored the runtime expressions with otherwise identical settings.
+
+| Splat shader | Median `gps splat` | p90 `gps splat` |
+| --- | ---: | ---: |
+| Hard-coded 2x constants | 15.964 ms | 17.398 ms |
+| Runtime supersampling control | 16.057 ms | 17.209 ms |
+
+The 0.6% median difference is within run-to-run variation, while the
+specialized p90 was slightly worse. The GLSL compiler appears to optimize the
+uniform loop sufficiently; permanent supersampling pipeline variants are not
+justified by this result.
+
 ## Ranked next experiments
 
 ### 1. Reduce compact-list expansion cost
@@ -157,9 +178,9 @@ the large-Gaussian imbalance. The consumer should derive the same sample IDs
 from `first_sample + local_index`.
 
 **Potential benefit:** less list memory, fewer expansion writes, and less
-bandwidth before splatting.  
+bandwidth before splatting.
 **Risk:** medium; chunk size affects load balancing, and a looping consumer may
-repeat the persistent-thread regression.  
+repeat the persistent-thread regression.
 **Small experiment:** add a fixed small chunk size and benchmark expansion and
 splat separately at 8M and 250M.
 
@@ -170,24 +191,13 @@ polynomial, transcendental operations (`log`, `sqrt`, `sin`, and `cos`), and
 the supersampling loop. Preserve random inputs and output distribution unless
 an approximation is being evaluated explicitly.
 
-**Potential benefit:** high because this code runs for every generated point.  
+**Potential benefit:** high because this code runs for every generated point.
 **Risk:** low for algebraic/hoisting changes, high for numerical
-approximations.  
+approximations.
 **Small experiment:** use shader variants or temporary Tracy comparisons to
 measure groups of operations before changing their implementation.
 
-### 3. Specialize supersampling variants
-
-The supersampling factor is limited to 1--4, while the shader currently derives
-a runtime loop count. Separate shader variants or compile-time constants may
-allow better unrolling and constant folding.
-
-**Potential benefit:** modest and most likely at 2x--4x supersampling.  
-**Risk:** low to medium; adds pipeline variants and should not alter samples.  
-**Small experiment:** hard-code the measured 2x case in a temporary shader and
-compare only `gps splat` before adding permanent variants.
-
-### 4. Revisit dispatch only with API support or new evidence
+### 3. Revisit dispatch only with API support or new evidence
 
 Indirect dispatch would use the GPU-generated count without CPU synchronization
 or capacity over-dispatch, but the Sokol interface used by this project exposes
@@ -195,8 +205,8 @@ direct `sg_dispatch` rather than a usable indirect compute dispatch path.
 Prefix sums can produce deterministic compact offsets but do not by themselves
 solve dispatch sizing.
 
-**Potential benefit:** removes the observed capacity-dependent overhead.  
-**Risk:** high if it requires backend-specific Sokol changes.  
+**Potential benefit:** removes the observed capacity-dependent overhead.
+**Risk:** high if it requires backend-specific Sokol changes.
 **Revisit when:** Sokol gains suitable indirect dispatch support, or a portable
 multi-dispatch/chunk scheme demonstrates a win in an isolated prototype.
 
