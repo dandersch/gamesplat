@@ -167,6 +167,29 @@ specialized p90 was slightly worse. The GLSL compiler appears to optimize the
 uniform loop sufficiently; permanent supersampling pipeline variants are not
 justified by this result.
 
+### Store projected splat IDs in the work list
+
+**Date:** 2026-08-07
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The compact record temporarily stored the projected `splat_id` instead of the
+source `gaussian_id`. Expansion read the Gaussian-to-splat mapping once per
+Gaussian with work, allowing splatting to remove one indirect mapping read per
+work item. Record size and all sample IDs remained unchanged. An immediate
+control restored the original mapping.
+
+| Variant | Median `gps expand` | Median `gps splat` | Combined |
+| --- | ---: | ---: | ---: |
+| Store projected splat ID | 3.906 ms | 16.820 ms | 20.726 ms |
+| Store Gaussian ID control | 3.690 ms | 16.892 ms | 20.582 ms |
+
+The splat improvement was only 0.4%, indicating that the mapping read is
+probably cache-friendly. Its cost was shifted into expansion, which regressed
+by 5.9%; combined time increased by 0.7%. Keeping Gaussian IDs is both faster
+overall and consistent with the existing pipeline.
+
 ## Ranked next experiments
 
 ### 1. Reduce compact-list expansion cost
