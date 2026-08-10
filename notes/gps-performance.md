@@ -190,6 +190,29 @@ probably cache-friendly. Its cost was shifted into expansion, which regressed
 by 5.9%; combined time increased by 0.7%. Keeping Gaussian IDs is both faster
 overall and consistent with the existing pipeline.
 
+### Precompute the sampling dilogarithm per Gaussian
+
+**Date:** 2026-08-10
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The point-count record temporarily grew from 4 to 8 bytes and stored the exact
+sampling `dilog_alpha`. Counting computed it once per Gaussian and splatting
+loaded it through the existing `gaussian_id`, replacing the polynomial and
+`log()` evaluation performed per compact work item. An immediate control
+restored the 4-byte count and per-work-item calculation.
+
+| Variant | Median `gps count` | Median `gps splat` | Count + splat |
+| --- | ---: | ---: | ---: |
+| Precomputed per Gaussian | 0.400 ms | 15.991 ms | 16.391 ms |
+| Per-work-item control | 0.362 ms | 16.034 ms | 16.396 ms |
+
+Splatting improved by only 0.043 ms while counting regressed by 0.038 ms. The
+combined difference was 0.005 ms, well within run-to-run variation. The extra
+buffer storage/read offsets the saved arithmetic on this GPU, so the simpler
+per-work-item calculation remains preferable.
+
 ## Ranked next experiments
 
 ### 1. Reduce compact-list expansion cost
