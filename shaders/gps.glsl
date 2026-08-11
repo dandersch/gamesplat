@@ -134,8 +134,7 @@ struct GpsExpandUIntData {
 };
 
 struct GpsWorkData {
-    uint gaussian_id;
-    uint sample_id;
+    uvec2 ids; // x Gaussian ID, y sample ID
 };
 
 layout(binding = 0) uniform GpsExpandUBO {
@@ -169,8 +168,7 @@ void main() {
     uint base = atomicAdd(work_count[0].count, count);
     for (uint i = 0u; i < count; ++i) {
         if (base + i >= uint(max_work_items)) break;
-        point_work[base + i].gaussian_id = idx;
-        point_work[base + i].sample_id = i;
+        point_work[base + i].ids = uvec2(idx, i);
     }
 }
 @end
@@ -194,8 +192,7 @@ struct GpsSplatUIntData {
 };
 
 struct GpsSplatWorkData {
-    uint gaussian_id;
-    uint sample_id;
+    uvec2 ids; // x Gaussian ID, y sample ID
 };
 
 layout(binding = 0) uniform GpsSplatUBO {
@@ -253,8 +250,9 @@ void main() {
     uint work_idx = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * uint(work_items_per_row);
     uint actual_work_count = min(work_count[0].count, uint(max_work_items));
     if (work_idx >= actual_work_count) return;
-    uint idx = point_work[work_idx].gaussian_id;
-    uint sample_idx = point_work[work_idx].sample_id;
+    uvec2 work = point_work[work_idx].ids;
+    uint idx = work.x;
+    uint sample_idx = work.y;
 
     uint splat_id = splat_ids[idx].count;
     if (splat_id == 0xFFFFFFFFu) return;

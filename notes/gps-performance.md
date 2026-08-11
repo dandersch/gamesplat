@@ -99,6 +99,29 @@ and resolve. `profile.sh` automates startup, capture, deterministic camera
 movement, shutdown, CSV export, warm-up filtering, and summary statistics. It
 also works over SSH with the monitor off on the test machine.
 
+### Store compact work records as `uvec2`
+
+**Date:** 2026-08-11
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** keep.
+
+The compact `(gaussian_id, sample_id)` record remains 8 bytes but is represented
+as one `uvec2`. Expansion writes both IDs with one vector assignment and
+splatting loads them with one vector read. An A/B/A sequence compared two
+vector captures around an immediate scalar-struct control.
+
+| Record representation | Median `gps expand` | Median `gps splat` | Combined |
+| --- | ---: | ---: | ---: |
+| `uvec2`, first capture | 2.933 ms | 16.084 ms | 19.017 ms |
+| Two scalar fields, control | 3.900 ms | 16.010 ms | 19.910 ms |
+| `uvec2`, confirmation | 2.723 ms | 16.234 ms | 18.957 ms |
+
+The average combined time of the vector captures was 18.987 ms, a 4.6%
+reduction from the scalar control. Expansion improved substantially and
+repeatably; the small splat variation did not offset that gain. Record size,
+sample IDs, RNG inputs, work distribution, and sampling behavior are unchanged.
+
 ## Rejected experiments
 
 ### One invocation per Gaussian
