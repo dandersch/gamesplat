@@ -166,8 +166,10 @@ void main() {
     if (count == 0u) return;
 
     uint base = atomicAdd(work_count[0].count, count);
-    for (uint i = 0u; i < count; ++i) {
-        if (base + i >= uint(max_work_items)) break;
+    uint capacity = uint(max_work_items);
+    if (base >= capacity) return;
+    uint write_count = min(count, capacity - base);
+    for (uint i = 0u; i < write_count; ++i) {
         point_work[base + i].ids = uvec2(idx, i);
     }
 }

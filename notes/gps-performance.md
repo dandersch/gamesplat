@@ -122,6 +122,29 @@ reduction from the scalar control. Expansion improved substantially and
 repeatably; the small splat variation did not offset that gain. Record size,
 sample IDs, RNG inputs, work distribution, and sampling behavior are unchanged.
 
+### Clamp the expansion range before the write loop
+
+**Date:** 2026-08-12
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** keep.
+
+Expansion now returns when an atomically reserved range starts beyond capacity,
+then calculates `min(count, capacity - base)` once. Previously every compact
+record evaluated `base + i >= capacity` and branched out of the loop. The
+written range and compact records are unchanged. An A/B/A sequence compared
+the clamped loop around an immediate per-item-check control.
+
+| Expansion bound | Median `gps expand` | p90 `gps expand` |
+| --- | ---: | ---: |
+| Clamped before loop, first capture | 1.426 ms | 2.252 ms |
+| Per-item check, control | 2.777 ms | 6.303 ms |
+| Clamped before loop, confirmation | 1.430 ms | 2.191 ms |
+
+The clamped form reduced median expansion time by about 49% and also greatly
+reduced its p90. Splat timings varied with the camera workload across captures,
+but this change does not modify the generated records or splat pass.
+
 ## Rejected experiments
 
 ### One invocation per Gaussian
