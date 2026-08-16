@@ -213,6 +213,28 @@ specialized p90 was slightly worse. The GLSL compiler appears to optimize the
 uniform loop sufficiently; permanent supersampling pipeline variants are not
 justified by this result.
 
+### Tighten the resolve supersampling loops
+
+**Date:** 2026-08-16
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The resolve shader temporarily looped directly to the uniform supersampling
+factor and removed a subpixel bounds check guaranteed by the render-target
+dimensions. The control restored the fixed 4x4 loops with runtime breaks and
+the bounds check.
+
+| Resolve traversal | Median `gps resolve` | p90 `gps resolve` |
+| --- | ---: | ---: |
+| Tight loops, first capture | 1.066 ms | 1.078 ms |
+| Original loops, control | 1.056 ms | 1.069 ms |
+| Tight loops, confirmation | 1.067 ms | 1.077 ms |
+
+The tightened form was consistently about 1% slower. The driver likely handles
+the constant-bounded loops better, and the removed checks were not a measurable
+cost. Keep the original resolve traversal.
+
 ### Store projected splat IDs in the work list
 
 **Date:** 2026-08-07
