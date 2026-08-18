@@ -235,6 +235,23 @@ The tightened form was consistently about 1% slower. The driver likely handles
 the constant-bounded loops better, and the removed checks were not a measurable
 cost. Keep the original resolve traversal.
 
+### Reject occluded samples before the depth atomic
+
+**Date:** 2026-08-18
+**Decision:** not benchmarked; reverted because it failed shader generation.
+
+The splat shader temporarily read the current depth key and called `atomicMin`
+only when the candidate could still win. This is logically safe because depth
+keys only decrease during the pass and could avoid contended atomics under
+overdraw.
+
+The shader did not compile for the required WGSL target. WGSL represents a
+storage value used by `atomicMin` as an atomic type and prohibits an ordinary
+load from that value. Replacing the read with an atomic no-op such as
+`atomicAdd(value, 0)` would retain the atomic cost and defeat the experiment.
+Do not retry this approach without a portable atomic-load facility or a
+separate depth representation that does not add greater synchronization cost.
+
 ### Store projected splat IDs in the work list
 
 **Date:** 2026-08-07
