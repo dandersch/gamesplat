@@ -80,15 +80,13 @@ struct MeshGpu {
 
 // Reserved resource bucket for the future Gaussian Point Splatting backend.
 // GPS will use compute passes rather than the current quad fragment pipeline:
-// per-Gaussian point counts -> distributed point work -> atomic point buffer ->
+// per-Gaussian work sizing -> distributed point work -> atomic point buffer ->
 // resolved stochastic color/depth sample consumed by the existing accumulation.
 struct GaussianPointSplatGpu {
     sg_buffer depth_key_buffer;
     sg_view   depth_key_buffer_view;
     sg_buffer color_buffer;
     sg_view   color_buffer_view;
-    sg_buffer point_count_buffer;
-    sg_view   point_count_buffer_view;
     sg_buffer point_offset_buffer;
     sg_view   point_offset_buffer_view;
     sg_buffer point_work_buffer;
@@ -117,7 +115,6 @@ struct Renderer {
     sg_pipeline     radix_prefix_pipeline;
     sg_pipeline     radix_scatter_pipeline;
     sg_pipeline     gps_clear_pipeline;
-    sg_pipeline     gps_count_pipeline;
     sg_pipeline     gps_expand_pipeline;
     sg_pipeline     gps_splat_pipeline;
     sg_pipeline     gps_resolve_pipeline;

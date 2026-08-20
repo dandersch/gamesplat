@@ -23,13 +23,13 @@ The relevant implementation is in `shaders/gps.glsl` and
 
 1. **Cull/project** produces projected Gaussian data and visible IDs.
 2. **Clear** resets the depth/color output buffers and compact work count.
-3. **Count** calculates the number of GPS work records for each Gaussian.
-4. **Expand** atomically reserves ranges and writes compact
+3. **Expand** calculates each Gaussian's work count, atomically reserves a
+   range, and writes compact
    `(gaussian_id, sample_id)` records.
-5. **Splat** dispatches up to the configured work-list capacity. Each valid
+4. **Splat** dispatches up to the configured work-list capacity. Each valid
    invocation consumes one compact record, performs the configured
    supersampling loop, and atomically updates the nearest depth.
-6. **Resolve** converts the atomic depth/color buffers into render targets.
+5. **Resolve** converts the atomic depth/color buffers into render targets.
 
 The splat shader reads the GPU-generated work count directly and rejects
 invocations outside the actual count. This avoids a CPU readback stall, but
@@ -94,8 +94,8 @@ that choice on Sokol's direct-dispatch API.
 
 ### Add per-pass Tracy zones and automated capture
 
-**Decision: keep.** CPU and GPU zones cover GPS clear, count, expand, splat,
-and resolve. `profile.sh` automates startup, capture, deterministic camera
+**Decision: keep.** CPU and GPU zones cover GPS clear, expand, splat, and
+resolve. `profile.sh` automates startup, capture, deterministic camera
 movement, shutdown, CSV export, warm-up filtering, and summary statistics. It
 also works over SSH with the monitor off on the test machine.
 
@@ -144,6 +144,29 @@ the clamped loop around an immediate per-item-check control.
 The clamped form reduced median expansion time by about 49% and also greatly
 reduced its p90. Splat timings varied with the camera workload across captures,
 but this change does not modify the generated records or splat pass.
+
+### Fuse point counting into expansion
+
+**Date:** 2026-08-20
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** keep.
+
+Expansion now calculates each Gaussian's work count before reserving and writing
+its compact range. The separate count dispatch, pipeline, and 4-byte-per-Gaussian
+intermediate buffer were removed. The formulas, randomized fractional rounding,
+compact records, and sample IDs are unchanged.
+
+| Work generation | Median generation | Median `gps splat` | Measured GPU total |
+| --- | ---: | ---: | ---: |
+| Separate count + expand | 1.828 ms | 19.084 ms | 26.665 ms |
+| Fused, first capture | 1.440 ms | 19.262 ms | 26.424 ms |
+| Fused, confirmation | 1.471 ms | 19.251 ms | 26.486 ms |
+
+The fused captures averaged 1.456 ms for work generation, a 20.4% reduction.
+Normal splat variation reduced the end-to-end gain, but measured GPU total
+still improved by an average 0.210 ms (0.8%). Fusion also removes one dispatch
+and the intermediate count buffer.
 
 ## Rejected experiments
 

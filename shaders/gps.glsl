@@ -42,39 +42,47 @@ void main() {
 
 @program gps_clear gps_clear_cs
 
-@cs gps_count_cs
-struct GpsCountProjectedSplatData {
+@cs gps_expand_cs
+struct GpsExpandProjectedSplatData {
     vec4 color_opacity; // rgb color, a opacity
     vec4 center_radius; // xy raster-space center, zw raster-space radius
     vec4 conic_depth;   // xyz inverse covariance/conic, w ndc depth
     vec4 covariance_det; // xyz screen-space covariance (a,b,c), w determinant
 };
 
-struct GpsCountSplatIdData {
+struct GpsExpandSplatIdData {
     uint count;
 };
 
-struct GpsCountUIntData {
+struct GpsExpandUIntData {
     uint count;
 };
 
-layout(binding = 0) uniform GpsCountUBO {
+struct GpsWorkData {
+    uvec2 ids; // x Gaussian ID, y sample ID
+};
+
+layout(binding = 0) uniform GpsExpandUBO {
     int gaussian_count;
+    int max_work_items;
     float supersample_factor;
-    float count_pad0;
-    float count_pad1;
+    float expand_pad0;
 };
 
-layout(binding = 0) readonly buffer GpsCountProjectedSplatBuffer {
-    GpsCountProjectedSplatData projected_splats[];
+layout(binding = 0) readonly buffer GpsExpandProjectedSplatBuffer {
+    GpsExpandProjectedSplatData projected_splats[];
 };
 
-layout(binding = 1) readonly buffer GpsCountSplatIdBuffer {
-    GpsCountSplatIdData splat_ids[];
+layout(binding = 1) buffer GpsExpandWorkCount {
+    GpsExpandUIntData work_count[];
 };
 
-layout(binding = 2) buffer GpsPointCounts {
-    GpsCountUIntData point_counts[];
+layout(binding = 2) buffer GpsPointWork {
+    GpsWorkData point_work[];
+};
+
+layout(binding = 3) readonly buffer GpsExpandSplatIdBuffer {
+    GpsExpandSplatIdData splat_ids[];
 };
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -102,10 +110,7 @@ void main() {
     if (idx >= uint(gaussian_count)) return;
 
     uint splat_id = splat_ids[idx].count;
-    if (splat_id == 0xFFFFFFFFu) {
-        point_counts[idx].count = 0u;
-        return;
-    }
+    if (splat_id == 0xFFFFFFFFu) return;
 
     vec4 color_opacity = projected_splats[splat_id].color_opacity;
     float ss = max(supersample_factor, 1.0);
@@ -122,53 +127,12 @@ void main() {
     if (hash01(splat_id + 0x9e3779b9u) < fract(scaled_work_items) && work_item_count < 0xFFFFFFFFu) {
         work_item_count += 1u;
     }
-    point_counts[idx].count = work_item_count;
-}
-@end
+    if (work_item_count == 0u) return;
 
-@program gps_count gps_count_cs
-
-@cs gps_expand_cs
-struct GpsExpandUIntData {
-    uint count;
-};
-
-struct GpsWorkData {
-    uvec2 ids; // x Gaussian ID, y sample ID
-};
-
-layout(binding = 0) uniform GpsExpandUBO {
-    int gaussian_count;
-    int max_work_items;
-    float expand_pad1;
-    float expand_pad2;
-};
-
-layout(binding = 0) readonly buffer GpsExpandPointCounts {
-    GpsExpandUIntData point_counts[];
-};
-
-layout(binding = 1) buffer GpsExpandWorkCount {
-    GpsExpandUIntData work_count[];
-};
-
-layout(binding = 2) buffer GpsPointWork {
-    GpsWorkData point_work[];
-};
-
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= uint(gaussian_count)) return;
-
-    uint count = point_counts[idx].count;
-    if (count == 0u) return;
-
-    uint base = atomicAdd(work_count[0].count, count);
+    uint base = atomicAdd(work_count[0].count, work_item_count);
     uint capacity = uint(max_work_items);
     if (base >= capacity) return;
-    uint write_count = min(count, capacity - base);
+    uint write_count = min(work_item_count, capacity - base);
     for (uint i = 0u; i < write_count; ++i) {
         point_work[base + i].ids = uvec2(idx, i);
     }

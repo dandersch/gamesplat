@@ -56,7 +56,6 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->radix_prefix_pipeline);
     renderer_destroy_shader_pipeline(&r->radix_scatter_pipeline);
     renderer_destroy_shader_pipeline(&r->gps_clear_pipeline);
-    renderer_destroy_shader_pipeline(&r->gps_count_pipeline);
     renderer_destroy_shader_pipeline(&r->gps_expand_pipeline);
     renderer_destroy_shader_pipeline(&r->gps_splat_pipeline);
     renderer_destroy_shader_pipeline(&r->gps_resolve_pipeline);
@@ -354,13 +353,6 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
     {
         sg_pipeline_desc pd = {};
         pd.compute = true;
-        pd.shader = sg_make_shader(gps_count_shader_desc(sg_query_backend()));
-        pd.label = "gps-count-pipeline";
-        r->gps_count_pipeline = sg_make_pipeline(&pd);
-    }
-    {
-        sg_pipeline_desc pd = {};
-        pd.compute = true;
         pd.shader = sg_make_shader(gps_expand_shader_desc(sg_query_backend()));
         pd.label = "gps-expand-pipeline";
         r->gps_expand_pipeline = sg_make_pipeline(&pd);
@@ -552,8 +544,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
 
     bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
               r->cull_pipeline.id && r->cull_reset_pipeline.id &&
-              r->gps_clear_pipeline.id && r->gps_count_pipeline.id &&
-              r->gps_expand_pipeline.id &&
+              r->gps_clear_pipeline.id && r->gps_expand_pipeline.id &&
               r->gps_splat_pipeline.id &&
               r->gps_resolve_pipeline.id &&
               r->accum_pipeline.id && r->taa_accum_pipeline.id &&
@@ -867,17 +858,6 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     gps_gpu_release(&r->gps_gpu);
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = scene->gaussian_count * sizeof(uint32_t);
-    bd.label = "gps-point-count-buffer";
-    r->gps_gpu.point_count_buffer = sg_make_buffer(&bd);
-
-    vd = {};
-    vd.storage_buffer.buffer = r->gps_gpu.point_count_buffer;
-    vd.label = "gps-point-count-buffer-view";
-    r->gps_gpu.point_count_buffer_view = sg_make_view(&vd);
-
-    bd = {};
-    bd.usage.storage_buffer = true;
     bd.size = sizeof(uint32_t);
     bd.label = "gps-work-count-buffer";
     r->gps_gpu.point_offset_buffer = sg_make_buffer(&bd);
@@ -1129,8 +1109,6 @@ static void gps_gpu_release(GaussianPointSplatGpu* gps) {
     if (gps->depth_key_buffer.id)      sg_destroy_buffer(gps->depth_key_buffer);
     if (gps->color_buffer_view.id) sg_destroy_view(gps->color_buffer_view);
     if (gps->color_buffer.id)      sg_destroy_buffer(gps->color_buffer);
-    if (gps->point_count_buffer_view.id) sg_destroy_view(gps->point_count_buffer_view);
-    if (gps->point_count_buffer.id)      sg_destroy_buffer(gps->point_count_buffer);
     if (gps->point_offset_buffer_view.id) sg_destroy_view(gps->point_offset_buffer_view);
     if (gps->point_offset_buffer.id)      sg_destroy_buffer(gps->point_offset_buffer);
     if (gps->point_work_buffer_view.id) sg_destroy_view(gps->point_work_buffer_view);
@@ -1673,10 +1651,10 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     const uint32_t gps_width = gps->width * supersample;
     const uint32_t gps_height = gps->height * supersample;
     const uint32_t pixel_count = gps_width * gps_height;
-    if (pixel_count == 0 || !r->gps_clear_pipeline.id || !r->gps_count_pipeline.id || !r->gps_splat_pipeline.id ||
+    if (pixel_count == 0 || !r->gps_clear_pipeline.id || !r->gps_expand_pipeline.id || !r->gps_splat_pipeline.id ||
         !r->gps_resolve_pipeline.id || !gps->depth_key_buffer_view.id ||
-        !gps->color_buffer_view.id || !gps->point_count_buffer_view.id ||
-        !gps->point_offset_buffer_view.id || !gps->point_work_buffer_view.id ||
+        !gps->color_buffer_view.id || !gps->point_offset_buffer_view.id ||
+        !gps->point_work_buffer_view.id ||
         !r->projected_splat_buffer_view.id ||
         !r->unsorted_index_buffer_view.id) {
         return false;
@@ -1707,33 +1685,9 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         }
     };
 
-    auto count_gps_points = [&]() {
-        PROFILE("gps count") {
-        PROFILE_GPU("gps count") {
-        sg_pass pass = {};
-        pass.compute = true;
-        sg_begin_pass(&pass);
-        sg_apply_pipeline(r->gps_count_pipeline);
-        sg_bindings bnd = {};
-        bnd.views[VIEW_GpsCountProjectedSplatBuffer] = r->projected_splat_buffer_view;
-        bnd.views[VIEW_GpsCountSplatIdBuffer] = r->unsorted_index_buffer_view;
-        bnd.views[VIEW_GpsPointCounts] = gps->point_count_buffer_view;
-        sg_apply_bindings(&bnd);
-        GpsCountUBO_t u = {};
-        u.gaussian_count = (int)scene->gaussian_count;
-        u.supersample_factor = (float)supersample;
-        sg_apply_uniforms(UB_GpsCountUBO, SG_RANGE_REF(u));
-        sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
-        sg_end_pass();
-        }
-        }
-    };
-
     clear_gps_buffers();
 
     if (scene->gaussian_count > 0) {
-        count_gps_points();
-
         {
             PROFILE("gps expand") {
             PROFILE_GPU("gps expand") {
@@ -1742,13 +1696,15 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             sg_begin_pass(&pass);
             sg_apply_pipeline(r->gps_expand_pipeline);
             sg_bindings bnd = {};
-            bnd.views[VIEW_GpsExpandPointCounts] = gps->point_count_buffer_view;
+            bnd.views[VIEW_GpsExpandProjectedSplatBuffer] = r->projected_splat_buffer_view;
             bnd.views[VIEW_GpsExpandWorkCount] = gps->point_offset_buffer_view;
             bnd.views[VIEW_GpsPointWork] = gps->point_work_buffer_view;
+            bnd.views[VIEW_GpsExpandSplatIdBuffer] = r->unsorted_index_buffer_view;
             sg_apply_bindings(&bnd);
             GpsExpandUBO_t u = {};
             u.gaussian_count = (int)scene->gaussian_count;
             u.max_work_items = (int)max_work_items;
+            u.supersample_factor = (float)supersample;
             sg_apply_uniforms(UB_GpsExpandUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
