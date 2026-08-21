@@ -23,8 +23,8 @@ The relevant implementation is in `shaders/gps.glsl` and
 
 1. **Cull/project** produces projected Gaussian data and visible IDs.
 2. **Clear** resets the depth/color output buffers and compact work count.
-3. **Expand** calculates each Gaussian's work count, atomically reserves a
-   range, and writes compact
+3. **Expand** calculates each Gaussian's work count and reusable splat
+   parameters, atomically reserves a range, and writes compact
    `(gaussian_id, sample_id)` records.
 4. **Splat** dispatches up to the configured work-list capacity. Each valid
    invocation consumes one compact record, performs the configured
@@ -167,6 +167,31 @@ The fused captures averaged 1.456 ms for work generation, a 20.4% reduction.
 Normal splat variation reduced the end-to-end gain, but measured GPU total
 still improved by an average 0.210 ms (0.8%). Fusion also removes one dispatch
 and the intermediate count buffer.
+
+### Prepare reusable Gaussian parameters during expansion
+
+**Date:** 2026-08-21
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** keep.
+
+Expansion now writes a 48-byte prepared record per Gaussian that receives work.
+It contains the raster mean, Cholesky basis, clamped opacity, sampling
+dilogarithm, packed color, depth key, and splat ID. Splatting loads this record
+instead of repeatedly reading the 64-byte projected record and recomputing
+those values for every compact work item. RNG, inverse-dilog evaluation, sample
+IDs, and point placement remain unchanged.
+
+| Prepared parameters | Median `gps expand` | Median `gps splat` | Combined | GPU total |
+| --- | ---: | ---: | ---: | ---: |
+| No, baseline | 0.960 ms | 7.977 ms | 8.937 ms | 13.585 ms |
+| Yes, first capture | 1.130 ms | 7.046 ms | 8.176 ms | 12.886 ms |
+| Yes, confirmation | 1.140 ms | 7.062 ms | 8.202 ms | 12.875 ms |
+
+The prepared captures average 8.189 ms for expansion plus splatting, an 8.4%
+reduction. Measured GPU total improves by about 0.70 ms (5.2%). The tradeoff is
+an additional 48 bytes of GPU storage per Gaussian and approximately 0.18 ms
+more expansion work.
 
 ## Rejected experiments
 

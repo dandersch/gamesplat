@@ -881,6 +881,17 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     r->gps_gpu.point_work_buffer_view = sg_make_view(&vd);
     r->gps_gpu.max_work_items = max_work_items;
 
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = (size_t)scene->gaussian_count * sizeof(float) * 12u;
+    bd.label = "gps-prepared-buffer";
+    r->gps_gpu.prepared_buffer = sg_make_buffer(&bd);
+
+    vd = {};
+    vd.storage_buffer.buffer = r->gps_gpu.prepared_buffer;
+    vd.label = "gps-prepared-buffer-view";
+    r->gps_gpu.prepared_buffer_view = sg_make_view(&vd);
+
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
 }
@@ -1113,6 +1124,8 @@ static void gps_gpu_release(GaussianPointSplatGpu* gps) {
     if (gps->point_offset_buffer.id)      sg_destroy_buffer(gps->point_offset_buffer);
     if (gps->point_work_buffer_view.id) sg_destroy_view(gps->point_work_buffer_view);
     if (gps->point_work_buffer.id)      sg_destroy_buffer(gps->point_work_buffer);
+    if (gps->prepared_buffer_view.id) sg_destroy_view(gps->prepared_buffer_view);
+    if (gps->prepared_buffer.id)      sg_destroy_buffer(gps->prepared_buffer);
     if (gps->atomic_color_depth_storage_view.id) sg_destroy_view(gps->atomic_color_depth_storage_view);
     if (gps->atomic_color_depth_image.id)        sg_destroy_image(gps->atomic_color_depth_image);
     if (gps->resolved_color_texture_view.id) sg_destroy_view(gps->resolved_color_texture_view);
@@ -1654,7 +1667,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     if (pixel_count == 0 || !r->gps_clear_pipeline.id || !r->gps_expand_pipeline.id || !r->gps_splat_pipeline.id ||
         !r->gps_resolve_pipeline.id || !gps->depth_key_buffer_view.id ||
         !gps->color_buffer_view.id || !gps->point_offset_buffer_view.id ||
-        !gps->point_work_buffer_view.id ||
+        !gps->point_work_buffer_view.id || !gps->prepared_buffer_view.id ||
         !r->projected_splat_buffer_view.id ||
         !r->unsorted_index_buffer_view.id) {
         return false;
@@ -1700,11 +1713,13 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             bnd.views[VIEW_GpsExpandWorkCount] = gps->point_offset_buffer_view;
             bnd.views[VIEW_GpsPointWork] = gps->point_work_buffer_view;
             bnd.views[VIEW_GpsExpandSplatIdBuffer] = r->unsorted_index_buffer_view;
+            bnd.views[VIEW_GpsPreparedBuffer] = gps->prepared_buffer_view;
             sg_apply_bindings(&bnd);
             GpsExpandUBO_t u = {};
             u.gaussian_count = (int)scene->gaussian_count;
             u.max_work_items = (int)max_work_items;
             u.supersample_factor = (float)supersample;
+            u.clip_z_01 = cam->clip_z_01;
             sg_apply_uniforms(UB_GpsExpandUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
@@ -1719,8 +1734,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
         sg_begin_pass(&pass);
         sg_apply_pipeline(r->gps_splat_pipeline);
         sg_bindings bnd = {};
-        bnd.views[VIEW_GpsProjectedSplatBuffer] = r->projected_splat_buffer_view;
-        bnd.views[VIEW_GpsSplatIdBuffer] = r->unsorted_index_buffer_view;
+        bnd.views[VIEW_GpsPreparedSplatBuffer] = gps->prepared_buffer_view;
         bnd.views[VIEW_GpsDepthKeys] = gps->depth_key_buffer_view;
         bnd.views[VIEW_GpsColors] = gps->color_buffer_view;
         bnd.views[VIEW_GpsSplatPointWork] = gps->point_work_buffer_view;

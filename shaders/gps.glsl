@@ -62,11 +62,17 @@ struct GpsWorkData {
     uvec2 ids; // x Gaussian ID, y sample ID
 };
 
+struct GpsPreparedData {
+    vec4 mean_basis; // xy mean, z l00, w l10
+    vec4 sampling;   // x l11, y alpha, z dilog(alpha)
+    uvec4 packed;    // x depth key, y color, z splat ID
+};
+
 layout(binding = 0) uniform GpsExpandUBO {
     int gaussian_count;
     int max_work_items;
     float supersample_factor;
-    float expand_pad0;
+    float clip_z_01;
 };
 
 layout(binding = 0) readonly buffer GpsExpandProjectedSplatBuffer {
@@ -83,6 +89,10 @@ layout(binding = 2) buffer GpsPointWork {
 
 layout(binding = 3) readonly buffer GpsExpandSplatIdBuffer {
     GpsExpandSplatIdData splat_ids[];
+};
+
+layout(binding = 4) buffer GpsPreparedBuffer {
+    GpsPreparedData prepared_splats[];
 };
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -133,6 +143,23 @@ void main() {
     uint capacity = uint(max_work_items);
     if (base >= capacity) return;
     uint write_count = min(work_item_count, capacity - base);
+
+    vec2 mean = projected_splats[splat_id].center_radius.xy;
+    float l00 = sqrt(max(cov_a, 1.0e-5));
+    float l10 = cov_b / l00;
+    float l11 = sqrt(max(cov_c - l10 * l10, 1.0e-5));
+    float alpha = clamp(color_opacity.a, 1.0e-6, 1.0);
+    float dilog_alpha = dilog(alpha);
+    float ndc_depth = projected_splats[splat_id].conic_depth.w;
+    float z = mix(ndc_depth * 0.5 + 0.5, ndc_depth, clip_z_01);
+    uint depth_key = uint(clamp(z, 0.0, 1.0) * 4294967294.0);
+    vec3 clamped_color = clamp(color_opacity.rgb, vec3(0.0), vec3(1.0));
+    uvec3 rgb = uvec3(round(clamped_color * 255.0));
+    uint packed_color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u) | 0xFF000000u;
+    prepared_splats[idx].mean_basis = vec4(mean, l00, l10);
+    prepared_splats[idx].sampling = vec4(l11, alpha, dilog_alpha, 0.0);
+    prepared_splats[idx].packed = uvec4(depth_key, packed_color, splat_id, 0u);
+
     for (uint i = 0u; i < write_count; ++i) {
         point_work[base + i].ids = uvec2(idx, i);
     }
@@ -142,15 +169,10 @@ void main() {
 @program gps_expand gps_expand_cs
 
 @cs gps_splat_cs
-struct GpsProjectedSplatData {
-    vec4 color_opacity; // rgb color, a opacity
-    vec4 center_radius; // xy raster-space center, zw raster-space radius
-    vec4 conic_depth;   // xyz inverse covariance/conic, w ndc depth
-    vec4 covariance_det; // xyz screen-space covariance (a,b,c), w determinant
-};
-
-struct GpsSplatIdData {
-    uint count;
+struct GpsPreparedSplatData {
+    vec4 mean_basis; // xy mean, z l00, w l10
+    vec4 sampling;   // x l11, y alpha, z dilog(alpha)
+    uvec4 packed;    // x depth key, y color, z splat ID
 };
 
 struct GpsSplatUIntData {
@@ -170,12 +192,8 @@ layout(binding = 0) uniform GpsSplatUBO {
     float supersample_factor;
 };
 
-layout(binding = 0) readonly buffer GpsProjectedSplatBuffer {
-    GpsProjectedSplatData projected_splats[];
-};
-
-layout(binding = 1) readonly buffer GpsSplatIdBuffer {
-    GpsSplatIdData splat_ids[];
+layout(binding = 0) readonly buffer GpsPreparedSplatBuffer {
+    GpsPreparedSplatData prepared_splats[];
 };
 
 layout(binding = 2) buffer GpsDepthKeys {
@@ -196,15 +214,6 @@ layout(binding = 5) readonly buffer GpsSplatWorkCount {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-float dilog_sample(float x) {
-    float s = 1.0 - x;
-    float y = (((((((-1.068681974 * x + 3.334685126) * x - 4.173996483) * x +
-                    2.567860600) * x - 0.884150470) * x - 0.123550674) * x +
-                    1.992765336) * x + 6.74195669e-05);
-    y += (s > 0.0) ? (s * log(s)) : 0.0;
-    return y;
-}
-
 float inv_dilog(float x) {
     return ((((((((((-0.322192871 * x + 2.562830719) * x - 8.669815892) * x +
                     16.243561492) * x - 18.394710417) * x + 12.891925084) * x -
@@ -220,30 +229,18 @@ void main() {
     uint idx = work.x;
     uint sample_idx = work.y;
 
-    uint splat_id = splat_ids[idx].count;
-    if (splat_id == 0xFFFFFFFFu) return;
-
-    vec4 color_opacity = projected_splats[splat_id].color_opacity;
-    if (color_opacity.a <= 0.0) return;
-
-    vec3 color = color_opacity.rgb;
-    vec2 mean = projected_splats[splat_id].center_radius.xy;
-    vec4 covariance_det = projected_splats[splat_id].covariance_det;
-    float ndc_depth = projected_splats[splat_id].conic_depth.w;
-    float cov_a = max(covariance_det.x + 0.3, 1.0e-5);
-    float cov_b = covariance_det.y;
-    float cov_c = max(covariance_det.z + 0.3, 1.0e-5);
-    float l00 = sqrt(cov_a);
-    float l10 = cov_b / l00;
-    float l11 = sqrt(max(cov_c - l10 * l10, 1.0e-5));
+    GpsPreparedSplatData prepared = prepared_splats[idx];
+    vec2 mean = prepared.mean_basis.xy;
+    float l00 = prepared.mean_basis.z;
+    float l10 = prepared.mean_basis.w;
+    float l11 = prepared.sampling.x;
+    float alpha = prepared.sampling.y;
+    float dilog_alpha = prepared.sampling.z;
+    uint depth_key = prepared.packed.x;
+    uint packed_color = prepared.packed.y;
+    uint splat_id = prepared.packed.z;
 
     ivec2 extent = ivec2(viewport);
-    float z = ndc_depth;
-    z = mix(z * 0.5 + 0.5, z, clip_z_01);
-    uint depth_key = uint(clamp(z, 0.0, 1.0) * 4294967294.0);
-    vec3 clamped_color = clamp(color, vec3(0.0), vec3(1.0));
-    uvec3 rgb = uvec3(round(clamped_color * 255.0));
-    uint packed_color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u) | 0xFF000000u;
 
     uvec2 seed = uvec2(
         splat_id * 747796405u + uint(frame_seed) * 2891336453u,
@@ -251,8 +248,6 @@ void main() {
     );
 
     int points_per_work_item = max(int(round(supersample_factor * supersample_factor)), 1);
-    float alpha = clamp(color_opacity.a, 1.0e-6, 1.0);
-    float dilog_alpha = dilog_sample(alpha);
     for (int p = 0; p < points_per_work_item; ++p) {
         uvec2 point_seed = seed;
         point_seed.x += (sample_idx * uint(points_per_work_item) + uint(p)) * 374761393u;

@@ -91,6 +91,8 @@ struct GaussianPointSplatGpu {
     sg_view   point_offset_buffer_view;
     sg_buffer point_work_buffer;
     sg_view   point_work_buffer_view;
+    sg_buffer prepared_buffer;
+    sg_view   prepared_buffer_view;
     sg_image  atomic_color_depth_image;
     sg_view   atomic_color_depth_storage_view;
     sg_image  resolved_color_image;
