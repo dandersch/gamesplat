@@ -261,6 +261,29 @@ specialized p90 was slightly worse. The GLSL compiler appears to optimize the
 uniform loop sufficiently; permanent supersampling pipeline variants are not
 justified by this result.
 
+### Estrin evaluation for `inv_dilog`
+
+**Date:** 2026-08-24
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The degree-10 inverse-dilog polynomial temporarily used Estrin grouping instead
+of Horner evaluation. This shortened the serial dependency chain but required
+additional power and combination operations. An immediate control restored the
+original Horner form.
+
+| Polynomial evaluation | Median `gps splat` | p90 `gps splat` |
+| --- | ---: | ---: |
+| Estrin | 17.796 ms | 19.054 ms |
+| Horner control | 17.007 ms | 18.093 ms |
+
+Estrin regressed median splat time by 4.6% and also worsened p90. A float32
+comparison over one million inputs in [0, 1.645] found a maximum absolute
+difference of 1.14e-4 and mean absolute difference of 3.18e-6, so it also lost
+bitwise sample equivalence without providing a performance benefit. Keep the
+Horner polynomial.
+
 ### Tighten the resolve supersampling loops
 
 **Date:** 2026-08-16
