@@ -284,6 +284,29 @@ difference of 1.14e-4 and mean absolute difference of 3.18e-6, so it also lost
 bitwise sample equivalence without providing a performance benefit. Keep the
 Horner polynomial.
 
+### Prepare the frame-dependent RNG seed per Gaussian
+
+**Date:** 2026-08-30
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The two-component RNG base seed temporarily replaced the splat ID in the
+existing prepared record. Expansion calculated the exact frame-dependent seed
+once per Gaussian, removing three integer multiplies and two additions per
+compact work item without changing the record size or generated samples. An
+immediate control restored per-work-item seed construction.
+
+| Seed construction | Median `gps expand` | Median `gps splat` | Combined |
+| --- | ---: | ---: | ---: |
+| Prepared per Gaussian | 1.661 ms | 17.172 ms | 18.833 ms |
+| Per-work-item control | 1.592 ms | 17.263 ms | 18.855 ms |
+
+The 0.091 ms splat reduction was almost entirely shifted into expansion, and
+the 0.022 ms combined difference is within noise. Summing all median GPU zones
+gave 24.212 ms prepared versus 24.213 ms for the control. Keep the simpler
+per-work-item seed construction.
+
 ### Tighten the resolve supersampling loops
 
 **Date:** 2026-08-16
