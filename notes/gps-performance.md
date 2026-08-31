@@ -307,6 +307,29 @@ the 0.022 ms combined difference is within noise. Summing all median GPU zones
 gave 24.212 ms prepared versus 24.213 ms for the control. Keep the simpler
 per-work-item seed construction.
 
+### Prepare reciprocal opacity per Gaussian
+
+**Date:** 2026-08-31
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The unused fourth component of the prepared sampling record temporarily stored
+`1 / alpha`. Splatting multiplied the inverse-dilog result by this value instead
+of dividing by alpha in the supersampling loop. This added no storage but moved
+the reciprocal calculation to expansion. An immediate control restored the
+division.
+
+| Opacity normalization | Median `gps expand` | Median `gps splat` | Combined |
+| --- | ---: | ---: | ---: |
+| Prepared reciprocal | 1.753 ms | 17.454 ms | 19.207 ms |
+| Division control | 1.635 ms | 17.330 ms | 18.965 ms |
+
+The prepared reciprocal regressed expansion by 0.118 ms and splatting by
+0.124 ms, increasing combined time by 0.242 ms (1.3%). The shader compiler or
+driver already handles the loop-invariant division efficiently; keep the
+original expression.
+
 ### Tighten the resolve supersampling loops
 
 **Date:** 2026-08-16
