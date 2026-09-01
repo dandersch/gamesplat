@@ -415,6 +415,29 @@ combined difference was 0.005 ms, well within run-to-run variation. The extra
 buffer storage/read offsets the saved arithmetic on this GPU, so the simpler
 per-work-item calculation remains preferable.
 
+### Pre-scale prepared raster transforms for supersampling
+
+**Date:** 2026-09-01
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+Expansion temporarily multiplied each Gaussian's prepared raster mean and
+Cholesky basis by the supersampling factor. This replaced one final `vec2`
+multiply per generated point with three scalar multiplies per Gaussian. An
+immediate control restored the original unscaled prepared values.
+
+| Transform scaling | Median `gps expand` | Median `gps splat` | Combined |
+| --- | ---: | ---: | ---: |
+| Pre-scaled during expansion | 5.578 ms | 22.725 ms | 28.303 ms |
+| Per-point control | 4.776 ms | 21.940 ms | 26.716 ms |
+
+Both captures experienced an unusually heavy but comparable environment:
+median cull/project was 21.162 ms for the variant and 20.954 ms for the
+control, while clear and resolve were also similar. Pre-scaling regressed
+combined expand and splat time by 5.9%, so the original per-point scaling is
+retained. It also preserves the original floating-point operation ordering.
+
 ## Ranked next experiments
 
 ### 1. Reduce compact-list expansion cost
