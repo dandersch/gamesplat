@@ -438,6 +438,28 @@ control, while clear and resolve were also similar. Pre-scaling regressed
 combined expand and splat time by 5.9%, so the original per-point scaling is
 retained. It also preserves the original floating-point operation ordering.
 
+### Collapse pixel bounds to an unsigned vector comparison
+
+**Date:** 2026-09-02
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+The splat shader temporarily converted the candidate pixel and extent to
+`uvec2` and used one vector `lessThan` check. Converting a negative pixel to
+unsigned still rejects it, so this preserved the original bounds behavior
+while expressing four scalar comparisons more compactly.
+
+| Bounds check | Median `gps splat` | p90 `gps splat` |
+| --- | ---: | ---: |
+| Unsigned vector comparison | 1.386 ms | 1.558 ms |
+| Four scalar comparisons, control | 1.388 ms | 1.559 ms |
+
+The 0.002 ms median difference is negligible across more than 1,250 measured
+frames, with identical p90 timing and stable surrounding passes. The compiler
+already handles the scalar expression well, so the clearer original check is
+retained.
+
 ## Ranked next experiments
 
 ### 1. Reduce compact-list expansion cost
