@@ -460,24 +460,33 @@ frames, with identical p90 timing and stable surrounding passes. The compiler
 already handles the scalar expression well, so the clearer original check is
 retained.
 
+### Pack two work items into each compact record
+
+**Date:** 2026-09-06
+**Configuration:** 8M budget, 2x supersampling, accumulation off,
+deterministic look motion.
+**Decision:** reverted.
+
+Expansion temporarily emitted one compact record for each pair of adjacent
+Gaussian work items. Each splat invocation processed at most two work items,
+preserving their sample indices and limiting the serial batch much more tightly
+than the earlier persistent-consumer experiment. The record buffer and
+capacity dispatch were halved.
+
+| Record batch size | Median `gps expand` | Median `gps splat` | Combined |
+| ---: | ---: | ---: | ---: |
+| Two work items | 1.002 ms | 19.709 ms | 20.711 ms |
+| One work item, control | 1.575 ms | 16.836 ms | 18.411 ms |
+
+Chunking reduced expansion by 36.4%, but the extra serial sampling per
+invocation regressed splatting by 17.1% and combined time by 12.5%. It can also
+waste half a record at the configured limit for Gaussians with odd work counts.
+Even this small batch sacrifices too much parallelism on this GPU, so the
+one-record-per-work-item path remains preferable.
+
 ## Ranked next experiments
 
-### 1. Reduce compact-list expansion cost
-
-`gps expand` is a substantial, stable pass cost. Investigate bounded chunk
-descriptors such as `(gaussian_id, first_sample, sample_count)` rather than one
-8-byte record per sample. Chunks must remain small enough to avoid recreating
-the large-Gaussian imbalance. The consumer should derive the same sample IDs
-from `first_sample + local_index`.
-
-**Potential benefit:** less list memory, fewer expansion writes, and less
-bandwidth before splatting.
-**Risk:** medium; chunk size affects load balancing, and a looping consumer may
-repeat the persistent-thread regression.
-**Small experiment:** add a fixed small chunk size and benchmark expansion and
-splat separately at 8M and 250M.
-
-### 2. Isolate low-risk splat shader costs
+### 1. Isolate low-risk splat shader costs
 
 Use one-variable-at-a-time experiments around RNG generation, the `inv_dilog`
 polynomial, transcendental operations (`log`, `sqrt`, `sin`, and `cos`), and
@@ -490,7 +499,7 @@ approximations.
 **Small experiment:** use shader variants or temporary Tracy comparisons to
 measure groups of operations before changing their implementation.
 
-### 3. Revisit dispatch only with API support or new evidence
+### 2. Revisit dispatch only with API support or new evidence
 
 Indirect dispatch would use the GPU-generated count without CPU synchronization
 or capacity over-dispatch, but the Sokol interface used by this project exposes
