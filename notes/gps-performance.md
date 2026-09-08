@@ -484,6 +484,61 @@ waste half a record at the configured limit for Gaussians with odd work counts.
 Even this small batch sacrifices too much parallelism on this GPU, so the
 one-record-per-work-item path remains preferable.
 
+### Hoist the first RNG linear step out of the point loop
+
+**Date:** 2026-09-08
+**Hardware:** NVIDIA GeForce GTX 1060 6 GB, driver 580.173.02, Linux/OpenGL.
+**Scene/viewport:** `res/export_n01.sog`, default 1280x720 window, 2x GPS
+supersampling (2560x1440 buffers), accumulation and diagnostics off.
+**Decision:** reverted; no measurable benefit.
+
+The splat shader temporarily applied the sample-index offset and initial
+`1664525u * seed + 1013904223u` before the supersampling loop. Each iteration
+copied that seed and advanced its x component by `374761393u * 1664525u`.
+Distributivity modulo 2^32 preserves the original RNG inputs exactly while
+replacing repeated offset/LCG arithmetic with one integer addition per point.
+Unlike the earlier per-Gaussian seed experiment, this changed no prepared data
+or expansion work.
+
+Ran baseline/variant/restored-control captures using:
+
+```sh
+./profile.sh --render-mode gps --gps-ss 2 --gps-accumulation off \
+  --gps-budget-m 8 --seconds 15 --warmup-frames 120 --label gps-rng-baseline
+# Repeat with labels gps-rng-hoisted and gps-rng-control after each edit.
+```
+
+Camera motion was the default deterministic `look`. Times below are
+median / p90 in ms; GPU totals are profile.sh's representative-frame totals.
+
+| GPU zone | Baseline | Hoisted | Restored control |
+| --- | ---: | ---: | ---: |
+| Cull/project | 3.558 / 4.158 | 3.568 / 4.244 | 3.556 / 4.198 |
+| Clear | 0.386 / 0.389 | 0.386 / 0.390 | 0.386 / 0.389 |
+| Expand | 1.448 / 2.258 | 1.454 / 2.218 | 1.449 / 2.355 |
+| Splat | 16.736 / 18.846 | 16.785 / 19.267 | 16.850 / 19.002 |
+| Resolve | 1.036 / 1.048 | 1.036 / 1.052 | 1.042 / 1.055 |
+| Representative GPU total | 23.719 | 23.695 | 23.769 |
+
+The variant's median splat time lies between the controls (only 0.05% below
+their average), while its p90 is worse than both. The GPU-total difference is
+also negligible (0.2% versus the control average). Desktop GPU clients remained
+running; no clocks or external processes were changed. These captures do not
+justify retaining the optimization.
+
+Both shader targets (`glsl430` and `wgsl`) generated successfully and the native
+profiler build ran successfully for all three captures. A deterministic CPU
+uint32 reference comparison checked 300,000 final RNG pairs over supersampling
+factors 1–4, randomized IDs/seeds and boundary sample indices including uint32
+wraparound: all matched exactly. Sampling arithmetic, sample IDs, counts and
+dispatch mapping were unchanged. No appearance change was intended; no visual
+comparison was performed. The original shader and binary were restored and
+rebuilt for the final control.
+
+Raw captures and CSVs are under `build/profiles/` in
+`20260908-164715-gps-rng-baseline`, `20260908-164802-gps-rng-hoisted`, and
+`20260908-164902-gps-rng-control` (untracked).
+
 ## Ranked next experiments
 
 ### 1. Isolate low-risk splat shader costs
