@@ -539,6 +539,61 @@ Raw captures and CSVs are under `build/profiles/` in
 `20260908-164715-gps-rng-baseline`, `20260908-164802-gps-rng-hoisted`, and
 `20260908-164902-gps-rng-control` (untracked).
 
+### Reduce splat workgroups from 256 to 64 threads
+
+**Date:** 2026-09-09
+**Hardware:** NVIDIA GeForce GTX 1060 6 GB, driver 580.173.02, Linux/OpenGL.
+**Scene/viewport:** `res/export_n01.sog`, default 1280x720 window, 2x GPS
+supersampling (2560x1440 buffers), accumulation and diagnostics off.
+**Decision:** reverted; smaller groups were slower.
+
+The experiment changed only the splat shader's local size and the matching CPU
+dispatch group count and row stride. Smaller groups might improve occupancy
+for the register-heavy sampling shader. Unlike persistent consumers or paired
+records, this retained one invocation per compact work item and the original
+supersampling loop. Expansion, compact records, sample IDs, RNG and all
+floating-point sampling operations were untouched.
+
+Ran baseline/variant/restored-control captures with default deterministic
+`look` camera motion:
+
+```sh
+./profile.sh --render-mode gps --gps-ss 2 --gps-accumulation off \
+  --gps-budget-m 8 --seconds 15 --warmup-frames 120 --label gps-wg256-baseline
+# Repeat with labels gps-wg64 and gps-wg256-control after each edit.
+```
+
+Times are median / p90 in ms; totals are profile.sh's representative-frame
+measured GPU totals, not sums of zone medians.
+
+| GPU zone | 256 baseline | 64 threads | 256 restored control |
+| --- | ---: | ---: | ---: |
+| Cull/project | 3.543 / 4.009 | 3.555 / 4.008 | 3.529 / 4.025 |
+| Clear | 0.387 / 0.389 | 0.387 / 0.388 | 0.386 / 0.388 |
+| Expand | 1.448 / 2.266 | 1.446 / 2.301 | 1.479 / 2.276 |
+| Splat | 16.885 / 19.178 | 17.223 / 19.545 | 16.992 / 19.145 |
+| Resolve | 1.065 / 1.077 | 1.054 / 1.066 | 1.054 / 1.065 |
+| Representative GPU total | 23.896 | 24.149 | 24.014 |
+
+The 64-thread variant regressed median splatting by 1.7% against the average
+of the controls, and p90 by 2.0%. Its representative GPU total was 0.194 ms
+(0.8%) worse. Surrounding passes were similar. This does not establish the
+hardware cause: smaller groups also increase dispatch overhead and, at 8Mi
+capacity, require three dispatch rows with additional rejected invocations.
+Keep 256-thread groups for this workload.
+
+All three profiler builds succeeded, including `glsl430` and `wgsl` shader
+generation. CPU dispatch checks verified contiguous, unique work-index coverage
+for both group sizes at partial-group and 65535-group row boundaries, plus 8Mi
+and 250Mi capacities. The count guard rejects all extra invocations, preserving
+the sampled work set. Scheduling and framebuffer races can still differ; no
+bitwise framebuffer or visual comparison was performed. The shader and CPU
+dispatch were restored and rebuilt before the final control capture.
+
+Raw traces and CSVs remain untracked under `build/profiles/`:
+`20260909-164354-gps-wg256-baseline`, `20260909-164503-gps-wg64`, and
+`20260909-164635-gps-wg256-control`.
+
 ## Ranked next experiments
 
 ### 1. Isolate low-risk splat shader costs
