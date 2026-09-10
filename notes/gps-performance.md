@@ -594,6 +594,63 @@ Raw traces and CSVs remain untracked under `build/profiles/`:
 `20260909-164354-gps-wg256-baseline`, `20260909-164503-gps-wg64`, and
 `20260909-164635-gps-wg256-control`.
 
+### Skip clearing the GPS color buffer
+
+**Date:** 2026-09-10
+**Hardware:** NVIDIA GeForce GTX 1060 6 GB, driver 580.173.02, Linux/OpenGL.
+**Scene/viewport:** `res/export_n01.sog`, default 1280x720 window, 2x GPS
+supersampling (2560x1440 buffers), accumulation and diagnostics off.
+**Decision:** reverted; clear-pass gain, inconclusive end-to-end benefit.
+
+Removed the clear shader's color-buffer store and binding, together with the
+matching CPU binding. This saves 14.0625 MiB of writes per frame at this size.
+Resolve reads color only when depth differs from the empty sentinel, and every
+successful depth update schedules a fresh color write before the splat pass
+finishes. Thus untouched pixels can retain stale colors without exposing them.
+Sample generation, depth clearing, work records, RNG and point placement were
+unchanged. This does not fix the prototype's existing depth/color write race.
+
+Ran baseline/variant/restored-control captures with default deterministic
+`look` camera motion:
+
+```sh
+./profile.sh --render-mode gps --gps-ss 2 --gps-accumulation off \
+  --gps-budget-m 8 --seconds 15 --warmup-frames 120 --label gps-color-clear-baseline
+# Repeat with labels gps-depth-only-clear and gps-color-clear-control.
+```
+
+Times are median / p90 in ms; totals are profile.sh's representative-frame
+measured GPU totals.
+
+| GPU zone | Baseline | Depth-only clear | Restored control |
+| --- | ---: | ---: | ---: |
+| Cull/project | 3.611 / 4.192 | 3.594 / 4.214 | 3.591 / 4.242 |
+| Clear | 0.387 / 0.389 | 0.240 / 0.244 | 0.387 / 0.389 |
+| Expand | 1.450 / 2.319 | 1.500 / 2.541 | 1.494 / 2.443 |
+| Splat | 17.062 / 19.356 | 17.286 / 19.609 | 17.452 / 19.622 |
+| Resolve | 1.046 / 1.057 | 1.055 / 1.066 | 1.052 / 1.063 |
+| Representative GPU total | 24.028 | 24.227 | 24.392 |
+
+Median clear time improved by 0.147 ms (38.0%), but the variant's GPU total
+was 0.017 ms above the average of the controls (24.210 ms). Splat times drifted
+by 0.390 ms between controls, more than the clear saving. These captures show
+a real reduction in clear work but neither a reliable overall win nor evidence
+that skipping the clear causes the surrounding-pass slowdown. Under the
+keep-only-if-beneficial rule, retain the original implementation. Revisit with
+longer, more stable captures rather than assuming a 38% clear gain means a
+frame-time gain.
+
+All three native profiler builds and captures succeeded, including shader
+generation for `glsl430` and `wgsl`. Inspected all GPS color-buffer accesses:
+only splat writes and depth-guarded resolve reads remain after removing clear.
+No framebuffer or visual comparison was performed. Both source files were
+restored and the original renderer rebuilt for the final control capture.
+
+Raw traces and CSVs remain untracked under `build/profiles/`:
+`20260910-135625-gps-color-clear-baseline`,
+`20260910-135724-gps-depth-only-clear`, and
+`20260910-135817-gps-color-clear-control`.
+
 ## Ranked next experiments
 
 ### 1. Isolate low-risk splat shader costs
