@@ -651,6 +651,66 @@ Raw traces and CSVs remain untracked under `build/profiles/`:
 `20260910-135724-gps-depth-only-clear`, and
 `20260910-135817-gps-color-clear-control`.
 
+### Skip repeated pixel atomics within a work item
+
+**Date:** 2026-09-12
+**Hardware:** NVIDIA GeForce GTX 1060 6 GB, driver 580.173.02, Linux/OpenGL.
+**Scene/viewport:** `res/export_n01.sog`, default 1280x720 window, 2x GPS
+supersampling (2560x1440 buffers), accumulation and diagnostics off.
+**Decision:** reverted; no reliable benefit across timing statistics.
+
+The splat shader tracked the last in-bounds pixel index in one uint, initially
+`0xFFFFFFFFu`. A sample hitting that same pixel skipped `atomicMin`; offscreen
+samples left the tracked index unchanged. Since a work item's depth key is
+constant and framebuffer depths only decrease, repeating that key cannot win
+after its first submission, even if another invocation updates depth between
+samples. This needs no framebuffer read, unlike the rejected early-occlusion
+experiment. Sampling, RNG, sample IDs, point placement and dispatch stayed
+unchanged; the cost is a live register and a branch per in-bounds sample.
+
+Ran baseline/variant/restored-control/variant-confirmation captures:
+
+```sh
+./profile.sh --render-mode gps --gps-ss 2 --gps-accumulation off \
+  --gps-budget-m 8 --seconds 15 --warmup-frames 120 --label gps-repeat-pixel-baseline
+# Repeat with labels gps-repeat-pixel-skip, gps-repeat-pixel-control,
+# and gps-repeat-pixel-confirm after each edit. Camera motion defaults to look.
+```
+
+Times are ms. GPU totals are profile.sh's representative-frame measurements.
+
+| Measurement | Baseline | Skip repeats | Restored control | Skip confirmation |
+| --- | ---: | ---: | ---: | ---: |
+| Median splat | 16.923 | 16.876 | 17.267 | 16.868 |
+| Mean splat | 16.741 | 16.795 | 16.899 | 16.833 |
+| p90 splat | 19.192 | 19.114 | 19.173 | 19.190 |
+| Median expand | 1.446 | 1.471 | 1.502 | 1.454 |
+| p90 expand | 2.462 | 2.337 | 2.469 | 2.379 |
+| Representative GPU total | 23.883 | 23.868 | 24.141 | 23.843 |
+
+Variant medians repeated well, averaging 1.3% below the controls, but that
+comparison is dominated by the slower restored control. Against the original
+baseline, the variants improved median splat by only 0.3% and GPU total by
+0.015–0.040 ms. Average mean splat was effectively unchanged: 16.814 ms for
+the variants versus 16.820 ms for controls; p90 was also essentially unchanged.
+This is suggestive rather than a demonstrated performance win. Keep the
+original shader instead of adding state and branching on this evidence.
+
+All four profiler builds/captures succeeded with `glsl430` and `wgsl` shader
+generation. An exhaustive CPU model tested 331,776 schedules over two pixels,
+four samples, offscreen samples, initially empty/near/equal/far depths, and
+competing depth updates between samples. Final depths and successful color-write
+events matched the unoptimized model in every case. This validates the skipped
+atomic's redundancy, not GPU framebuffer race behavior; no visual or bitwise
+framebuffer comparison was performed. The original shader was restored and
+rebuilt after the confirmation capture.
+
+Raw traces and CSVs remain untracked under `build/profiles/`:
+`20260912-143935-gps-repeat-pixel-baseline`,
+`20260912-144021-gps-repeat-pixel-skip`,
+`20260912-144126-gps-repeat-pixel-control`, and
+`20260912-144215-gps-repeat-pixel-confirm`.
+
 ## Ranked next experiments
 
 ### 1. Isolate low-risk splat shader costs
