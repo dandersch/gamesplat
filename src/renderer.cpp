@@ -568,11 +568,11 @@ bool renderer_reload_shaders(Renderer* r) {
 
 bool renderer_init(Renderer* r) {
     memset(r, 0, sizeof(*r));
-    r->splat_render_mode = SplatRenderMode::AlphaBlendSorted;
+    r->splat_render_mode = SplatRenderMode::GaussianPointSplatting;
     r->stochastic_samples_per_frame = 1;
     r->stochastic_taa_current_samples = 4;
     r->gps_supersample_factor = 2;
-    r->gps_max_work_items = 8u * 1024u * 1024u;
+    r->gps_max_work_items = 16u * 1024u * 1024u;
     r->stochastic_accumulation_enabled = true;
     r->stochastic_taa_enabled = true;
     r->sh_degree = 3;            // full SH degree 3 by default (lossless)

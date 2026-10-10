@@ -199,9 +199,11 @@ static void app_init(void) {
         state->renderer.splat_render_mode = SplatRenderMode::StochasticSplats;
     } else if (SDL_strcmp(render_mode, "gps") == 0) {
         state->renderer.splat_render_mode = SplatRenderMode::GaussianPointSplatting;
-    } else if (render_mode[0] != '\0' && SDL_strcmp(render_mode, "alpha") != 0) {
+    } else if (SDL_strcmp(render_mode, "alpha") == 0) {
+        state->renderer.splat_render_mode = SplatRenderMode::AlphaBlendSorted;
+    } else if (render_mode[0] != '\0') {
         LOG(WARN|RENDERER|INIT,
-            "Unknown render_mode '%s' (expected alpha, stochastic, or gps); using alpha",
+            "Unknown render_mode '%s' (expected alpha, stochastic, or gps); using gps",
             render_mode);
     }
     if (gpu_budget_mb[0] != '\0') {

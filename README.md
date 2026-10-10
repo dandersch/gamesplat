@@ -1,6 +1,9 @@
 A real-time 3D Gaussian splatting renderer that runs natively or on the web.
 Supports `.ply` and `.sog` files.
 
+Startup defaults to **GPS Prototype** with a **16M work budget** (128 MiB).
+Override with `render_mode=alpha`, `render_mode=stochastic`, or `gps_budget_m=N`.
+
 Gaussian uploads use chunks of at most 64 MiB, preserving full float precision
 and global depth sorting without requiring a single multi-GB source buffer.
 PLY decoding also reads bounded batches instead of retaining the entire file.
