@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <SDL3/SDL.h>
 #include "sokol_app.h"
 #include "sokol_gfx.h"
@@ -663,20 +664,58 @@ bool renderer_init(Renderer* r) {
     return true;
 }
 
-void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
+static void renderer_release_gaussian_chunks(Renderer* r) {
+    for (uint32_t i = 0; i < r->gaussian_chunk_count; ++i) {
+        if (r->gaussian_chunks[i].view.id) sg_destroy_view(r->gaussian_chunks[i].view);
+        if (r->gaussian_chunks[i].buffer.id) sg_destroy_buffer(r->gaussian_chunks[i].buffer);
+    }
+    free(r->gaussian_chunks);
+    r->gaussian_chunks = NULL;
+    r->gaussian_chunk_count = 0;
+}
+
+bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
+    // Sokol's internal buffer sizes are signed ints. Keep source allocations
+    // small, and reject oversized output buffers before touching the driver.
+    size_t storage_limit = 128u * 1024u * 1024u;
+    size_t budget = r->gpu_budget_bytes ? r->gpu_budget_bytes : 1024u * 1024u * 1024u;
+    uint32_t max_groups = 65535u;
+#if defined(SOKOL_GLCORE)
+    GLint64 gl_limit = 0;
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &gl_limit);
+    storage_limit = (size_t)gl_limit;
+    GLint group_limit = 0;
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &group_limit);
+    max_groups = (uint32_t)group_limit;
+    if (gl_has_extension("GL_NVX_gpu_memory_info")) {
+        GLint free_kb = 0;
+        glGetIntegerv(0x9049 /* GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX */, &free_kb);
+        if (free_kb > 0) {
+            size_t available_budget = (size_t)free_kb * 1024u * 4u / 5u;
+            budget = r->gpu_budget_bytes ? std::min(budget, available_budget) : available_budget;
+        }
+    }
+#endif
+    storage_limit = std::min(storage_limit, (size_t)INT32_MAX);
+    const size_t count = scene->gaussian_count;
+    const size_t groups = (count + 255u) / 256u;
+    const size_t work_bytes = (size_t)std::max(r->gps_max_work_items, 1u) * 8u;
+    const size_t required = count * (sizeof(GpuGaussian) + 64u + 48u + 16u) + groups * 1024u + work_bytes + 40u;
+    LOG(INFO|GAUSSIAN|GPU, "Scene buffers need %.1f MiB; budget %.1f MiB; storage block limit %.1f MiB",
+        required / 1048576.0, budget / 1048576.0, storage_limit / 1048576.0);
+    if (!count || groups > max_groups || count * 64u > storage_limit ||
+        groups * 1024u > storage_limit || work_bytes > storage_limit || required > budget) {
+        LOG(ERROR|GAUSSIAN|GPU, "Scene exceeds GPU memory or compute limits; refusing allocation. gpu_budget_mb can set a memory cap (automatic on NVIDIA, otherwise 1024 MiB).");
+        return false;
+    }
+    const uint32_t chunk_capacity = (uint32_t)(std::min(storage_limit, (size_t)64u * 1024u * 1024u) / sizeof(GpuGaussian));
+    if (!chunk_capacity) return false;
     r->gaussian_count = scene->gaussian_count;
     r->sort_capacity = scene->gaussian_count;
     r->sort_group_count = (scene->gaussian_count + 255u) / 256u;
     renderer_reset_stochastic_accumulation(r);
 
-    if (r->gaussian_buffer_view.id) {
-        sg_destroy_view(r->gaussian_buffer_view);
-        r->gaussian_buffer_view = {};
-    }
-    if (r->gaussian_buffer.id) {
-        sg_destroy_buffer(r->gaussian_buffer);
-        r->gaussian_buffer = {};
-    }
+    renderer_release_gaussian_chunks(r);
     if (r->depth_key_buffer_view.id) {
         sg_destroy_view(r->depth_key_buffer_view);
         r->depth_key_buffer_view = {};
@@ -742,34 +781,47 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         r->unsorted_index_buffer = {};
     }
 
-    uint32_t payload_size = scene->gaussian_count * (uint32_t)sizeof(GpuGaussian);
-    GpuGaussian* gpu_data = pack_gpu_gaussians(scene);
-
+    const size_t payload_size = count * sizeof(GpuGaussian);
+    const uint32_t chunk_count = (scene->gaussian_count + chunk_capacity - 1u) / chunk_capacity;
+    r->gaussian_chunks = (GaussianGpuChunk*)calloc(chunk_count, sizeof(GaussianGpuChunk));
+    if (!r->gaussian_chunks) return false;
+    r->gaussian_chunk_count = chunk_count;
+    GpuGaussian* gpu_data = (GpuGaussian*)malloc((size_t)std::min(chunk_capacity, scene->gaussian_count) * sizeof(GpuGaussian));
+    if (!gpu_data) return false;
     sg_buffer_desc bd = {};
-    bd.usage.storage_buffer = true;
-    bd.size = payload_size;
-    bd.data.ptr = gpu_data;
-    bd.data.size = payload_size;
-    bd.label = "gaussian-storage-buffer";
-    r->gaussian_buffer = sg_make_buffer(&bd);
-    free(gpu_data);
-
-    if (sg_query_buffer_state(r->gaussian_buffer) != SG_RESOURCESTATE_VALID) {
-        LOG(ERROR|GAUSSIAN|GPU, "gaussian-storage-buffer: allocation failed; splat drawing disabled");
-        r->gaussian_count = 0;
-        return;
-    }
-
     sg_view_desc vd = {};
-    vd.storage_buffer.buffer = r->gaussian_buffer;
-    vd.label = "gaussian-storage-buffer-view";
-    r->gaussian_buffer_view = sg_make_view(&vd);
+    for (uint32_t i = 0; i < chunk_count; ++i) {
+        GaussianGpuChunk* chunk = &r->gaussian_chunks[i];
+        chunk->first = i * chunk_capacity;
+        chunk->count = std::min(chunk_capacity, scene->gaussian_count - chunk->first);
+        pack_gpu_gaussians(scene, chunk->first, chunk->count, gpu_data);
+        bd.usage.storage_buffer = true;
+        bd.size = (size_t)chunk->count * sizeof(GpuGaussian);
+        bd.data.ptr = gpu_data;
+        bd.data.size = bd.size;
+        bd.label = "gaussian-storage-chunk";
+        chunk->buffer = sg_make_buffer(&bd);
+        if (sg_query_buffer_state(chunk->buffer) != SG_RESOURCESTATE_VALID) {
+            LOG(ERROR|GAUSSIAN|GPU, "Gaussian chunk %u allocation failed", i);
+            free(gpu_data);
+            return false;
+        }
+        vd.storage_buffer.buffer = chunk->buffer;
+        vd.label = "gaussian-storage-chunk-view";
+        chunk->view = sg_make_view(&vd);
+        if (sg_query_view_state(chunk->view) != SG_RESOURCESTATE_VALID) {
+            free(gpu_data);
+            return false;
+        }
+    }
+    free(gpu_data);
 
     bd = {};
     bd.usage.storage_buffer = true;
     bd.size = r->sort_capacity * sizeof(uint32_t);
     bd.label = "splat-depth-key-storage-buffer";
     r->depth_key_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->depth_key_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->depth_key_buffer;
@@ -781,6 +833,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = r->sort_capacity * sizeof(uint32_t);
     bd.label = "splat-sort-temp-key-storage-buffer";
     r->sort_temp_key_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->sort_temp_key_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->sort_temp_key_buffer;
@@ -792,6 +845,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = r->sort_capacity * sizeof(uint32_t);
     bd.label = "splat-sort-temp-index-storage-buffer";
     r->sort_temp_index_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->sort_temp_index_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->sort_temp_index_buffer;
@@ -803,6 +857,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = r->sort_group_count * 256u * sizeof(uint32_t);
     bd.label = "splat-sort-histogram-storage-buffer";
     r->sort_histogram_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->sort_histogram_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->sort_histogram_buffer;
@@ -814,6 +869,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = scene->gaussian_count * sizeof(float) * 16u;
     bd.label = "projected-splat-storage-buffer";
     r->projected_splat_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->projected_splat_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->projected_splat_buffer;
@@ -825,6 +881,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = sizeof(uint32_t);
     bd.label = "splat-visible-count-storage-buffer";
     r->visible_count_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->visible_count_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->visible_count_buffer;
@@ -836,6 +893,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = sizeof(uint32_t) * 8u;
     bd.label = "splat-diagnostics-storage-buffer";
     r->splat_diagnostics_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->splat_diagnostics_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->splat_diagnostics_buffer;
@@ -849,6 +907,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     ubd.size = r->sort_capacity * sizeof(uint32_t);
     ubd.label = "splat-unsorted-visible-index-storage-buffer";
     r->unsorted_index_buffer = sg_make_buffer(&ubd);
+    if (sg_query_buffer_state(r->unsorted_index_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->unsorted_index_buffer;
@@ -861,6 +920,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = sizeof(uint32_t);
     bd.label = "gps-work-count-buffer";
     r->gps_gpu.point_offset_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->gps_gpu.point_offset_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->gps_gpu.point_offset_buffer;
@@ -874,6 +934,7 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = (size_t)max_work_items * sizeof(uint32_t) * 2u;
     bd.label = "gps-point-work-buffer";
     r->gps_gpu.point_work_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->gps_gpu.point_work_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->gps_gpu.point_work_buffer;
@@ -886,14 +947,27 @@ void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     bd.size = (size_t)scene->gaussian_count * sizeof(float) * 12u;
     bd.label = "gps-prepared-buffer";
     r->gps_gpu.prepared_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->gps_gpu.prepared_buffer) != SG_RESOURCESTATE_VALID) return false;
 
     vd = {};
     vd.storage_buffer.buffer = r->gps_gpu.prepared_buffer;
     vd.label = "gps-prepared-buffer-view";
     r->gps_gpu.prepared_buffer_view = sg_make_view(&vd);
 
+    const sg_view views[] = {
+        r->depth_key_buffer_view, r->sort_temp_key_buffer_view,
+        r->sort_temp_index_buffer_view, r->sort_histogram_buffer_view,
+        r->projected_splat_buffer_view, r->visible_count_buffer_view,
+        r->splat_diagnostics_buffer_view, r->unsorted_index_buffer_view,
+        r->gps_gpu.point_offset_buffer_view, r->gps_gpu.point_work_buffer_view,
+        r->gps_gpu.prepared_buffer_view,
+    };
+    for (sg_view view : views) {
+        if (sg_query_view_state(view) != SG_RESOURCESTATE_VALID) return false;
+    }
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
+    return true;
 }
 
 static void renderer_read_splat_diagnostics(Renderer* r) {
@@ -1488,7 +1562,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
 
 static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
                                         const SplatEffectParams* splat_effect) {
-    if (!r->cull_pipeline.id || !r->gaussian_buffer_view.id ||
+    if (!r->cull_pipeline.id || !r->gaussian_chunk_count ||
         !r->unsorted_index_buffer_view.id || !r->depth_key_buffer_view.id ||
         !r->projected_splat_buffer_view.id ||
         !r->visible_count_buffer_view.id ||
@@ -1524,20 +1598,16 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     sg_apply_pipeline(r->cull_pipeline);
 
     sg_bindings bnd = {};
-    bnd.views[VIEW_GaussianBuffer] = r->gaussian_buffer_view;
     bnd.views[VIEW_OutputSplatIds] = r->unsorted_index_buffer_view;
     bnd.views[VIEW_OutputDepthKeys] = r->depth_key_buffer_view;
     bnd.views[VIEW_ProjectedSplats] = r->projected_splat_buffer_view;
     bnd.views[VIEW_VisibleCount] = r->visible_count_buffer_view;
     bnd.views[VIEW_SplatDiagnostics] = r->splat_diagnostics_buffer_view;
-    sg_apply_bindings(&bnd);
-
     CullUBO_t u = {};
     memcpy(u.view, cam->view, sizeof(u.view));
     memcpy(u.proj, cam->proj, sizeof(u.proj));
     u.viewport[0] = cam->viewport[0];
     u.viewport[1] = cam->viewport[1];
-    u.gaussian_count = scene->gaussian_count;
     u.orthographic = cam->orthographic;
     u.persp_focal = cam->persp_focal;
     u.ortho_focal = cam->ortho_focal;
@@ -1546,17 +1616,22 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     u.collect_stats = r->splat_diagnostics_enabled ? 1 : 0;
     u.sh_degree = r->sh_degree;
     u.sh_lod_distance = r->sh_lod_distance;
-    sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
-
     SplatEffectUBO_t effect_ubo = {};
     if (splat_effect) {
         memcpy(effect_ubo.effect_center_radius, splat_effect->center_radius, sizeof(effect_ubo.effect_center_radius));
         memcpy(effect_ubo.effect_params, splat_effect->params, sizeof(effect_ubo.effect_params));
         memcpy(effect_ubo.effect_color, splat_effect->color, sizeof(effect_ubo.effect_color));
     }
-    sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
-
-    sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
+    for (uint32_t i = 0; i < r->gaussian_chunk_count; ++i) {
+        const GaussianGpuChunk* chunk = &r->gaussian_chunks[i];
+        bnd.views[VIEW_GaussianBuffer] = chunk->view;
+        sg_apply_bindings(&bnd);
+        u.gaussian_first = (int)chunk->first;
+        u.gaussian_count = (int)chunk->count;
+        sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
+        sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
+        sg_dispatch((int)((chunk->count + 255u) / 256u), 1, 1);
+    }
     sg_end_pass();
 
     renderer_read_splat_diagnostics(r);
@@ -2189,8 +2264,7 @@ void renderer_destroy(Renderer* r) {
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
-    if (r->gaussian_buffer_view.id) sg_destroy_view(r->gaussian_buffer_view);
-    if (r->gaussian_buffer.id)    sg_destroy_buffer(r->gaussian_buffer);
+    renderer_release_gaussian_chunks(r);
     if (r->depth_key_buffer_view.id) sg_destroy_view(r->depth_key_buffer_view);
     if (r->depth_key_buffer.id)    sg_destroy_buffer(r->depth_key_buffer);
     if (r->sort_temp_key_buffer_view.id) sg_destroy_view(r->sort_temp_key_buffer_view);

@@ -111,22 +111,33 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
         fclose(f); return false;
     }
 
-    // Read all vertex data
-    uint8_t* raw = (uint8_t*)SDL_malloc((size_t)vertex_count * stride);
+    // Stream bounded batches rather than keeping a second multi-GB copy of
+    // the entire PLY while decoding it.
+    const uint32_t batch_capacity = 4096;
+    uint8_t* raw = (uint8_t*)SDL_malloc((size_t)batch_capacity * stride);
     if (!raw) { fclose(f); return false; }
-    size_t read = fread(raw, stride, vertex_count, f);
-    fclose(f);
-    if (read != vertex_count) {
-        LOG(ERROR|GAUSSIAN|IO, "Short read: got %zu of %u vertices", read, vertex_count);
-        free(raw); return false;
-    }
-
-    // Allocate scene
     scene->gaussian_count = vertex_count;
     scene->gaussians = (Gaussian*)SDL_malloc(vertex_count * sizeof(Gaussian));
+    if (!scene->gaussians) {
+        free(raw);
+        fclose(f);
+        free_scene(scene);
+        return false;
+    }
 
     for (uint32_t i = 0; i < vertex_count; i++) {
-        uint8_t* v = raw + (size_t)i * stride;
+        if (i % batch_capacity == 0) {
+            uint32_t batch_count = vertex_count - i;
+            if (batch_count > batch_capacity) batch_count = batch_capacity;
+            if (fread(raw, stride, batch_count, f) != batch_count) {
+                LOG(ERROR|GAUSSIAN|IO, "Short read in PLY batch starting at vertex %u", i);
+                free(raw);
+                fclose(f);
+                free_scene(scene);
+                return false;
+            }
+        }
+        uint8_t* v = raw + (size_t)(i % batch_capacity) * stride;
         Gaussian* g = &scene->gaussians[i];
 
         // Position
@@ -197,6 +208,7 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
         rest_count >= 45 ? "3" : rest_count >= 24 ? "2" : rest_count >= 9 ? "1" : "0");
 
     free(raw);
+    fclose(f);
 
     // Allocate scratch buffers
     scene->visible_indices  = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
@@ -206,7 +218,11 @@ bool gaussian_load_ply(const char* path, GaussianScene* scene) {
     scene->scratch_keys     = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
     scene->scratch_keys2    = (uint32_t*)SDL_malloc(vertex_count * sizeof(uint32_t));
     scene->visible_count    = 0;
+    if (!scene->visible_indices || !scene->visible_depths || !scene->sorted_indices ||
+        !scene->scratch_indices || !scene->scratch_keys || !scene->scratch_keys2) {
+        free_scene(scene);
+        return false;
+    }
 
     return true;
 }
-

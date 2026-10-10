@@ -55,8 +55,8 @@ bool load_gaussian_scene(const char* path, GaussianScene* scene); // dispatches 
 
 void free_scene(GaussianScene* scene);
 
-// Pack gaussians into GpuGaussian layout. Caller frees returned pointer.
-GpuGaussian* pack_gpu_gaussians(const GaussianScene* scene);
+// Pack a bounded range into caller-owned upload storage.
+void pack_gpu_gaussians(const GaussianScene* scene, uint32_t first, uint32_t count, GpuGaussian* gpu);
 
 // Cull and record depth. Fills visible_indices/depths/count.
 void cull_gaussians(GaussianScene* scene, const float* view_matrix, const float* proj_matrix, float ortho_blend = 0.0f);

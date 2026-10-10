@@ -45,10 +45,10 @@ void free_scene(GaussianScene* scene) {
     memset(scene, 0, sizeof(GaussianScene));
 }
 
-GpuGaussian* pack_gpu_gaussians(const GaussianScene* scene) {
-    GpuGaussian* gpu = (GpuGaussian*)calloc(scene->gaussian_count, sizeof(GpuGaussian));
-    for (uint32_t i = 0; i < scene->gaussian_count; i++) {
-        const Gaussian* g = &scene->gaussians[i];
+void pack_gpu_gaussians(const GaussianScene* scene, uint32_t first, uint32_t count, GpuGaussian* gpu) {
+    memset(gpu, 0, (size_t)count * sizeof(GpuGaussian));
+    for (uint32_t i = 0; i < count; i++) {
+        const Gaussian* g = &scene->gaussians[first + i];
         float* d = gpu[i].data;
         // [0..3] pos.xyz, opacity
         d[0] = g->position[0]; d[1] = g->position[1]; d[2] = g->position[2];
@@ -65,7 +65,6 @@ GpuGaussian* pack_gpu_gaussians(const GaussianScene* scene) {
             d[16 + k] = g->sh_rest[k];
         }
     }
-    return gpu;
 }
 
 // --- Culling ---

@@ -148,6 +148,7 @@ static void app_init(void) {
     const char* gps_ss = sargs_value("gps_ss");
     const char* gps_budget_m = sargs_value("gps_budget_m");
     const char* gps_accumulation = sargs_value("gps_accumulation");
+    const char* gpu_budget_mb = sargs_value("gpu_budget_mb");
 
     // Set defaults. Native and web builds can override these with sokol_args:
     //   ./gsplat ply=res/export_n01.sog colmap=res/colmap render_mode=gps camera_motion=look gps_ss=2 gps_budget_m=8 gps_accumulation=off
@@ -202,6 +203,15 @@ static void app_init(void) {
         LOG(WARN|RENDERER|INIT,
             "Unknown render_mode '%s' (expected alpha, stochastic, or gps); using alpha",
             render_mode);
+    }
+    if (gpu_budget_mb[0] != '\0') {
+        int value = SDL_atoi(gpu_budget_mb);
+        if (value <= 0 || value > 65536) {
+            LOG(ERROR|RENDERER|INIT, "gpu_budget_mb must be in 1..65536");
+            sapp_quit();
+            return;
+        }
+        state->renderer.gpu_budget_bytes = (size_t)value * 1024u * 1024u;
     }
     if (gps_ss[0] != '\0') {
         int value = SDL_atoi(gps_ss);
@@ -258,7 +268,11 @@ static void app_init(void) {
                 g_splat_effect_radius = r > 1e-4f ? r : 1.0f;
             }
             PROFILE("upload gaussian scene") {
-            renderer_upload_gaussians(&state->renderer, &state->scene);
+            if (!renderer_upload_gaussians(&state->renderer, &state->scene)) {
+                LOG(ERROR|GAUSSIAN|GPU, "Scene upload failed; exiting without drawing");
+                sapp_quit();
+                return;
+            }
             }
         }
     }

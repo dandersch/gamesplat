@@ -21,6 +21,7 @@ layout(binding = 0) uniform CullUBO {
     mat4 proj;
     vec2 viewport;
     int gaussian_count;
+    int gaussian_first;
     float orthographic;
     float persp_focal;
     float ortho_focal;
@@ -102,6 +103,7 @@ float dilog(float x) {
 }
 
 vec4 fetch_vec4(uint splat_id, int k) {
+    splat_id -= uint(gaussian_first);
     int base = k * 4;
     return vec4(
         gaussian_data[splat_id].data[base + 0],
@@ -112,10 +114,11 @@ vec4 fetch_vec4(uint splat_id, int k) {
 }
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= uint(gaussian_count)) {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= uint(gaussian_count)) {
         return;
     }
+    uint idx = local_idx + uint(gaussian_first);
 
     vec4 t0 = fetch_vec4(idx, 0);  // pos.xyz, opacity
     vec4 t1 = fetch_vec4(idx, 1);  // scale.xyz, pad

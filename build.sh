@@ -95,7 +95,7 @@ fi
 # Build single-header vendor static lib if missing or out of date.
 # sokol_imgui needs ImGui's headers visible so the impl can talk to ImGui's
 # C++ API directly.
-if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/miniz.c" -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
+if [ ! -f "$THIRDPARTY_LIB" ] || [ "$THIRDPARTY_SRC" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/sokol_gfx.h" -nt "$THIRDPARTY_LIB" ] || [ "$VENDOR_DIR/miniz.c" -nt "$THIRDPARTY_LIB" ] || ! ar t "$THIRDPARTY_LIB" | grep -q '^miniz\.o$'; then
     echo "Building vendor single-header impls..."
     objs=("$OBJ_DIR/third_party_impl.o" "$OBJ_DIR/miniz.o")
     $CXX $CXXFLAGS "${PIC_FLAGS[@]}" "${SOKOL_BACKEND_FLAGS[@]}" "${APP_PROFILE_FLAGS[@]}" -I. -I"$VENDOR_DIR" -I"$IMGUI_DIR" -c "$THIRDPARTY_SRC" -o "${objs[0]}"

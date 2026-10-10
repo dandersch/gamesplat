@@ -4379,6 +4379,7 @@ typedef struct sg_stats {
     _SG_LOGITEM_XMACRO(GL_TEXTURE_FORMAT_NOT_SUPPORTED, "pixel format not supported for texture (gl)") \
     _SG_LOGITEM_XMACRO(GL_3D_TEXTURES_NOT_SUPPORTED, "3d textures not supported (gl)") \
     _SG_LOGITEM_XMACRO(GL_ARRAY_TEXTURES_NOT_SUPPORTED, "array textures not supported (gl)") \
+    _SG_LOGITEM_XMACRO(GL_CREATE_BUFFER_FAILED, "buffer allocation or upload failed (gl)") \
     _SG_LOGITEM_XMACRO(GL_STORAGEBUFFER_GLSL_BINDING_OUT_OF_RANGE, "GLSL storage buffer bindslot is out of range (sg_limits.max_storage_buffer_bindings_per_stage) (gl)") \
     _SG_LOGITEM_XMACRO(GL_STORAGEIMAGE_GLSL_BINDING_OUT_OF_RANGE, "GLSL storage image bindslot is out of range (sg.limits.max_storage_image_bindings_per_stage) (gl)") \
     _SG_LOGITEM_XMACRO(GL_SHADER_COMPILATION_FAILED, "shader compilation failed (gl)") \
@@ -10660,6 +10661,12 @@ _SOKOL_PRIVATE void _sg_gl_discard_backend(void) {
 _SOKOL_PRIVATE sg_resource_state _sg_gl_create_buffer(_sg_buffer_t* buf, const sg_buffer_desc* desc) {
     SOKOL_ASSERT(buf && desc);
     _SG_GL_CHECK_ERROR();
+    // Buffer common state uses a signed int size. Do not send a truncated
+    // negative allocation to GL, even if public size_t input was valid.
+    if (desc->size > 0x7FFFFFFFu) {
+        _SG_ERROR(GL_CREATE_BUFFER_FAILED);
+        return SG_RESOURCESTATE_FAILED;
+    }
     buf->gl.injected = (0 != desc->gl_buffers[0]);
     const GLenum gl_target = _sg_gl_buffer_target(&buf->cmn.usage);
     const GLenum gl_usage  = _sg_gl_buffer_usage(&buf->cmn.usage);
@@ -10674,10 +10681,21 @@ _SOKOL_PRIVATE sg_resource_state _sg_gl_create_buffer(_sg_buffer_t* buf, const s
             _sg_gl_cache_store_buffer_binding(gl_target);
             _sg_gl_cache_bind_buffer(gl_target, gl_buf);
             glBufferData(gl_target, buf->cmn.size, 0, gl_usage);
-            if (desc->data.ptr) {
+            GLenum error = glGetError();
+            if (error == GL_NO_ERROR && desc->data.ptr) {
                 glBufferSubData(gl_target, 0, buf->cmn.size, desc->data.ptr);
+                error = glGetError();
             }
             _sg_gl_cache_restore_buffer_binding(gl_target);
+            if (error != GL_NO_ERROR) {
+                glDeleteBuffers(1, &gl_buf);
+                for (int previous = 0; previous < slot; previous++) {
+                    glDeleteBuffers(1, &buf->gl.buf[previous]);
+                    buf->gl.buf[previous] = 0;
+                }
+                _SG_ERROR(GL_CREATE_BUFFER_FAILED);
+                return SG_RESOURCESTATE_FAILED;
+            }
         }
         buf->gl.buf[slot] = gl_buf;
     }

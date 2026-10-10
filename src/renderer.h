@@ -107,6 +107,13 @@ struct GaussianPointSplatGpu {
     uint32_t  max_work_items;
 };
 
+struct GaussianGpuChunk {
+    sg_buffer buffer;
+    sg_view view;
+    uint32_t first;
+    uint32_t count;
+};
+
 struct Renderer {
     SplatRenderMode splat_render_mode;
     sg_pipeline     splat_pipeline;
@@ -130,8 +137,9 @@ struct Renderer {
     sg_sampler      overlay_sampler;
     // Gaussian data is stored in a readonly storage buffer. Layout matches
     // GpuGaussian byte-for-byte.
-    sg_buffer       gaussian_buffer;
-    sg_view         gaussian_buffer_view;
+    GaussianGpuChunk* gaussian_chunks;
+    uint32_t        gaussian_chunk_count;
+    size_t          gpu_budget_bytes;       // 0: automatic budget, otherwise explicit cap
     sg_buffer       depth_key_buffer;
     sg_view         depth_key_buffer_view;
     sg_buffer       sort_temp_key_buffer;
@@ -205,7 +213,7 @@ struct Renderer {
 };
 
 bool renderer_init(Renderer* r);
-void renderer_upload_gaussians(Renderer* r, const GaussianScene* scene);
+bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene);
 bool renderer_upload_mesh(Renderer* r, const Mesh* mesh);
 // Upload a second, static mesh that is drawn alongside the primary mesh with
 // an identity model transform. Intended for scene props supplied via --object.
