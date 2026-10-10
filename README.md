@@ -9,9 +9,10 @@ Before upload, the renderer checks storage-buffer and compute limits and logs
 the estimated scene-buffer memory requirement. With `GL_NVX_gpu_memory_info`
 (typically NVIDIA), the automatic budget is 80% of currently available VRAM;
 otherwise it is 1024 MiB. Set `gpu_budget_mb=4096`, for example, to specify a
-different cap. An explicit cap never exceeds the 80% available-VRAM limit when
-that query is supported. The budget covers scene buffers, not window-sized
-render targets or other assets; leave headroom for those and the desktop.
+different total scene-buffer cap. New allocations must also fit within 80% of
+currently free VRAM when that query is supported. The cap covers scene buffers,
+not window-sized render targets or other assets; leave headroom for those and
+the desktop.
 
 Scenes exceeding these limits are rejected before GPU upload, and OpenGL buffer
 allocation failures cause a clean exit rather than an assertion/core dump.
@@ -19,3 +20,17 @@ Chunking removes the per-buffer size limitation, not the total memory requiremen
 10 million Gaussians still need roughly 3.6 GiB of scene buffers plus the GPS
 work buffer, render targets, and CPU decoding storage. A compressed `.sog` reduces
 disk size, but its decoded data currently uses the same full-precision layout.
+
+Changing **GPS Work Budget** replaces only the GPS work buffer, preserving the
+rest of the loaded scene. The old buffer stays resident until its replacement
+is valid, so the resize needs temporary space for both work buffers. A failed
+resize keeps the previous budget and accumulated image, and displays a warning.
+Each 1M work items costs 8 MiB; the maximum 250M setting costs 2000 MiB.
+
+The native OpenGL GPS UI reports requested work and warns when the global cap
+drops Gaussian work (sampled at most twice per second). This diagnoses budget
+exhaustion; it does not remove the prototype's dropping behavior.
+
+Run the small software-OpenGL regression test after a native build:
+`bash tests/test_gps_work_budget.sh`. It requires Mesa/llvmpipe and a display,
+simulates low free VRAM, and never opens the large scene assets.

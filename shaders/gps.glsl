@@ -34,6 +34,7 @@ void main() {
     if (idx >= uint(pixel_count)) return;
     if (idx == 0u) {
         work_count[0].count = 0u;
+        work_count[1].count = 0u;
     }
     gps_depth_keys[idx].count = 0xFFFFFFFFu;
     gps_colors[idx].count = 0u;
@@ -141,6 +142,9 @@ void main() {
 
     uint base = atomicAdd(work_count[0].count, work_item_count);
     uint capacity = uint(max_work_items);
+    if (base >= capacity || work_item_count > capacity - base) {
+        atomicOr(work_count[1].count, 1u);
+    }
     if (base >= capacity) return;
     uint write_count = min(work_item_count, capacity - base);
 

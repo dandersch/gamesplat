@@ -105,6 +105,10 @@ struct GaussianPointSplatGpu {
     uint32_t  height;
     uint32_t  supersample_factor;
     uint32_t  max_work_items;
+    uint32_t  requested_work_items;
+    float     work_stats_elapsed;
+    bool      work_stats_valid;
+    bool      work_budget_exhausted;
 };
 
 struct GaussianGpuChunk {
@@ -140,6 +144,7 @@ struct Renderer {
     GaussianGpuChunk* gaussian_chunks;
     uint32_t        gaussian_chunk_count;
     size_t          gpu_budget_bytes;       // 0: automatic budget, otherwise explicit cap
+    bool            gps_work_budget_resize_failed;
     sg_buffer       depth_key_buffer;
     sg_view         depth_key_buffer_view;
     sg_buffer       sort_temp_key_buffer;
@@ -214,6 +219,8 @@ struct Renderer {
 
 bool renderer_init(Renderer* r);
 bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene);
+// Replace only the GPS work buffer. On failure, preserve the active budget/resources.
+bool renderer_set_gps_work_budget(Renderer* r, uint32_t max_work_items);
 bool renderer_upload_mesh(Renderer* r, const Mesh* mesh);
 // Upload a second, static mesh that is drawn alongside the primary mesh with
 // an identity model transform. Intended for scene props supplied via --object.

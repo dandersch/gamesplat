@@ -674,33 +674,49 @@ static void renderer_release_gaussian_chunks(Renderer* r) {
     r->gaussian_chunk_count = 0;
 }
 
-bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
-    // Sokol's internal buffer sizes are signed ints. Keep source allocations
-    // small, and reject oversized output buffers before touching the driver.
-    size_t storage_limit = 128u * 1024u * 1024u;
-    size_t budget = r->gpu_budget_bytes ? r->gpu_budget_bytes : 1024u * 1024u * 1024u;
-    uint32_t max_groups = 65535u;
+static size_t renderer_scene_buffer_bytes(uint32_t count, uint32_t work_items) {
+    const size_t groups = ((size_t)count + 255u) / 256u;
+    return (size_t)count * (sizeof(GpuGaussian) + 64u + 48u + 16u) + groups * 1024u +
+        (size_t)work_items * 8u + 44u;
+}
+
+// A scene cap limits total retained scene buffers; the allocation budget limits
+// new allocations while existing resources are still resident.
+static void renderer_gpu_buffer_limits(const Renderer* r, size_t* storage_limit,
+                                      size_t* scene_cap, size_t* allocation_budget) {
+    *storage_limit = 128u * 1024u * 1024u;
+    *scene_cap = r->gpu_budget_bytes ? r->gpu_budget_bytes : 1024u * 1024u * 1024u;
+    *allocation_budget = SIZE_MAX;
 #if defined(SOKOL_GLCORE)
     GLint64 gl_limit = 0;
     glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &gl_limit);
-    storage_limit = (size_t)gl_limit;
-    GLint group_limit = 0;
-    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &group_limit);
-    max_groups = (uint32_t)group_limit;
+    *storage_limit = (size_t)gl_limit;
     if (gl_has_extension("GL_NVX_gpu_memory_info")) {
         GLint free_kb = 0;
         glGetIntegerv(0x9049 /* GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX */, &free_kb);
-        if (free_kb > 0) {
-            size_t available_budget = (size_t)free_kb * 1024u * 4u / 5u;
-            budget = r->gpu_budget_bytes ? std::min(budget, available_budget) : available_budget;
-        }
+        *allocation_budget = (size_t)std::max(free_kb, 0) * 1024u * 4u / 5u;
+        if (!r->gpu_budget_bytes) *scene_cap = SIZE_MAX;
     }
 #endif
-    storage_limit = std::min(storage_limit, (size_t)INT32_MAX);
+    *storage_limit = std::min(*storage_limit, (size_t)INT32_MAX);
+}
+
+bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
+    // Sokol's internal buffer sizes are signed ints. Keep source allocations
+    // small, and reject oversized output buffers before touching the driver.
+    size_t storage_limit, scene_cap, allocation_budget;
+    renderer_gpu_buffer_limits(r, &storage_limit, &scene_cap, &allocation_budget);
+    const size_t budget = std::min(scene_cap, allocation_budget);
+    uint32_t max_groups = 65535u;
+#if defined(SOKOL_GLCORE)
+    GLint group_limit = 0;
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &group_limit);
+    max_groups = (uint32_t)group_limit;
+#endif
     const size_t count = scene->gaussian_count;
     const size_t groups = (count + 255u) / 256u;
     const size_t work_bytes = (size_t)std::max(r->gps_max_work_items, 1u) * 8u;
-    const size_t required = count * (sizeof(GpuGaussian) + 64u + 48u + 16u) + groups * 1024u + work_bytes + 40u;
+    const size_t required = renderer_scene_buffer_bytes(scene->gaussian_count, std::max(r->gps_max_work_items, 1u));
     LOG(INFO|GAUSSIAN|GPU, "Scene buffers need %.1f MiB; budget %.1f MiB; storage block limit %.1f MiB",
         required / 1048576.0, budget / 1048576.0, storage_limit / 1048576.0);
     if (!count || groups > max_groups || count * 64u > storage_limit ||
@@ -917,7 +933,7 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     gps_gpu_release(&r->gps_gpu);
     bd = {};
     bd.usage.storage_buffer = true;
-    bd.size = sizeof(uint32_t);
+    bd.size = sizeof(uint32_t) * 2u; // requested work count and overflow flag
     bd.label = "gps-work-count-buffer";
     r->gps_gpu.point_offset_buffer = sg_make_buffer(&bd);
     if (sg_query_buffer_state(r->gps_gpu.point_offset_buffer) != SG_RESOURCESTATE_VALID) return false;
@@ -967,6 +983,55 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     }
     LOG(INFO|GAUSSIAN|GPU, "Uploaded %u gaussians (storage buffer, %.1f MB)",
         scene->gaussian_count, (double)payload_size / (1024.0 * 1024.0));
+    return true;
+}
+
+bool renderer_set_gps_work_budget(Renderer* r, uint32_t max_work_items) {
+    GaussianPointSplatGpu* gps = &r->gps_gpu;
+    r->gps_work_budget_resize_failed = false;
+    if (max_work_items == gps->max_work_items) return true;
+    size_t storage_limit, scene_cap, allocation_budget;
+    renderer_gpu_buffer_limits(r, &storage_limit, &scene_cap, &allocation_budget);
+    const size_t bytes = (size_t)max_work_items * 8u;
+    // Keep the old buffer until its replacement is valid. Check the replacement
+    // allocation, not the entire already-resident scene, against free VRAM.
+    if (!max_work_items || !gps->point_work_buffer.id || bytes > storage_limit ||
+        renderer_scene_buffer_bytes(r->gaussian_count, max_work_items) > scene_cap ||
+        bytes > allocation_budget) {
+        LOG(WARN|GAUSSIAN|GPU, "GPS work buffer resize to %.1f MiB refused by memory/storage limits; keeping %u work items",
+            bytes / 1048576.0, gps->max_work_items);
+        r->gps_work_budget_resize_failed = true;
+        return false;
+    }
+    sg_buffer_desc bd = {};
+    bd.usage.storage_buffer = true;
+    bd.size = bytes;
+    bd.label = "gps-point-work-buffer";
+    sg_buffer buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(buffer) != SG_RESOURCESTATE_VALID) {
+        if (buffer.id) sg_destroy_buffer(buffer);
+        r->gps_work_budget_resize_failed = true;
+        return false;
+    }
+    sg_view_desc vd = {};
+    vd.storage_buffer.buffer = buffer;
+    vd.label = "gps-point-work-buffer-view";
+    sg_view view = sg_make_view(&vd);
+    if (sg_query_view_state(view) != SG_RESOURCESTATE_VALID) {
+        if (view.id) sg_destroy_view(view);
+        sg_destroy_buffer(buffer);
+        r->gps_work_budget_resize_failed = true;
+        return false;
+    }
+    sg_destroy_view(gps->point_work_buffer_view);
+    sg_destroy_buffer(gps->point_work_buffer);
+    gps->point_work_buffer = buffer;
+    gps->point_work_buffer_view = view;
+    gps->max_work_items = max_work_items;
+    r->gps_max_work_items = max_work_items;
+    gps->work_stats_valid = false;
+    gps->work_stats_elapsed = 0.0f;
+    renderer_reset_stochastic_accumulation(r);
     return true;
 }
 
@@ -1802,6 +1867,24 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             }
         }
 
+#if defined(SOKOL_GLCORE)
+        // Read at most twice per second: synchronous GL readback can stall.
+        gps->work_stats_elapsed += (float)sapp_frame_duration();
+        if (!gps->work_stats_valid || gps->work_stats_elapsed >= 0.5f) {
+            const sg_gl_buffer_info info = sg_gl_query_buffer_info(gps->point_offset_buffer);
+            GLint previous_buffer = 0;
+            glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous_buffer);
+            glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, info.buf[info.active_slot]);
+            uint32_t stats[2] = {};
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(stats), stats);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, (GLuint)previous_buffer);
+            gps->requested_work_items = stats[0];
+            gps->work_budget_exhausted = stats[1] != 0;
+            gps->work_stats_valid = true;
+            gps->work_stats_elapsed = 0.0f;
+        }
+#endif
         PROFILE("gps splat") {
         PROFILE_GPU("gps splat") {
         sg_pass pass = {};

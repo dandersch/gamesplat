@@ -1033,11 +1033,21 @@ static void app_frame(void) {
             } else {
                 ImGui::Text("GPS accumulation off: displaying current noisy frame");
             }
-            int gps_work_budget_m = (int)(state->renderer.gps_max_work_items / (1024u * 1024u));
+            int gps_work_budget_m = (int)(state->renderer.gps_gpu.max_work_items / (1024u * 1024u));
             if (ImGui::SliderInt("GPS Work Budget", &gps_work_budget_m, 1, 250, "%dM")) {
-                state->renderer.gps_max_work_items = (uint32_t)gps_work_budget_m * 1024u * 1024u;
-                renderer_upload_gaussians(&state->renderer, &state->scene);
-                renderer_reset_stochastic_accumulation(&state->renderer);
+                renderer_set_gps_work_budget(&state->renderer, (uint32_t)gps_work_budget_m * 1024u * 1024u);
+            }
+            ImGui::Text("Work buffer: %.0f MiB", (double)state->renderer.gps_gpu.max_work_items * 8.0 / 1048576.0);
+            if (state->renderer.gps_work_budget_resize_failed) {
+                ImGui::TextWrapped("Resize failed: keeping the previous work budget (memory or GPU limit).");
+            }
+            if (state->renderer.gps_gpu.work_stats_valid) {
+                ImGui::Text("Requested work: %.2fM", state->renderer.gps_gpu.requested_work_items / 1048576.0);
+                if (state->renderer.gps_gpu.work_budget_exhausted) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.25f, 1.0f));
+                    ImGui::TextWrapped("Work budget exhausted: some Gaussian work is dropped.");
+                    ImGui::PopStyleColor();
+                }
             }
             ImGui::TextDisabled("Prototype global buffer cap, not a per-Gaussian GPS parameter.");
         }
