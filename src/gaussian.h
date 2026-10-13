@@ -37,7 +37,10 @@ struct SortContext {
     uint32_t*       scratch_keys2;
 };
 
+struct GSAnim;
+
 struct GaussianScene {
+    GSAnim*    animation; // optional fixed-geometry appearance track, original row order
     Gaussian*  gaussians;
     uint32_t   gaussian_count;
 
@@ -51,7 +54,7 @@ struct GaussianScene {
     uint32_t*  scratch_keys2;
 };
 
-bool load_gaussian_scene(const char* path, GaussianScene* scene); // dispatches by file extension (.ply / .sog)
+bool load_gaussian_scene(const char* path, GaussianScene* scene); // .ply / .sog / .gsanim
 
 void free_scene(GaussianScene* scene);
 

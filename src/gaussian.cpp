@@ -1,4 +1,5 @@
 #include "gaussian.h"
+#include "gsanim.h"
 #include "maths.h"
 #include "miniz.h"
 #include "sj.h"
@@ -23,6 +24,9 @@ static bool str_ends_with_ci(const char* s, const char* suffix) {
 }
 
 bool load_gaussian_scene(const char* path, GaussianScene* scene) {
+    if (str_ends_with_ci(path, ".gsanim")) {
+        return gaussian_load_gsanim(path, scene);
+    }
     if (str_ends_with_ci(path, ".ply")) {
         return gaussian_load_ply(path, scene);
     }
@@ -35,6 +39,7 @@ bool load_gaussian_scene(const char* path, GaussianScene* scene) {
 }
 
 void free_scene(GaussianScene* scene) {
+    delete scene->animation;
     free(scene->gaussians);
     free(scene->visible_indices);
     free(scene->visible_depths);

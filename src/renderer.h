@@ -121,6 +121,11 @@ struct GaussianGpuChunk {
 struct Renderer {
     SplatRenderMode splat_render_mode;
     sg_pipeline     splat_pipeline;
+    sg_pipeline     splat_float_pipeline;
+    sg_image        appearance_image;
+    sg_view         appearance_color_view;
+    sg_view         appearance_texture_view;
+    int             appearance_width, appearance_height;
     sg_pipeline     splat_stochastic_pipeline;
     sg_pipeline     cull_pipeline;
     sg_pipeline     cull_reset_pipeline;
@@ -143,6 +148,13 @@ struct Renderer {
     // GpuGaussian byte-for-byte.
     GaussianGpuChunk* gaussian_chunks;
     uint32_t        gaussian_chunk_count;
+    sg_buffer       animation_buffer;
+    sg_view         animation_view;
+    size_t          animation_bytes;
+    int             animation_state_a;
+    int             animation_state_b;
+    float           animation_weight;
+    bool            black_background;
     size_t          gpu_budget_bytes;       // 0: automatic budget, otherwise explicit cap
     bool            gps_work_budget_resize_failed;
     sg_buffer       depth_key_buffer;

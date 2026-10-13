@@ -66,6 +66,19 @@ layout(binding = 5) buffer SplatDiagnostics {
     UIntData splat_diagnostics[];
 };
 
+// Four signed bytes per uint, still in the asset's state/row/channel-major order.
+layout(binding = 6) readonly buffer AnimationDeltas {
+    UIntData animation_deltas[];
+};
+
+layout(binding = 2) uniform AnimationUBO {
+    int animation_count;
+    int animation_state_a;
+    int animation_state_b;
+    float animation_weight;
+    vec4 animation_scales[12];
+};
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 uint positive_float_key(float v) {
@@ -102,15 +115,38 @@ float dilog(float x) {
     return y;
 }
 
+float animation_coefficient(float base, uint row, int j, int state) {
+    if (state == 0) return base;
+    uint offset = (uint(state - 1) * uint(animation_count) + row) * 48u + uint(j);
+    uint word = animation_deltas[offset / 4u].count;
+    int q = int((word >> ((offset % 4u) * 8u)) & 255u);
+    if (q >= 128) q -= 256;
+    return base + float(q) * animation_scales[j / 4][j % 4];
+}
+
 vec4 fetch_vec4(uint splat_id, int k) {
-    splat_id -= uint(gaussian_first);
+    uint local_id = splat_id - uint(gaussian_first);
     int base = k * 4;
-    return vec4(
-        gaussian_data[splat_id].data[base + 0],
-        gaussian_data[splat_id].data[base + 1],
-        gaussian_data[splat_id].data[base + 2],
-        gaussian_data[splat_id].data[base + 3]
+    vec4 value = vec4(
+        gaussian_data[local_id].data[base + 0],
+        gaussian_data[local_id].data[base + 1],
+        gaussian_data[local_id].data[base + 2],
+        gaussian_data[local_id].data[base + 3]
     );
+    if (animation_count > 0 && k >= 3) {
+        for (int c = 0; c < 4; ++c) {
+            int slot = base + c;
+            if (slot == 15 || slot >= 61) continue; // GPU padding, not SH
+            int j = slot < 15 ? slot - 12 : 3 + ((slot - 16) % 3) * 15 + (slot - 16) / 3;
+            float a = animation_coefficient(value[c], splat_id, j, animation_state_a);
+            if (animation_weight > 0.0) {
+                float b = animation_coefficient(value[c], splat_id, j, animation_state_b);
+                a = (1.0 - animation_weight) * a + animation_weight * b;
+            }
+            value[c] = a;
+        }
+    }
+    return value;
 }
 
 void main() {

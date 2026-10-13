@@ -302,7 +302,7 @@ layout(binding = 0) uniform GpsResolveUBO {
     vec2 viewport;
     vec2 gps_viewport;
     int supersample_factor;
-    float resolve_pad0;
+    float background;
     float resolve_pad1;
     float resolve_pad2;
 };
@@ -354,7 +354,7 @@ void main() {
     }
 
     if (coverage_count <= 0.0) {
-        out_color = vec4(0.1, 0.1, 0.1, 0.0);
+        out_color = vec4(vec3(background), 0.0);
         out_depth = vec4(1.0, 0.0, 0.0, 0.0);
         return;
     }

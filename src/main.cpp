@@ -1,5 +1,6 @@
 #include <SDL3/SDL.h>
 #include <cstdio>
+#include <array>
 
 #include "sokol_app.h"
 #include "sokol_gfx.h"
@@ -22,6 +23,7 @@ int log_verbosity_level = LOG_EVERYTHING; /* define globally once */
 #include "gaussian.cpp"
 #include "gaussian_loader_sog.cpp"
 #include "gaussian_loader_ply.cpp"
+#include "gaussian_loader_gsanim.cpp"
 #include "mesh.cpp"
 #include "mesh_loader_obj.cpp"
 #include "mesh_loader_gltf.cpp"
@@ -51,6 +53,86 @@ static float g_splat_effect_radius = 1.0f;
 
 static const uint32_t MAX_NEIGHBORS = 64;
 
+// Optional Blender reference cameras for this baked-appearance demo. Geometry
+// stays in asset space; only the camera basis adapts to the renderer's -X/-Y
+// projection convention. The square view expands horizontally at 16:9.
+struct BakedCameraViews {
+    std::vector<std::array<float, 16>> poses;
+    float focal_over_height = 0;
+    float selected = 0;
+    bool transition = false;
+};
+
+static bool load_baked_views(const char* path, BakedCameraViews* out) {
+    size_t size = 0;
+    char* bytes = (char*)SDL_LoadFile(path, &size);
+    if (!bytes) return false;
+    sj_Reader r = sj_reader(bytes, size);
+    sj_Value root = sj_read(&r), key, value;
+    float resolution[2] = {}, fx = 0, fy = 0, cx = 0, cy = 0;
+    BakedCameraViews result;
+    while (sj_iter_object(&r, root, &key, &value)) {
+        if (sjp_eq(key, "resolution")) sjp_parse_float_array(&r, value, resolution, 2);
+        else if (sjp_eq(key, "intrinsics")) {
+            sj_Value k, v;
+            while (sj_iter_object(&r, value, &k, &v)) {
+                if (sjp_eq(k, "fx")) sjp_parse_float(&r, v, &fx);
+                if (sjp_eq(k, "fy")) sjp_parse_float(&r, v, &fy);
+                if (sjp_eq(k, "cx")) sjp_parse_float(&r, v, &cx);
+                if (sjp_eq(k, "cy")) sjp_parse_float(&r, v, &cy);
+            }
+        } else if (sjp_eq(key, "views")) {
+            sj_Value entry;
+            while (sj_iter_array(&r, value, &entry)) {
+                sj_Value k, v;
+                while (sj_iter_object(&r, entry, &k, &v)) if (sjp_eq(k, "camera_to_world")) {
+                    std::array<float, 16> pose{};
+                    sj_Value row;
+                    int n = 0;
+                    while (sj_iter_array(&r, v, &row)) {
+                        if (n >= 4 || !sjp_parse_float_array(&r, row, pose.data() + 4*n, 4)) { sjp_set_error(&r, "invalid camera matrix"); break; }
+                        ++n;
+                    }
+                    if (n != 4) sjp_set_error(&r, "invalid camera matrix");
+                    for (float x : pose) if (!std::isfinite(x)) sjp_set_error(&r, "nonfinite camera");
+                    result.poses.push_back(pose);
+                }
+            }
+        }
+    }
+    bool ok = !r.error && !result.poses.empty() && fx > 0 && std::isfinite(fx) && fx == fy &&
+        resolution[1] > 0 && cx == resolution[0]/2 && cy == resolution[1]/2;
+    SDL_free(bytes);
+    if (ok) { result.focal_over_height = fy/resolution[1]; *out = std::move(result); }
+    return ok;
+}
+
+static void baked_camera_uniforms(const BakedCameraViews& views, CameraUniforms* cam) {
+    float index = std::clamp(views.selected, 0.0f, float(views.poses.size()-1));
+    size_t i = size_t(index), j = std::min(i+1, views.poses.size()-1);
+    float a = index-float(i), p[16];
+    for (int k = 0; k < 16; ++k) p[k] = views.poses[i][k]*(1-a) + views.poses[j][k]*a;
+    // Orthonormalize the interpolated basis; otherwise SH camera reconstruction
+    // and covariance projection would be wrong during a camera transition.
+    float back[3] = {p[2], p[6], p[10]}, up[3] = {p[1], p[5], p[9]}, right[3];
+    math_vec3_normalize(back);
+    math_vec3_cross(up, back, right); math_vec3_normalize(right);
+    math_vec3_cross(back, right, up);
+    memset(cam->view, 0, sizeof(cam->view));
+    for (int k = 0; k < 3; ++k) {
+        cam->view[k*4] = -right[k]; cam->view[k*4+1] = -up[k]; cam->view[k*4+2] = back[k];
+        cam->view[12] += right[k]*p[k*4+3];
+        cam->view[13] += up[k]*p[k*4+3];
+        cam->view[14] -= back[k]*p[k*4+3];
+    }
+    cam->view[15] = 1;
+    Camera projection; camera_init(&projection);
+    projection.fov_y = 2*atanf(0.5f/views.focal_over_height);
+    camera_get_proj_matrix(&projection, cam->viewport[0]/cam->viewport[1], cam->proj);
+    cam->orthographic = 0;
+    cam->persp_focal = views.focal_over_height*cam->viewport[1];
+}
+
 struct AppState {
     const char* ply_path;
     const char* colmap_dir;
@@ -66,6 +148,8 @@ struct AppState {
     Renderer      renderer;
     GaussianScene scene;
     bool          scene_loaded;
+    BakedCameraViews baked_views;
+    Uint64        animation_tick;
     Mesh          mesh;
     Mesh          object;
     RefViewSet    refviews;
@@ -245,10 +329,31 @@ static void app_init(void) {
 
     // Scene
     if (state->ply_path) {
+        Uint64 load_start = SDL_GetPerformanceCounter();
         PROFILE("load gaussian scene") {
         state->scene_loaded = load_gaussian_scene(state->ply_path, &state->scene);
         }
+        if (!state->scene_loaded && str_ends_with_ci(state->ply_path, ".gsanim")) {
+            LOG(ERROR|GAUSSIAN|LOAD, "Invalid, unsupported, or over-limit GSAnim: %s", state->ply_path);
+            sapp_quit();
+            return;
+        }
         if (state->scene_loaded) {
+            if (state->scene.animation) {
+                if (!render_mode[0]) state->renderer.splat_render_mode = SplatRenderMode::AlphaBlendSorted;
+                state->colmap_dir = NULL;
+                GSAnim& a = *state->scene.animation;
+                if (sargs_exists("anim_time")) {
+                    double time = strtod(sargs_value("anim_time"), nullptr);
+                    if (std::isfinite(time)) a.playback_time = time;
+                    a.playing = false;
+                }
+                if (sargs_exists("anim_state")) {
+                    int selected = atoi(sargs_value("anim_state"));
+                    if (selected >= 0 && uint32_t(selected) < a.state_count) a.selected_state = selected;
+                    a.playing = false;
+                }
+            }
             // compute gaussian scene radius from center
             {
                 if (state->scene.gaussian_count == 0) {
@@ -276,6 +381,28 @@ static void app_init(void) {
                 return;
             }
             }
+            LOG(INFO|GAUSSIAN|LOAD, "Scene load + upload submission: %.3f ms",
+                1000.0 * (SDL_GetPerformanceCounter()-load_start)/SDL_GetPerformanceFrequency());
+        }
+    }
+
+    const char* views_path = sargs_value("baked_views");
+    std::string default_views;
+    if (state->scene.animation && !views_path[0]) {
+        default_views = state->ply_path;
+        size_t slash = default_views.find_last_of("/\\");
+        default_views = (slash == std::string::npos ? "" : default_views.substr(0, slash+1)) + "reference_views.json";
+        views_path = default_views.c_str();
+    }
+    if (views_path[0]) {
+        if (!load_baked_views(views_path, &state->baked_views)) {
+            LOG(WARN|GAUSSIAN|LOAD, "Could not load centered, square-pixel Blender reference cameras: %s", views_path);
+            if (sargs_exists("baked_views")) { sapp_quit(); return; }
+            // A companion camera file is not part of the GSAnim container.
+            // Standalone assets can still use the ordinary fly-camera controls.
+        } else {
+            state->renderer.black_background = true;
+            state->colmap_dir = NULL;
         }
     }
 
@@ -340,8 +467,9 @@ static void app_init(void) {
             "Unknown camera_motion '%s' (expected none or look); disabling automated motion",
             camera_motion);
     }
-    sapp_lock_mouse(true); // start in camera mode
-    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
+    state->cam.camera_mode = state->baked_views.poses.empty();
+    sapp_lock_mouse(state->cam.camera_mode);
+    if (state->cam.camera_mode) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
 
     state->refview_max_alpha = 0.5f;
     state->node_half_size = 0.5f;
@@ -773,6 +901,16 @@ static void app_frame(void) {
 
     float dt = (float)sapp_frame_duration();
     g_app_time += dt;
+    const Uint64 animation_now = SDL_GetPerformanceCounter();
+    const double animation_dt = state->animation_tick
+        ? double(animation_now-state->animation_tick)/SDL_GetPerformanceFrequency() : 0;
+    state->animation_tick = animation_now;
+    if (state->scene.animation && state->scene.animation->playing) {
+        GSAnim& a = *state->scene.animation;
+        a.playback_time = fmod(a.playback_time + animation_dt, a.duration);
+    }
+    if (state->baked_views.transition && state->baked_views.poses.size() >= 3)
+        state->baked_views.selected = 1.0f - cosf(g_app_time * 0.5f); // node A -> B -> A
     if (g_splat_effect_duration <= 0.0f) g_splat_effect_duration = 2.25f;
     if (g_splat_effect_strength <= 0.0f) g_splat_effect_strength = 0.08f;
     if (g_splat_effect_tint_strength <= 0.0f) g_splat_effect_tint_strength = 0.45f;
@@ -970,8 +1108,31 @@ static void app_frame(void) {
     // sets DisplaySize/DeltaTime.
     simgui_new_frame({ win_w, win_h, dt, sapp_dpi_scale() });
 
+    if (state->scene.animation) {
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Once);
+        ImGui::SetNextWindowSize(ImVec2(std::min(460.0f, ImGui::GetIO().DisplaySize.x-24),
+            std::min(650.0f, ImGui::GetIO().DisplaySize.y-24)), ImGuiCond_Once);
+    }
     ImGui::Begin("Info");
     ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
+    if (state->scene.animation) {
+        GSAnim& a = *state->scene.animation;
+        ImGui::Text("GSAnim 0.1: %.3g-second %s loop", a.duration, a.linear ? "linear" : "step");
+        ImGui::TextWrapped("Synthetic snapshot loop, not the original Blender timeline. Baked appearance; no runtime lights.");
+        if (a.linear) ImGui::TextWrapped("Coefficient crossfade test, not physical intermediate TV animation.");
+        if (ImGui::Checkbox("Play", &a.playing)) a.selected_state = -1;
+        double min_time = 0, max_time = a.duration;
+        if (ImGui::SliderScalar("Time (seconds)", ImGuiDataType_Double, &a.playback_time, &min_time, &max_time, "%.4f")) {
+            a.playing = false; a.selected_state = -1;
+        }
+        if (ImGui::SliderInt("State", &a.selected_state, -1, int(a.state_count)-1)) a.playing = false;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("-1 follows the timeline; selecting a state pauses playback.");
+        ImGui::Text("Resident int8 deltas: %.2f MiB", a.deltas.size()/1048576.0);
+    }
+    if (!state->baked_views.poses.empty()) {
+        ImGui::SliderFloat("Reference camera", &state->baked_views.selected, 0, float(state->baked_views.poses.size()-1), "%.3f");
+        ImGui::Checkbox("Camera transition A-B", &state->baked_views.transition);
+    }
     if (state->scene_loaded) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
         int render_mode = (int)state->renderer.splat_render_mode;
@@ -1053,11 +1214,13 @@ static void app_frame(void) {
             }
             ImGui::TextDisabled("Prototype global buffer cap, not a per-Gaussian GPS parameter.");
         }
+        ImGui::BeginDisabled(state->scene.animation != nullptr);
         if (ImGui::Button("Shockwave Burst")) {
             g_splat_effect_active = true;
             g_splat_effect_start_time = g_app_time;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
+        ImGui::EndDisabled();
         if (ImGui::Checkbox("Splat diagnostics", &state->renderer.splat_diagnostics_enabled)) {
             state->renderer.splat_diagnostics.valid = false;
         }
@@ -1579,6 +1742,7 @@ static void app_frame(void) {
     }
 
     // Render
+    if (!state->baked_views.poses.empty()) baked_camera_uniforms(state->baked_views, &cam_uniforms);
     PROFILE("render submit") {
     renderer_draw_frame(&state->renderer, &state->scene, &cam_uniforms, overlay_ptr, node_ptr,
                         splat_effect_ptr, 1.0f /*wireframe_occlusion*/, map_uniforms_ptr);

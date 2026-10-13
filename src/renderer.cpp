@@ -50,6 +50,7 @@ static void renderer_destroy_shader_pipeline(sg_pipeline* pipeline) {
 
 static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_pipeline);
+    renderer_destroy_shader_pipeline(&r->splat_float_pipeline);
     renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_reset_pipeline);
@@ -286,6 +287,14 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "splat-pipeline";
         r->splat_pipeline = sg_make_pipeline(&pd);
+        // The baked reference path must clip only after compositing. Keep the
+        // existing SH, sorting and alpha blend, with a floating color target.
+        pd.shader = sg_make_shader(splat_shader_desc(sg_query_backend()));
+        pd.depth.pixel_format = SG_PIXELFORMAT_NONE;
+        pd.depth.compare = SG_COMPAREFUNC_ALWAYS;
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA16F;
+        pd.label = "splat-display-referred-float-pipeline";
+        r->splat_float_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Stochastic splat pipeline --------------------------------------
@@ -543,7 +552,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         r->mesh_pipeline = sg_make_pipeline(&pd);
     }
 
-    bool ok = r->splat_pipeline.id && r->splat_stochastic_pipeline.id &&
+    bool ok = r->splat_pipeline.id && r->splat_float_pipeline.id && r->splat_stochastic_pipeline.id &&
               r->cull_pipeline.id && r->cull_reset_pipeline.id &&
               r->gps_clear_pipeline.id && r->gps_expand_pipeline.id &&
               r->gps_splat_pipeline.id &&
@@ -665,6 +674,11 @@ bool renderer_init(Renderer* r) {
 }
 
 static void renderer_release_gaussian_chunks(Renderer* r) {
+    if (r->animation_view.id) sg_destroy_view(r->animation_view);
+    if (r->animation_buffer.id) sg_destroy_buffer(r->animation_buffer);
+    r->animation_view = {};
+    r->animation_buffer = {};
+    r->animation_bytes = 0;
     for (uint32_t i = 0; i < r->gaussian_chunk_count; ++i) {
         if (r->gaussian_chunks[i].view.id) sg_destroy_view(r->gaussian_chunks[i].view);
         if (r->gaussian_chunks[i].buffer.id) sg_destroy_buffer(r->gaussian_chunks[i].buffer);
@@ -716,11 +730,13 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     const size_t count = scene->gaussian_count;
     const size_t groups = (count + 255u) / 256u;
     const size_t work_bytes = (size_t)std::max(r->gps_max_work_items, 1u) * 8u;
-    const size_t required = renderer_scene_buffer_bytes(scene->gaussian_count, std::max(r->gps_max_work_items, 1u));
+    const size_t animation_bytes = scene->animation ? scene->animation->deltas.size() : 4u;
+    const size_t required = renderer_scene_buffer_bytes(scene->gaussian_count, std::max(r->gps_max_work_items, 1u)) + animation_bytes;
     LOG(INFO|GAUSSIAN|GPU, "Scene buffers need %.1f MiB; budget %.1f MiB; storage block limit %.1f MiB",
         required / 1048576.0, budget / 1048576.0, storage_limit / 1048576.0);
     if (!count || groups > max_groups || count * 64u > storage_limit ||
-        groups * 1024u > storage_limit || work_bytes > storage_limit || required > budget) {
+        groups * 1024u > storage_limit || work_bytes > storage_limit ||
+        animation_bytes > storage_limit || required > budget) {
         LOG(ERROR|GAUSSIAN|GPU, "Scene exceeds GPU memory or compute limits; refusing allocation. gpu_budget_mb can set a memory cap (automatic on NVIDIA, otherwise 1024 MiB).");
         return false;
     }
@@ -806,6 +822,30 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     if (!gpu_data) return false;
     sg_buffer_desc bd = {};
     sg_view_desc vd = {};
+    // Byte order is explicit so packed signed-byte fetches also work on hosts
+    // whose native uint32 representation differs from the archive.
+    std::vector<uint32_t> packed(animation_bytes / 4u, 0u);
+    if (scene->animation) {
+        for (size_t i = 0; i < animation_bytes; ++i)
+            packed[i / 4u] |= uint32_t(uint8_t(scene->animation->deltas[i])) << ((i % 4u) * 8u);
+    }
+    bd.usage.storage_buffer = true;
+    bd.data = {packed.data(), animation_bytes};
+    bd.label = "gsanim-resident-int8-deltas";
+    r->animation_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->animation_buffer) != SG_RESOURCESTATE_VALID) {
+        free(gpu_data);
+        return false;
+    }
+    vd.storage_buffer.buffer = r->animation_buffer;
+    r->animation_view = sg_make_view(&vd);
+    if (sg_query_view_state(r->animation_view) != SG_RESOURCESTATE_VALID) {
+        free(gpu_data);
+        return false;
+    }
+    r->animation_bytes = animation_bytes;
+    bd = {};
+    vd = {};
     for (uint32_t i = 0; i < chunk_count; ++i) {
         GaussianGpuChunk* chunk = &r->gaussian_chunks[i];
         chunk->first = i * chunk_capacity;
@@ -996,7 +1036,7 @@ bool renderer_set_gps_work_budget(Renderer* r, uint32_t max_work_items) {
     // Keep the old buffer until its replacement is valid. Check the replacement
     // allocation, not the entire already-resident scene, against free VRAM.
     if (!max_work_items || !gps->point_work_buffer.id || bytes > storage_limit ||
-        renderer_scene_buffer_bytes(r->gaussian_count, max_work_items) > scene_cap ||
+        renderer_scene_buffer_bytes(r->gaussian_count, max_work_items) + r->animation_bytes > scene_cap ||
         bytes > allocation_budget) {
         LOG(WARN|GAUSSIAN|GPU, "GPS work buffer resize to %.1f MiB refused by memory/storage limits; keeping %u work items",
             bytes / 1048576.0, gps->max_work_items);
@@ -1471,7 +1511,7 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
 static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUniforms* cam,
                        const OverlayParams* overlay, const NodeRenderParams* nodes,
                        const SplatEffectParams* splat_effect, SplatRenderMode splat_mode,
-                       const float* splat_jitter_px = NULL) {
+                       const float* splat_jitter_px = NULL, bool appearance_only = false) {
     (void)splat_effect;
     // VP shared by both mesh slots and the wireframe pass.
     float vp[16];
@@ -1480,6 +1520,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     // Mesh: writes color, depth, and stencil=1 to mark its silhouette. Same
     // lambda is reused for the static --object mesh (with its own MVP).
     auto draw_mesh_slot = [&](const MeshGpu* m, const float* mvp) {
+        if (appearance_only) return;
         if (m->vertex_buffer.id == 0 || m->index_buffer.id == 0 || m->submesh_count == 0) return;
 
         sg_apply_pipeline(r->mesh_pipeline);
@@ -1542,7 +1583,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticSplats
             ? r->splat_stochastic_pipeline
-            : r->splat_pipeline);
+            : appearance_only ? r->splat_float_pipeline : r->splat_pipeline);
 
         sg_bindings bnd = {};
         bnd.views[VIEW_ProjectedSplatBuffer] = r->projected_splat_buffer_view;
@@ -1571,6 +1612,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
     }
 
     // Equirectangular panorama overlay.
+    if (appearance_only) return;
     if (overlay && overlay->texture.id && overlay->alpha > 0.0f) {
         PROFILE("render overlay pass") {
         PROFILE_GPU("overlay pass") {
@@ -1668,6 +1710,15 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     bnd.views[VIEW_ProjectedSplats] = r->projected_splat_buffer_view;
     bnd.views[VIEW_VisibleCount] = r->visible_count_buffer_view;
     bnd.views[VIEW_SplatDiagnostics] = r->splat_diagnostics_buffer_view;
+    bnd.views[VIEW_AnimationDeltas] = r->animation_view;
+    AnimationUBO_t animation_ubo = {};
+    if (scene->animation) {
+        animation_ubo.animation_count = scene->gaussian_count;
+        animation_ubo.animation_state_a = r->animation_state_a;
+        animation_ubo.animation_state_b = r->animation_state_b;
+        animation_ubo.animation_weight = r->animation_weight;
+        memcpy(animation_ubo.animation_scales, scene->animation->scales, sizeof(animation_ubo.animation_scales));
+    }
     CullUBO_t u = {};
     memcpy(u.view, cam->view, sizeof(u.view));
     memcpy(u.proj, cam->proj, sizeof(u.proj));
@@ -1695,6 +1746,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
         u.gaussian_count = (int)chunk->count;
         sg_apply_uniforms(UB_CullUBO, SG_RANGE_REF(u));
         sg_apply_uniforms(UB_SplatEffectUBO, SG_RANGE_REF(effect_ubo));
+        sg_apply_uniforms(UB_AnimationUBO, SG_RANGE_REF(animation_ubo));
         sg_dispatch((int)((chunk->count + 255u) / 256u), 1, 1);
     }
     sg_end_pass();
@@ -1937,6 +1989,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     u.gps_viewport[0] = (float)gps_width;
     u.gps_viewport[1] = (float)gps_height;
     u.supersample_factor = (int)supersample;
+    u.background = r->black_background || scene->animation ? 0.0f : 0.1f;
     sg_apply_uniforms(UB_GpsResolveUBO, SG_RANGE_REF(u));
     sg_draw(0, 3, 1);
     sg_end_pass();
@@ -1953,13 +2006,28 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     (void)wireframe_occlusion; // see splat-pipeline blend comment in renderer_init
     (void)map_cam;             // TODO: restore the two-pass top-down map overlay in a later commit
 
+    const float bg = r->black_background || scene->animation ? 0.0f : 0.1f;
+    const sg_color background = {bg, bg, bg, 0.0f};
+    if (scene->animation) {
+        const GSAnim& animation = *scene->animation;
+        GSAnimSample sample = gsanim_sample(animation, animation.playback_time);
+        if (animation.selected_state >= 0 && uint32_t(animation.selected_state) < animation.state_count)
+            sample = {animation.selected_state, animation.selected_state, 0};
+        if (sample.state_a != r->animation_state_a || sample.state_b != r->animation_state_b ||
+            sample.weight != r->animation_weight)
+            renderer_reset_stochastic_accumulation(r);
+        r->animation_state_a = sample.state_a;
+        r->animation_state_b = sample.state_b;
+        r->animation_weight = sample.weight;
+    }
+
     const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticSplats);
     const bool gps = (r->splat_render_mode == SplatRenderMode::GaussianPointSplatting);
 
     if (scene->gaussian_count > 0) {
         PROFILE("gaussian gpu cull/project") {
         PROFILE_GPU("gaussian gpu cull/project") {
-        renderer_cull_gaussians_gpu(r, scene, cam, splat_effect);
+        renderer_cull_gaussians_gpu(r, scene, cam, scene->animation ? NULL : splat_effect);
         }
         }
         if (stochastic || gps) {
@@ -2008,7 +2076,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sg_pass pass = {};
             pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
             pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-            pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+            pass.action.colors[0].clear_value = background;
             pass.swapchain = sglue_swapchain();
 
             sg_begin_pass(&pass);
@@ -2038,7 +2106,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         sg_pass accum_pass = {};
         accum_pass.action.colors[0].load_action = (next_sample_count == 1u) ? SG_LOADACTION_CLEAR : SG_LOADACTION_DONTCARE;
         accum_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-        accum_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        accum_pass.action.colors[0].clear_value = background;
         accum_pass.attachments.colors[0] = r->stochastic_accum_color_views[write_index];
         sg_begin_pass(&accum_pass);
         sg_apply_pipeline(r->accum_pipeline);
@@ -2062,7 +2130,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         sg_pass pass = {};
         pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
         pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-        pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        pass.action.colors[0].clear_value = background;
         pass.swapchain = sglue_swapchain();
 
         sg_begin_pass(&pass);
@@ -2139,7 +2207,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sg_pass sample_pass = {};
             sample_pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
             sample_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-            sample_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+            sample_pass.action.colors[0].clear_value = background;
             sample_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
             sample_pass.action.depth.store_action = use_taa ? SG_STOREACTION_STORE : SG_STOREACTION_DONTCARE;
             sample_pass.action.depth.clear_value = 1.0f;
@@ -2165,7 +2233,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
                 sg_pass avg_pass = {};
                 avg_pass.action.colors[0].load_action = (sample_i == 0) ? SG_LOADACTION_CLEAR : SG_LOADACTION_DONTCARE;
                 avg_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-                avg_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+                avg_pass.action.colors[0].clear_value = background;
                 avg_pass.attachments.colors[0] = r->stochastic_frame_avg_color_views[avg_write_index];
                 sg_begin_pass(&avg_pass);
                 sg_apply_pipeline(r->accum_pipeline);
@@ -2194,7 +2262,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
                 sg_pass accum_pass = {};
                 accum_pass.action.colors[0].load_action = (next_sample_count == 1) ? SG_LOADACTION_CLEAR : SG_LOADACTION_DONTCARE;
                 accum_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-                accum_pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+                accum_pass.action.colors[0].clear_value = background;
                 accum_pass.attachments.colors[0] = r->stochastic_accum_color_views[write_index];
                 sg_begin_pass(&accum_pass);
                 sg_apply_pipeline(r->accum_pipeline);
@@ -2284,7 +2352,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         sg_pass pass = {};
         pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
         pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-        pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+        pass.action.colors[0].clear_value = background;
         pass.action.depth.load_action = SG_LOADACTION_CLEAR;
         pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
         pass.action.depth.clear_value = 1.0f;
@@ -2315,10 +2383,38 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         return;
     }
 
+    const bool baked = scene->animation || r->black_background;
+    if (baked) {
+        if (!r->appearance_image.id || r->appearance_width != win_w || r->appearance_height != win_h) {
+            if (r->appearance_color_view.id) sg_destroy_view(r->appearance_color_view);
+            if (r->appearance_texture_view.id) sg_destroy_view(r->appearance_texture_view);
+            if (r->appearance_image.id) sg_destroy_image(r->appearance_image);
+            sg_image_desc id = {};
+            id.width = win_w; id.height = win_h;
+            id.pixel_format = SG_PIXELFORMAT_RGBA16F;
+            id.usage.color_attachment = true;
+            id.label = "baked-appearance-composite";
+            r->appearance_image = sg_make_image(&id);
+            r->appearance_color_view = make_color_attachment_view(r->appearance_image, "baked-appearance-color");
+            r->appearance_texture_view = make_texture_view(r->appearance_image, "baked-appearance-texture");
+            r->appearance_width = win_w; r->appearance_height = win_h;
+        }
+        if (sg_query_view_state(r->appearance_color_view) != SG_RESOURCESTATE_VALID ||
+            sg_query_view_state(r->appearance_texture_view) != SG_RESOURCESTATE_VALID) return;
+        sg_pass composite = {};
+        composite.attachments.colors[0] = r->appearance_color_view;
+        composite.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+        composite.action.colors[0].clear_value = background;
+        composite.action.colors[0].store_action = SG_STOREACTION_STORE;
+        sg_begin_pass(&composite);
+        draw_world(r, scene, cam, NULL, NULL, NULL, SplatRenderMode::AlphaBlendSorted, NULL, true);
+        sg_end_pass();
+    }
+
     sg_pass pass = {};
     pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
     pass.action.colors[0].store_action = SG_STOREACTION_STORE;
-    pass.action.colors[0].clear_value = { 0.1f, 0.1f, 0.1f, 0.0f };
+    pass.action.colors[0].clear_value = background;
     pass.action.depth.load_action = SG_LOADACTION_CLEAR;
     pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
     pass.action.depth.clear_value = 1.0f;
@@ -2329,7 +2425,16 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     pass.swapchain = sglue_swapchain();
 
     sg_begin_pass(&pass);
-    draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
+    if (baked) {
+        sg_apply_pipeline(r->blit_pipeline);
+        sg_bindings bnd = {};
+        bnd.views[VIEW_display_tex] = r->appearance_texture_view;
+        bnd.samplers[SMP_display_smp] = r->accum_sampler;
+        sg_apply_bindings(&bnd);
+        sg_draw(0, 3, 1);
+    } else {
+        draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
+    }
     PROFILE("render imgui pass") {
     PROFILE_GPU("imgui pass") {
     simgui_render(); // imgui draws on top of the world inside the same pass
@@ -2344,6 +2449,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
 void renderer_destroy(Renderer* r) {
     renderer_destroy_shader_pipelines(r);
+    if (r->appearance_color_view.id) sg_destroy_view(r->appearance_color_view);
+    if (r->appearance_texture_view.id) sg_destroy_view(r->appearance_texture_view);
+    if (r->appearance_image.id) sg_destroy_image(r->appearance_image);
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);
