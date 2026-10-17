@@ -46,8 +46,8 @@ simulates low free VRAM, and never opens the large scene assets.
 ```
 
 GSAnim defaults to the existing sorted alpha renderer. The Info panel provides
-play/pause, time scrubbing, state selection (`-1` follows the timeline), and
-reference-camera selection/transition. The supplied scene is a **synthetic
+play/pause, time scrubbing, and state selection (`-1` follows the timeline).
+WASD and mouse look stay on. The supplied scene is a **synthetic
 0.4-second, 10 Hz step loop**, not the original Blender animation. Illumination
 and reflections are baked; geometry and opacity never animate. No relighting,
 training, or changes to the supplied asset are performed.
@@ -60,10 +60,13 @@ when appearance changes. Linear manifests crossfade decoded SH coefficients,
 including the last-to-first interval; this is a transport test, not physically
 correct intermediate TV noise.
 
-The optional `reference_views.json` beside the asset supplies Blender cameras.
-Use `baked_views=PATH` to specify it explicitly, including for a reference-decoded
-static PLY. Reference mode keeps asset coordinates, uses black background, and
-preserves vertical FOV when expanding a square view to widescreen. The sorted
+The optional `reference_views.json` beside the asset supplies Blender cameras
+for setup. The fly camera starts on the first of those views (Z up, in asset
+space) and can be moved. Check **Reference camera** in the Info panel to lock
+the view for the slider and the A-B transition. Use `baked_views=PATH` to
+specify the file explicitly, including for a reference-decoded static PLY.
+Reference cameras keep asset coordinates, use a black background, and preserve
+vertical FOV when expanding a square view to widescreen. The sorted
 reference path renders Gaussians alone into RGBA16F before display clipping;
 it applies no gamma, exposure, or tone map. Ordinary static-scene defaults stay
 unchanged. GPS/stochastic modes remain available as experimental alternatives,
@@ -71,7 +74,7 @@ but sorted alpha is the reference-compatible comparison mode.
 
 Reproduce a paused state with `anim_time=0.2` or `anim_state=2`. State selection
 pauses playback; pressing Play returns to the timeline. A missing optional camera
-file falls back to the ordinary fly camera. POC limits are 1M Gaussians, 256
+file leaves the Z-up fly camera at the origin. POC limits are 1M Gaussians, 256
 states, 65536 keys, 1 MiB metadata/header, 256 MiB deltas, and a 512 MiB archive;
 GPU buffer and available-memory limits may impose lower caps. Unsupported
 versions/encodings, invalid timelines, nonfinite values, bad schemas, forbidden

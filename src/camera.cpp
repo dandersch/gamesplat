@@ -13,12 +13,20 @@ void camera_init(Camera* cam) {
     cam->move_speed = 2.0f;
     cam->look_sensitivity = 0.003f;
     cam->camera_mode = true;
+    cam->z_up = false;
     cam->orthographic = false;
     cam->ortho_size = 1.0f;
     cam->ortho_blend = 0.0f;
 }
 
 void camera_get_forward(const Camera* cam, float* out) {
+    if (cam->z_up) {
+        float cp = cosf(cam->pitch);
+        out[0] = sinf(cam->yaw) * cp;
+        out[1] = cosf(cam->yaw) * cp;
+        out[2] = sinf(cam->pitch);
+        return;
+    }
     out[0] = cosf(cam->pitch) * sinf(cam->yaw);
     out[1] = sinf(cam->pitch);
     out[2] = cosf(cam->pitch) * cosf(cam->yaw);
@@ -26,7 +34,7 @@ void camera_get_forward(const Camera* cam, float* out) {
 
 void camera_get_overlay_ray_basis(const Camera* cam, float aspect, float* out_mat4, float* out_tan_half_fov) {
     float forward[3], right[3], up[3];
-    float world_up[3] = {0, 1, 0};
+    float world_up[3] = {0, cam->z_up ? 0.0f : 1.0f, cam->z_up ? 1.0f : 0.0f};
     camera_get_forward(cam, forward);
 
     // Build a right-handed horizontal basis for the panorama ray while keeping
@@ -62,7 +70,11 @@ void camera_update(Camera* cam, const bool* keys, float dx, float dy, float dt) 
         // tan(90/2) = 1, so the scale collapses to tan(fov_y * 0.5).
         float scale = tanf(cam->fov_y * 0.5f);
         cam->yaw   += dx * cam->look_sensitivity * scale;
-        cam->pitch += dy * cam->look_sensitivity * scale;
+        // The Z-up view matrix negates its up row relative to the Y-down fly
+        // camera, so the same mouse_dy has to pitch the other way to look
+        // the same direction on screen.
+        float pitch_sign = cam->z_up ? -1.0f : 1.0f;
+        cam->pitch += pitch_sign * dy * cam->look_sensitivity * scale;
         float limit = 3.14159265358979f * 0.5f - 0.01f;
         if (cam->pitch >  limit) cam->pitch =  limit;
         if (cam->pitch < -limit) cam->pitch = -limit;
@@ -70,7 +82,7 @@ void camera_update(Camera* cam, const bool* keys, float dx, float dy, float dt) 
 
     float forward[3], right[3];
     camera_get_forward(cam, forward);
-    float world_up[3] = {0, 1, 0};
+    float world_up[3] = {0, cam->z_up ? 0.0f : 1.0f, cam->z_up ? 1.0f : 0.0f};
     math_vec3_cross(forward, world_up, right);
     math_vec3_normalize(right);
 
@@ -87,32 +99,66 @@ void camera_update(Camera* cam, const bool* keys, float dx, float dy, float dt) 
         cam->position[1] -= forward[1] * speed;
         cam->position[2] -= forward[2] * speed;
     }
+    // Y-up: cross(forward, world_up) points screen-left. Z-up: it points
+    // screen-right, so strafe flips to keep A left and D right.
+    float side = cam->z_up ? -speed : speed;
     if (keys[1]) { // A
-        cam->position[0] += right[0] * speed;
-        cam->position[1] += right[1] * speed;
-        cam->position[2] += right[2] * speed;
+        cam->position[0] += right[0] * side;
+        cam->position[1] += right[1] * side;
+        cam->position[2] += right[2] * side;
     }
     if (keys[3]) { // D
-        cam->position[0] -= right[0] * speed;
-        cam->position[1] -= right[1] * speed;
-        cam->position[2] -= right[2] * speed;
+        cam->position[0] -= right[0] * side;
+        cam->position[1] -= right[1] * side;
+        cam->position[2] -= right[2] * side;
     }
-    if (keys[4]) { // Space - up
-        cam->position[1] += speed;
-    }
-    if (keys[5]) { // LCtrl - down
-        cam->position[1] -= speed;
-    }
-    if (keys[7]) { // E - down
-        cam->position[1] -= speed;
-    }
-    if (keys[8]) { // Q - up
-        cam->position[1] += speed;
+    if (cam->z_up) {
+        // Match the Y-down fly camera: Q/Space move toward +Y there, which
+        // slides the scene up the screen. That direction is -Z here.
+        if (keys[4] || keys[8]) cam->position[2] -= speed; // Space / Q
+        if (keys[5] || keys[7]) cam->position[2] += speed; // LCtrl / E
+    } else {
+        if (keys[4]) { // Space - up
+            cam->position[1] += speed;
+        }
+        if (keys[5]) { // LCtrl - down
+            cam->position[1] -= speed;
+        }
+        if (keys[7]) { // E - down
+            cam->position[1] -= speed;
+        }
+        if (keys[8]) { // Q - up
+            cam->position[1] += speed;
+        }
     }
 }
 
 // lookAt: column-major output
 void camera_get_view_matrix(const Camera* cam, float* m) {
+    if (cam->z_up) {
+        // Same view-matrix signs as baked_camera_uniforms. Geometry stays in
+        // Blender Z-up asset space; this basis is what makes that content upright
+        // with the renderer's negated projection.
+        float forward[3], back[3], right[3], up[3];
+        camera_get_forward(cam, forward);
+        back[0] = -forward[0]; back[1] = -forward[1]; back[2] = -forward[2];
+        float world_up[3] = {0, 0, 1};
+        math_vec3_cross(forward, world_up, right);
+        math_vec3_normalize(right);
+        math_vec3_cross(back, right, up);
+        memset(m, 0, 16 * sizeof(float));
+        for (int k = 0; k < 3; ++k) {
+            m[k * 4]     = -right[k];
+            m[k * 4 + 1] = -up[k];
+            m[k * 4 + 2] = back[k];
+            m[12] += right[k] * cam->position[k];
+            m[13] += up[k] * cam->position[k];
+            m[14] -= back[k] * cam->position[k];
+        }
+        m[15] = 1.0f;
+        return;
+    }
+
     float forward[3], right[3], up[3];
     camera_get_forward(cam, forward);
     float world_up[3] = {0, 1, 0};

@@ -12,6 +12,9 @@ struct Camera {
     float move_speed;
     float look_sensitivity;
     bool  camera_mode;
+    // Asset space is Blender Z-up. Yaw is around +Z and the view matrix uses
+    // the same basis as the baked reference cameras. Ordinary scenes stay Y-up.
+    bool  z_up;
     bool  orthographic;
     float ortho_size;
     float ortho_blend; // 0.0 = perspective, 1.0 = orthographic, intermediate = transitioning
