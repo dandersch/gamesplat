@@ -61,6 +61,10 @@ struct BakedCameraViews {
     float focal_over_height = 0;
     float selected = 0;
     bool transition = false;
+    // When set, the Blender poses replace the fly camera. Default is off:
+    // reference_views.json is camera setup, not a lock. The measurement
+    // harness turns this on so conformance captures stay on those cameras.
+    bool follow_reference = false;
 };
 
 static bool load_baked_views(const char* path, BakedCameraViews* out) {
@@ -107,11 +111,36 @@ static bool load_baked_views(const char* path, BakedCameraViews* out) {
     return ok;
 }
 
-static void baked_camera_uniforms(const BakedCameraViews& views, CameraUniforms* cam) {
+static void baked_interpolated_pose(const BakedCameraViews& views, float p[16]) {
     float index = std::clamp(views.selected, 0.0f, float(views.poses.size()-1));
     size_t i = size_t(index), j = std::min(i+1, views.poses.size()-1);
-    float a = index-float(i), p[16];
+    float a = index - float(i);
     for (int k = 0; k < 16; ++k) p[k] = views.poses[i][k]*(1-a) + views.poses[j][k]*a;
+}
+
+// Place the Z-up fly camera on a Blender camera_to_world (row-major). Roll is
+// dropped; these reference cameras are already upright about Z.
+static bool camera_set_from_baked_pose(Camera* cam, const float* p) {
+    float back[3] = {p[2], p[6], p[10]};
+    float up[3] = {p[1], p[5], p[9]};
+    if (!math_vec3_normalize(back)) return false;
+    float right[3];
+    math_vec3_cross(up, back, right);
+    if (!math_vec3_normalize(right)) return false;
+    float forward[3] = {-back[0], -back[1], -back[2]};
+    cam->position[0] = p[3];
+    cam->position[1] = p[7];
+    cam->position[2] = p[11];
+    cam->pitch = asinf(math_clamp(forward[2], -1.0f, 1.0f));
+    float horiz = sqrtf(forward[0]*forward[0] + forward[1]*forward[1]);
+    if (horiz > 1e-6f) cam->yaw = atan2f(forward[0], forward[1]);
+    cam->z_up = true;
+    return true;
+}
+
+static void baked_camera_uniforms(const BakedCameraViews& views, CameraUniforms* cam) {
+    float p[16];
+    baked_interpolated_pose(views, p);
     // Orthonormalize the interpolated basis; otherwise SH camera reconstruction
     // and covariance projection would be wrong during a camera transition.
     float back[3] = {p[2], p[6], p[10]}, up[3] = {p[1], p[5], p[9]}, right[3];
@@ -399,7 +428,7 @@ static void app_init(void) {
             LOG(WARN|GAUSSIAN|LOAD, "Could not load centered, square-pixel Blender reference cameras: %s", views_path);
             if (sargs_exists("baked_views")) { sapp_quit(); return; }
             // A companion camera file is not part of the GSAnim container.
-            // Standalone assets can still use the ordinary fly-camera controls.
+            // The fly camera stays available either way.
         } else {
             state->renderer.black_background = true;
             state->colmap_dir = NULL;
@@ -456,8 +485,17 @@ static void app_init(void) {
         colmap_free_image_set(&colmap_images);
     }
 
-    // Camera
+    // Camera. GSAnim geometry is Blender Z-up. reference_views.json, when
+    // present, only supplies the starting pose and the optional reference-camera
+    // UI. It is not part of the container and does not lock WASD or mouse look.
     camera_init(&state->cam);
+    if (state->scene.animation || !state->baked_views.poses.empty())
+        state->cam.z_up = true;
+    if (!state->baked_views.poses.empty()) {
+        camera_set_from_baked_pose(&state->cam, state->baked_views.poses[0].data());
+        if (state->baked_views.focal_over_height > 0.0f)
+            state->cam.fov_y = 2.0f * atanf(0.5f / state->baked_views.focal_over_height);
+    }
     state->automated_look = SDL_strcmp(camera_motion, "look") == 0;
     state->automated_look_time = 0.0f;
     state->automated_look_base_yaw = state->cam.yaw;
@@ -467,9 +505,9 @@ static void app_init(void) {
             "Unknown camera_motion '%s' (expected none or look); disabling automated motion",
             camera_motion);
     }
-    state->cam.camera_mode = state->baked_views.poses.empty();
-    sapp_lock_mouse(state->cam.camera_mode);
-    if (state->cam.camera_mode) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
+    state->cam.camera_mode = true;
+    sapp_lock_mouse(true);
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
 
     state->refview_max_alpha = 0.5f;
     state->node_half_size = 0.5f;
@@ -890,6 +928,58 @@ static void app_event(const sapp_event* ev) {
     return;
 }
 
+// Largest scene target that keeps the framebuffer aspect and fits in
+// 1920x1080. A window already inside that box, including the 768x768
+// conformance capture, stays 1:1 with the display.
+static void scene_render_size(int fb_w, int fb_h, int* scene_w, int* scene_h) {
+    const int cap_w = 1920;
+    const int cap_h = 1080;
+    if (fb_w < 1) fb_w = 1;
+    if (fb_h < 1) fb_h = 1;
+    if (fb_w <= cap_w && fb_h <= cap_h) {
+        *scene_w = fb_w;
+        *scene_h = fb_h;
+        return;
+    }
+    const double scale_x = (double)cap_w / (double)fb_w;
+    const double scale_y = (double)cap_h / (double)fb_h;
+    const double scale = scale_x < scale_y ? scale_x : scale_y;
+    int w = (int)((double)fb_w * scale + 0.5);
+    int h = (int)((double)fb_h * scale + 0.5);
+    if (w > cap_w) w = cap_w;
+    if (h > cap_h) h = cap_h;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    *scene_w = w;
+    *scene_h = h;
+}
+
+// Linux reports Xft.dpi as sapp_dpi_scale while the framebuffer is already
+// the X11 window in real pixels. Passing that scale to sokol_imgui divides
+// DisplaySize and stretches the UI. Keep ImGui in framebuffer pixels and
+// apply the scale to fonts and widget metrics instead, once per change
+// (ScaleAllSizes accumulates and rounds).
+static void apply_imgui_content_scale(float scale) {
+    static bool ready = false;
+    static float applied = 1.0f;
+    static ImGuiStyle base;
+    if (!(scale > 0.0f)) scale = 1.0f;
+    if (!ready) {
+        base = ImGui::GetStyle();
+        ready = true;
+        applied = 1.0f;
+    }
+    if (scale != applied) {
+        ImGuiStyle style = base;
+        if (scale != 1.0f) style.ScaleAllSizes(scale);
+        style.FontScaleDpi = scale;
+        ImGui::GetStyle() = style;
+        applied = scale;
+    } else {
+        ImGui::GetStyle().FontScaleDpi = scale;
+    }
+}
+
 static void app_frame(void) {
     AppState* state = g_state;
     if (!state) return;
@@ -923,6 +1013,7 @@ static void app_frame(void) {
 
     bool examine_active = false;
     int win_w = 0, win_h = 0;
+    int scene_w = 1, scene_h = 1;
     float aspect = 1.0f;
     CameraUniforms cam_uniforms = {};
 
@@ -1046,10 +1137,17 @@ static void app_frame(void) {
         state->cam.pitch = state->automated_look_base_pitch + sinf(state->automated_look_time * 0.7f) * 0.15f;
     }
 
-    // Get framebuffer size
+    // Display is the real framebuffer. The scene fits inside 1080p.
     win_w = sapp_width();
     win_h = sapp_height();
-    aspect = (float)win_w / (float)win_h;
+    scene_render_size(win_w, win_h, &scene_w, &scene_h);
+    aspect = (float)scene_w / (float)scene_h;
+    static bool logged_resolution = false;
+    if (!logged_resolution) {
+        logged_resolution = true;
+        LOG(INFO|APP|FRAME, "Display %d x %d, scene %d x %d, content scale %.2f",
+            win_w, win_h, scene_w, scene_h, sapp_dpi_scale());
+    }
 
     // Animate ortho blend toward target. Skipped while an inspect lerp is
     // active: refview_update drives ortho_blend from the same eased t as
@@ -1080,13 +1178,13 @@ static void app_frame(void) {
     cam_uniforms = {};
     camera_get_view_matrix(&state->cam, cam_uniforms.view);
     camera_get_proj_matrix(&state->cam, aspect, cam_uniforms.proj);
-    cam_uniforms.viewport[0] = (float)win_w;
-    cam_uniforms.viewport[1] = (float)win_h;
+    cam_uniforms.viewport[0] = (float)scene_w;
+    cam_uniforms.viewport[1] = (float)scene_h;
     cam_uniforms.orthographic = state->cam.ortho_blend;
     // Provide pure persp/ortho focal lengths so the splat shader can use
     // each in its own mix() branch (see comment in camera.h).
-    cam_uniforms.persp_focal = (1.0f / tanf(state->cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
-    cam_uniforms.ortho_focal = (float)win_h / (2.0f * state->cam.ortho_size);
+    cam_uniforms.persp_focal = (1.0f / tanf(state->cam.fov_y * 0.5f)) * (float)scene_h * 0.5f;
+    cam_uniforms.ortho_focal = (float)scene_h / (2.0f * state->cam.ortho_size);
     if (sg_query_backend() == SG_BACKEND_WGPU) {
         cam_uniforms.clip_y_sign = -1.0f;
         cam_uniforms.clip_z_01 = 1.0f;
@@ -1105,16 +1203,21 @@ static void app_frame(void) {
 
     PROFILE("imgui") {
     // ImGui frame. simgui_new_frame calls ImGui::NewFrame internally and
-    // sets DisplaySize/DeltaTime.
-    simgui_new_frame({ win_w, win_h, dt, sapp_dpi_scale() });
+    // sets DisplaySize/DeltaTime. dpi_scale stays 1 so DisplaySize is the
+    // framebuffer; apply_imgui_content_scale keeps widgets readable.
+    apply_imgui_content_scale(sapp_dpi_scale());
+    simgui_new_frame({ win_w, win_h, dt, 1.0f });
 
     if (state->scene.animation) {
-        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Once);
-        ImGui::SetNextWindowSize(ImVec2(std::min(460.0f, ImGui::GetIO().DisplaySize.x-24),
-            std::min(650.0f, ImGui::GetIO().DisplaySize.y-24)), ImGuiCond_Once);
+        float ui = ImGui::GetStyle().FontScaleDpi;
+        if (ui < 1.0f) ui = 1.0f;
+        ImGui::SetNextWindowPos(ImVec2(12.0f * ui, 12.0f * ui), ImGuiCond_Once);
+        ImGui::SetNextWindowSize(ImVec2(std::min(460.0f * ui, ImGui::GetIO().DisplaySize.x - 24.0f * ui),
+            std::min(650.0f * ui, ImGui::GetIO().DisplaySize.y - 24.0f * ui)), ImGuiCond_Once);
     }
     ImGui::Begin("Info");
-    ImGui::Text("FPS: %.1f", dt > 0 ? 1.0f / dt : 0.0f);
+    ImGui::Text("FPS: %.1f    Display: %d x %d    Scene: %d x %d",
+                dt > 0 ? 1.0f / dt : 0.0f, win_w, win_h, scene_w, scene_h);
     if (state->scene.animation) {
         GSAnim& a = *state->scene.animation;
         ImGui::Text("GSAnim 0.1: %.3g-second %s loop", a.duration, a.linear ? "linear" : "step");
@@ -1130,8 +1233,20 @@ static void app_frame(void) {
         ImGui::Text("Resident int8 deltas: %.2f MiB", a.deltas.size()/1048576.0);
     }
     if (!state->baked_views.poses.empty()) {
-        ImGui::SliderFloat("Reference camera", &state->baked_views.selected, 0, float(state->baked_views.poses.size()-1), "%.3f");
+        if (ImGui::Checkbox("Reference camera##enable", &state->baked_views.follow_reference)) {
+            if (!state->baked_views.follow_reference) {
+                float pose[16];
+                baked_interpolated_pose(state->baked_views, pose);
+                camera_set_from_baked_pose(&state->cam, pose);
+                state->baked_views.transition = false;
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lock the view to the Blender reference cameras. Uncheck to fly with WASD and the mouse.");
+        ImGui::BeginDisabled(!state->baked_views.follow_reference);
+        ImGui::SliderFloat("Reference camera##index", &state->baked_views.selected, 0, float(state->baked_views.poses.size()-1), "%.3f");
         ImGui::Checkbox("Camera transition A-B", &state->baked_views.transition);
+        ImGui::EndDisabled();
     }
     if (state->scene_loaded) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
@@ -1303,7 +1418,7 @@ static void app_frame(void) {
 
             float cam_basis[16];
             float cam_tan[2];
-            camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h,
+            camera_get_overlay_ray_basis(&state->cam, aspect,
                                          cam_basis, cam_tan);
 
             // NDC -> camera-space ray (matches overlay.frag.glsl).
@@ -1511,49 +1626,54 @@ static void app_frame(void) {
         }
 
         ImDrawList* dl = ImGui::GetForegroundDrawList();
-        ImVec2 center(win_w * 0.5f, win_h * 0.5f);
+        // DisplaySize is framebuffer pixels (dpi scale is applied to the
+        // font, not to the coordinate space), so this is the real center.
+        ImVec2 display = ImGui::GetIO().DisplaySize;
+        ImVec2 center(display.x * 0.5f, display.y * 0.5f);
+        float px = ImGui::GetStyle().FontScaleDpi;
+        if (px < 1.0f) px = 1.0f;
         if (hotspot_hover) {
             // Myst-style upward pointing arrow.
             ImU32 fill_col    = IM_COL32(255, 230, 80, 240);
             ImU32 outline_col = IM_COL32(0,   0,   0,   220);
-            ImVec2 tip(center.x,        center.y - 10.0f);
-            ImVec2 lwing(center.x - 8.0f, center.y + 1.0f);
-            ImVec2 rwing(center.x + 8.0f, center.y + 1.0f);
-            ImVec2 lstem(center.x - 3.0f, center.y + 1.0f);
-            ImVec2 rstem(center.x + 3.0f, center.y + 1.0f);
-            ImVec2 lbase(center.x - 3.0f, center.y + 9.0f);
-            ImVec2 rbase(center.x + 3.0f, center.y + 9.0f);
+            ImVec2 tip(center.x,        center.y - 10.0f * px);
+            ImVec2 lwing(center.x - 8.0f * px, center.y + 1.0f * px);
+            ImVec2 rwing(center.x + 8.0f * px, center.y + 1.0f * px);
+            ImVec2 lstem(center.x - 3.0f * px, center.y + 1.0f * px);
+            ImVec2 rstem(center.x + 3.0f * px, center.y + 1.0f * px);
+            ImVec2 lbase(center.x - 3.0f * px, center.y + 9.0f * px);
+            ImVec2 rbase(center.x + 3.0f * px, center.y + 9.0f * px);
             // Filled arrow: head triangle + rectangular stem.
             dl->AddTriangleFilled(tip, lwing, rwing, fill_col);
             dl->AddQuadFilled(lstem, rstem, rbase, lbase, fill_col);
             // Outline (head + stem sides + base).
-            dl->AddLine(tip,   lwing, outline_col, 1.5f);
-            dl->AddLine(tip,   rwing, outline_col, 1.5f);
-            dl->AddLine(lwing, lstem, outline_col, 1.5f);
-            dl->AddLine(rwing, rstem, outline_col, 1.5f);
-            dl->AddLine(lstem, lbase, outline_col, 1.5f);
-            dl->AddLine(rstem, rbase, outline_col, 1.5f);
-            dl->AddLine(lbase, rbase, outline_col, 1.5f);
+            dl->AddLine(tip,   lwing, outline_col, 1.5f * px);
+            dl->AddLine(tip,   rwing, outline_col, 1.5f * px);
+            dl->AddLine(lwing, lstem, outline_col, 1.5f * px);
+            dl->AddLine(rwing, rstem, outline_col, 1.5f * px);
+            dl->AddLine(lstem, lbase, outline_col, 1.5f * px);
+            dl->AddLine(rstem, rbase, outline_col, 1.5f * px);
+            dl->AddLine(lbase, rbase, outline_col, 1.5f * px);
         } else if (object_hover) {
             // Magnifying-glass icon: hollow ring + diagonal handle.
             ImU32 col_fill    = IM_COL32(255, 230, 80, 240);
             ImU32 col_outline = IM_COL32(0,   0,   0,   220);
-            ImVec2 ring_c(center.x - 2.0f, center.y - 2.0f);
-            float  ring_r = 6.0f;
-            dl->AddCircle(ring_c, ring_r,        col_fill,    24, 2.0f);
-            dl->AddCircle(ring_c, ring_r + 1.0f, col_outline, 24, 1.0f);
-            dl->AddCircle(ring_c, ring_r - 1.0f, col_outline, 24, 1.0f);
+            ImVec2 ring_c(center.x - 2.0f * px, center.y - 2.0f * px);
+            float  ring_r = 6.0f * px;
+            dl->AddCircle(ring_c, ring_r,        col_fill,    24, 2.0f * px);
+            dl->AddCircle(ring_c, ring_r + 1.0f * px, col_outline, 24, 1.0f * px);
+            dl->AddCircle(ring_c, ring_r - 1.0f * px, col_outline, 24, 1.0f * px);
             // Handle: from ring edge diagonally down-right.
             float k = 0.7071f; // cos/sin 45
             ImVec2 h0(ring_c.x + ring_r * k,        ring_c.y + ring_r * k);
-            ImVec2 h1(ring_c.x + (ring_r + 6.0f) * k, ring_c.y + (ring_r + 6.0f) * k);
-            dl->AddLine(h0, h1, col_outline, 3.5f);
-            dl->AddLine(h0, h1, col_fill,    2.0f);
+            ImVec2 h1(ring_c.x + (ring_r + 6.0f * px) * k, ring_c.y + (ring_r + 6.0f * px) * k);
+            dl->AddLine(h0, h1, col_outline, 3.5f * px);
+            dl->AddLine(h0, h1, col_fill,    2.0f * px);
         } else if (crosshair_hover) {
-            dl->AddCircleFilled(center, 5.0f, IM_COL32(0, 200, 255, 240));
-            dl->AddCircle(center, 8.0f, IM_COL32(0, 200, 255, 120), 0, 1.5f);
+            dl->AddCircleFilled(center, 5.0f * px, IM_COL32(0, 200, 255, 240));
+            dl->AddCircle(center, 8.0f * px, IM_COL32(0, 200, 255, 120), 0, 1.5f * px);
         } else {
-            dl->AddCircleFilled(center, 3.0f, IM_COL32(255, 255, 255, 200));
+            dl->AddCircleFilled(center, 3.0f * px, IM_COL32(255, 255, 255, 200));
         }
     }
 
@@ -1564,7 +1684,7 @@ static void app_frame(void) {
         if (cv->hotspot_count > 0) {
             float cam_basis[16];
             float cam_tan[2];
-            camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h, cam_basis, cam_tan);
+            camera_get_overlay_ray_basis(&state->cam, aspect, cam_basis, cam_tan);
             float ref_rot[16];
             refview_get_rotation_matrix(cv, ref_rot);
             ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -1686,7 +1806,7 @@ static void app_frame(void) {
                 overlay.texture_view = rv->texture_view;
                 overlay.alpha = alpha;
 
-                camera_get_overlay_ray_basis(&state->cam, (float)win_w / (float)win_h,
+                camera_get_overlay_ray_basis(&state->cam, aspect,
                                              overlay.camera_ray_basis,
                                              overlay.camera_tan_half_fov);
 
@@ -1711,11 +1831,11 @@ static void app_frame(void) {
     if (state->map_view_active) {
         camera_get_view_matrix(&state->map_cam, map_uniforms.view);
         camera_get_proj_matrix(&state->map_cam, aspect, map_uniforms.proj);
-        map_uniforms.viewport[0]   = (float)win_w;
-        map_uniforms.viewport[1]   = (float)win_h;
+        map_uniforms.viewport[0]   = (float)scene_w;
+        map_uniforms.viewport[1]   = (float)scene_h;
         map_uniforms.orthographic  = state->map_cam.ortho_blend;
-        map_uniforms.persp_focal   = (1.0f / tanf(state->map_cam.fov_y * 0.5f)) * (float)win_h * 0.5f;
-        map_uniforms.ortho_focal   = (float)win_h / (2.0f * state->map_cam.ortho_size);
+        map_uniforms.persp_focal   = (1.0f / tanf(state->map_cam.fov_y * 0.5f)) * (float)scene_h * 0.5f;
+        map_uniforms.ortho_focal   = (float)scene_h / (2.0f * state->map_cam.ortho_size);
         map_uniforms_ptr = &map_uniforms;
     }
 
@@ -1742,7 +1862,8 @@ static void app_frame(void) {
     }
 
     // Render
-    if (!state->baked_views.poses.empty()) baked_camera_uniforms(state->baked_views, &cam_uniforms);
+    if (state->baked_views.follow_reference && !state->baked_views.poses.empty())
+        baked_camera_uniforms(state->baked_views, &cam_uniforms);
     PROFILE("render submit") {
     renderer_draw_frame(&state->renderer, &state->scene, &cam_uniforms, overlay_ptr, node_ptr,
                         splat_effect_ptr, 1.0f /*wireframe_occlusion*/, map_uniforms_ptr);

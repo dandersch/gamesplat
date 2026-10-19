@@ -1330,6 +1330,65 @@ static sg_view make_color_attachment_view(sg_image image, const char* label) {
     return sg_make_view(&vd);
 }
 
+static void renderer_destroy_scene_target(Renderer* r) {
+    if (r->scene_color_view.id) sg_destroy_view(r->scene_color_view);
+    if (r->scene_color_texture_view.id) sg_destroy_view(r->scene_color_texture_view);
+    if (r->scene_color_image.id) sg_destroy_image(r->scene_color_image);
+    if (r->scene_depth_view.id) sg_destroy_view(r->scene_depth_view);
+    if (r->scene_depth_image.id) sg_destroy_image(r->scene_depth_image);
+    r->scene_color_view = {};
+    r->scene_color_texture_view = {};
+    r->scene_color_image = {};
+    r->scene_depth_view = {};
+    r->scene_depth_image = {};
+    r->scene_target_width = 0;
+    r->scene_target_height = 0;
+}
+
+static bool renderer_ensure_scene_target(Renderer* r, int width, int height) {
+    if (width <= 0 || height <= 0) return false;
+    if (r->scene_target_width == width && r->scene_target_height == height &&
+        r->scene_color_image.id && r->scene_depth_image.id) {
+        return true;
+    }
+    renderer_destroy_scene_target(r);
+
+    sg_image_desc color_desc = {};
+    color_desc.type = SG_IMAGETYPE_2D;
+    color_desc.usage.color_attachment = true;
+    color_desc.width = width;
+    color_desc.height = height;
+    color_desc.num_slices = 1;
+    color_desc.num_mipmaps = 1;
+    color_desc.pixel_format = renderer_default_color_format();
+    color_desc.sample_count = 1;
+    color_desc.label = "scene-color";
+    r->scene_color_image = sg_make_image(&color_desc);
+    r->scene_color_view = make_color_attachment_view(r->scene_color_image, "scene-color-att");
+    r->scene_color_texture_view = make_texture_view(r->scene_color_image, "scene-color-tex");
+
+    sg_image_desc depth_desc = {};
+    depth_desc.type = SG_IMAGETYPE_2D;
+    depth_desc.usage.depth_stencil_attachment = true;
+    depth_desc.width = width;
+    depth_desc.height = height;
+    depth_desc.num_slices = 1;
+    depth_desc.num_mipmaps = 1;
+    depth_desc.pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL;
+    depth_desc.sample_count = 1;
+    depth_desc.label = "scene-depth";
+    r->scene_depth_image = sg_make_image(&depth_desc);
+    sg_view_desc dvd = {};
+    dvd.depth_stencil_attachment.image = r->scene_depth_image;
+    dvd.label = "scene-depth-att";
+    r->scene_depth_view = sg_make_view(&dvd);
+
+    r->scene_target_width = width;
+    r->scene_target_height = height;
+    return r->scene_color_image.id && r->scene_color_view.id && r->scene_color_texture_view.id &&
+           r->scene_depth_image.id && r->scene_depth_view.id;
+}
+
 static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
     if (width <= 0 || height <= 0) return false;
 
@@ -2048,8 +2107,13 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         }
     }
 
-    int win_w = sapp_width();
-    int win_h = sapp_height();
+    // cam->viewport is the scene target. The swapchain stays at the display
+    // size; callers blit up when the two differ.
+    int win_w = (int)(cam->viewport[0] + 0.5f);
+    int win_h = (int)(cam->viewport[1] + 0.5f);
+    if (win_w < 1) win_w = 1;
+    if (win_h < 1) win_h = 1;
+    const bool scene_matches_display = win_w == sapp_width() && win_h == sapp_height();
 
     if (gps) {
         if (!r->gps_capabilities.compute || !renderer_ensure_stochastic_targets(r, win_w, win_h) ||
@@ -2409,6 +2473,26 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         sg_begin_pass(&composite);
         draw_world(r, scene, cam, NULL, NULL, NULL, SplatRenderMode::AlphaBlendSorted, NULL, true);
         sg_end_pass();
+    } else if (!scene_matches_display) {
+        if (!renderer_ensure_scene_target(r, win_w, win_h)) {
+            LOG(ERROR|RENDERER|RESOURCE, "Failed to create scene render target");
+            return;
+        }
+        sg_pass scene_pass = {};
+        scene_pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
+        scene_pass.action.colors[0].store_action = SG_STOREACTION_STORE;
+        scene_pass.action.colors[0].clear_value = background;
+        scene_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+        scene_pass.action.depth.store_action = SG_STOREACTION_DONTCARE;
+        scene_pass.action.depth.clear_value = 1.0f;
+        scene_pass.action.stencil.load_action = SG_LOADACTION_CLEAR;
+        scene_pass.action.stencil.store_action = SG_STOREACTION_DONTCARE;
+        scene_pass.action.stencil.clear_value = 0;
+        scene_pass.attachments.colors[0] = r->scene_color_view;
+        scene_pass.attachments.depth_stencil = r->scene_depth_view;
+        sg_begin_pass(&scene_pass);
+        draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
+        sg_end_pass();
     }
 
     sg_pass pass = {};
@@ -2432,6 +2516,13 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         bnd.samplers[SMP_display_smp] = r->accum_sampler;
         sg_apply_bindings(&bnd);
         sg_draw(0, 3, 1);
+    } else if (!scene_matches_display) {
+        sg_apply_pipeline(r->blit_pipeline);
+        sg_bindings bnd = {};
+        bnd.views[VIEW_display_tex] = r->scene_color_texture_view;
+        bnd.samplers[SMP_display_smp] = r->accum_sampler;
+        sg_apply_bindings(&bnd);
+        sg_draw(0, 3, 1);
     } else {
         draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::AlphaBlendSorted);
     }
@@ -2452,6 +2543,7 @@ void renderer_destroy(Renderer* r) {
     if (r->appearance_color_view.id) sg_destroy_view(r->appearance_color_view);
     if (r->appearance_texture_view.id) sg_destroy_view(r->appearance_texture_view);
     if (r->appearance_image.id) sg_destroy_image(r->appearance_image);
+    renderer_destroy_scene_target(r);
     if (r->overlay_sampler.id)    sg_destroy_sampler(r->overlay_sampler);
     if (r->mesh_sampler.id)       sg_destroy_sampler(r->mesh_sampler);
     if (r->accum_sampler.id)      sg_destroy_sampler(r->accum_sampler);

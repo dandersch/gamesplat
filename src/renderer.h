@@ -126,6 +126,14 @@ struct Renderer {
     sg_view         appearance_color_view;
     sg_view         appearance_texture_view;
     int             appearance_width, appearance_height;
+    // Alpha-blend path only. Used when the scene target is smaller than the
+    // display; the other modes already render offscreen and blit.
+    sg_image        scene_color_image;
+    sg_view         scene_color_view;
+    sg_view         scene_color_texture_view;
+    sg_image        scene_depth_image;
+    sg_view         scene_depth_view;
+    int             scene_target_width, scene_target_height;
     sg_pipeline     splat_stochastic_pipeline;
     sg_pipeline     cull_pipeline;
     sg_pipeline     cull_reset_pipeline;
