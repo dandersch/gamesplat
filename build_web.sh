@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Let Emscripten find its bundled configuration if the override is missing.
+if [ -n "${EM_CONFIG:-}" ] && [ ! -f "$EM_CONFIG" ]; then
+    unset EM_CONFIG
+fi
+
 CC="${CC:-emcc}"
 CXX="${CXX:-em++}"
 BUILD_ROOT="${BUILD_DIR:-build/web}"
@@ -8,7 +13,6 @@ SHELL_FILE="${SHELL_FILE:-web/shell.html}"
 VENDOR_DIR="vendor"
 WEBP_DIR="$VENDOR_DIR/libwebp"
 WEBP_LIB="$BUILD_ROOT/libwebpdecoder.a"
-EM_CACHE_DIR="${EM_CACHE_DIR:-$BUILD_ROOT/emscripten_cache}"
 
 # The demo asset pack is large. Keep the known-good initial heap as the
 # default, but make it easy to tune down/up while testing browser behavior.
@@ -130,7 +134,7 @@ build_app() {
 
     mkdir -p "$out_dir"
     echo "Building $backend: $out..."
-    "$CXX" --cache "$EM_CACHE_DIR" "${COMMON_FLAGS_BASE[@]}" "${backend_flags[@]}" "${EM_FLAGS_BASE[@]}" \
+    "$CXX" "${COMMON_FLAGS_BASE[@]}" "${backend_flags[@]}" "${EM_FLAGS_BASE[@]}" \
         "${SOURCES[@]}" "${PRELOAD_FLAGS[@]}" \
         "$WEBP_LIB" \
         -o "$out"
