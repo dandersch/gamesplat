@@ -7202,6 +7202,8 @@ _SOKOL_PRIVATE EM_BOOL _sapp_emsc_pointerlockchange_cb(int emsc_type, const Emsc
     _SOKOL_UNUSED(emsc_type);
     _SOKOL_UNUSED(user_data);
     _sapp.mouse.locked = emsc_event->isActive;
+    _sapp.mouse.pos_valid = false;
+    _sapp.mouse.dx = _sapp.mouse.dy = 0.0f;
     return EM_TRUE;
 }
 
@@ -7557,9 +7559,12 @@ _SOKOL_PRIVATE EM_BOOL _sapp_emsc_mouse_cb(int emsc_type, const EmscriptenMouseE
     _SOKOL_UNUSED(user_data);
     bool consume_event = !_sapp.desc.html5.bubble_mouse_events;
     _sapp.emsc.mouse_buttons = emsc_event->buttons;
+    _sapp.mouse.dx = _sapp.mouse.dy = 0.0f;
     if (_sapp.mouse.locked) {
-        _sapp.mouse.dx = (float) emsc_event->movementX;
-        _sapp.mouse.dy = (float) emsc_event->movementY;
+        if (emsc_type == EMSCRIPTEN_EVENT_MOUSEMOVE) {
+            _sapp.mouse.dx = (float) emsc_event->movementX;
+            _sapp.mouse.dy = (float) emsc_event->movementY;
+        }
     } else {
         float new_x = emsc_event->targetX * _sapp.dpi_scale;
         float new_y = emsc_event->targetY * _sapp.dpi_scale;

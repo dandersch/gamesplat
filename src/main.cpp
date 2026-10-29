@@ -505,9 +505,14 @@ static void app_init(void) {
             "Unknown camera_motion '%s' (expected none or look); disabling automated motion",
             camera_motion);
     }
+#if defined(__EMSCRIPTEN__)
+    // Browser capture is asynchronous and requires an explicit user gesture.
+    state->cam.camera_mode = false;
+#else
     state->cam.camera_mode = true;
     sapp_lock_mouse(true);
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
+#endif
 
     state->refview_max_alpha = 0.5f;
     state->node_half_size = 0.5f;
@@ -530,10 +535,26 @@ static void app_init(void) {
     return;
 }
 
+static void sync_web_camera_capture(AppState* state) {
+#if defined(__EMSCRIPTEN__)
+    bool captured = sapp_mouse_locked();
+    if (!captured) {
+        state->mouse_dx = state->mouse_dy = 0.0f;
+        if (state->cam.camera_mode) memset(state->keys, 0, sizeof(state->keys));
+    }
+    state->cam.camera_mode = captured;
+    if (captured) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
+    else ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+#else
+    (void)state;
+#endif
+}
+
 static void app_event(const sapp_event* ev) {
     AppState* state = g_state;
     if (!state || !ev) return;
 
+    sync_web_camera_capture(state);
     simgui_handle_event(ev);
 
     switch (ev->type) {
@@ -553,12 +574,24 @@ static void app_event(const sapp_event* ev) {
             case SAPP_KEYCODE_LEFT_SHIFT: state->keys[6] = down; break;
             case SAPP_KEYCODE_E: state->keys[7] = down; break;
             case SAPP_KEYCODE_Q: state->keys[8] = down; break;
-            case SAPP_KEYCODE_ESCAPE: if (down) sapp_quit(); break;
+            case SAPP_KEYCODE_ESCAPE:
+#if !defined(__EMSCRIPTEN__)
+                if (down) sapp_quit();
+#endif
+                break;
             default: break;
         }
         break;
     }
     case SAPP_EVENTTYPE_MOUSE_DOWN:
+#if defined(__EMSCRIPTEN__)
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && !sapp_mouse_locked() &&
+            !state->map_view_active && !state->refviews.in_inspect &&
+            state->examine.state == Examine::OFF && !ImGui::GetIO().WantCaptureMouse) {
+            sapp_lock_mouse(true);
+            break; // The capture gesture is not also a scene pick.
+        }
+#endif
         if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT && state->examine.state != Examine::OFF) {
             // While examining, right-click exits. Cancels any in-flight
             // lerp by retargeting from the current pose back to `rest`.
@@ -607,6 +640,12 @@ static void app_event(const sapp_event* ev) {
                 sapp_lock_mouse(true);
                 ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
             } else {
+#if defined(__EMSCRIPTEN__)
+                // Map state expresses intent; camera_mode reflects confirmed
+                // capture, so it cannot be used to toggle an async request.
+                state->map_view_active = !state->map_view_active;
+                sapp_lock_mouse(!state->map_view_active);
+#else
                 state->cam.camera_mode = !state->cam.camera_mode;
                 sapp_lock_mouse(state->cam.camera_mode);
                 ImGuiIO& io = ImGui::GetIO();
@@ -616,6 +655,7 @@ static void app_event(const sapp_event* ev) {
                 // Toggle the top-down map overlay on top of the
                 // existing camera-mode toggle.
                 state->map_view_active = !state->map_view_active;
+#endif
             }
         }
         if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && state->map_view_active &&
@@ -819,7 +859,7 @@ static void app_event(const sapp_event* ev) {
         if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) state->map_dragging = false;
         break;
     case SAPP_EVENTTYPE_MOUSE_MOVE:
-        if (state->cam.camera_mode) {
+        if (state->cam.camera_mode && sapp_mouse_locked()) {
             state->mouse_dx += ev->mouse_dx;
             state->mouse_dy += ev->mouse_dy;
         }
@@ -984,6 +1024,7 @@ static void app_frame(void) {
     AppState* state = g_state;
     if (!state) return;
 
+    sync_web_camera_capture(state);
     PROFILE_FRAME();
     PROFILE_BEGIN("app_frame");
 
