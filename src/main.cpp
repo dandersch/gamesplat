@@ -9,6 +9,18 @@
 #include "sokol_args.h"
 #include "imgui.h"
 #include "sokol_imgui.h"
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+#include <webgpu/webgpu.h>
+
+// WebGPU submission is asynchronous. Without backpressure, rAF can keep
+// reporting 60 FPS while many old frames (including ImGui) queue on the GPU.
+static unsigned g_web_frames_pending = 0;
+static double g_web_frame_dt = 0;
+
+static void web_frame_done(WGPUQueueWorkDoneStatus, WGPUStringView, void*, void*) {
+    --g_web_frames_pending;
+}
+#endif
 #if defined(ENABLE_PROFILER)
 #include "sokol_gfx_imgui.h"
 #endif
@@ -1024,13 +1036,22 @@ static void app_frame(void) {
     AppState* state = g_state;
     if (!state) return;
 
+    float dt = (float)sapp_frame_duration();
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    // Yield to the browser rather than blocking input while the GPU catches
+    // up. Keep elapsed time across skipped callbacks for camera/animation/UI.
+    g_web_frame_dt += sapp_frame_duration_unfiltered();
+    if (g_web_frames_pending >= 2) return;
+    dt = (float)g_web_frame_dt;
+    g_web_frame_dt = 0;
+#endif
+
     sync_web_camera_capture(state);
     PROFILE_FRAME();
     PROFILE_BEGIN("app_frame");
 
     const uint32_t max_neighbors = MAX_NEIGHBORS;
 
-    float dt = (float)sapp_frame_duration();
     g_app_time += dt;
     const Uint64 animation_now = SDL_GetPerformanceCounter();
     const double animation_dt = state->animation_tick
@@ -1258,7 +1279,7 @@ static void app_frame(void) {
     }
     ImGui::Begin("Info");
     ImGui::Text("FPS: %.1f    Display: %d x %d    Scene: %d x %d",
-                dt > 0 ? 1.0f / dt : 0.0f, win_w, win_h, scene_w, scene_h);
+                ImGui::GetIO().Framerate, win_w, win_h, scene_w, scene_h);
     if (state->scene.animation) {
         GSAnim& a = *state->scene.animation;
         ImGui::Text("GSAnim 0.1: %.3g-second %s loop", a.duration, a.linear ? "linear" : "step");
@@ -1910,6 +1931,13 @@ static void app_frame(void) {
                         splat_effect_ptr, 1.0f /*wireframe_occlusion*/, map_uniforms_ptr);
     }
 
+#if defined(__EMSCRIPTEN__) && defined(SOKOL_WGPU)
+    ++g_web_frames_pending;
+    WGPUQueueWorkDoneCallbackInfo done = {};
+    done.mode = WGPUCallbackMode_AllowProcessEvents;
+    done.callback = web_frame_done;
+    wgpuQueueOnSubmittedWorkDone((WGPUQueue)sg_wgpu_queue(), done);
+#endif
 
     PROFILE_END();
     return;
@@ -1953,7 +1981,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     desc.width = 1280;
     desc.height = 720;
     desc.sample_count = 1;
-    desc.swap_interval = 0; // no vsync
+    desc.swap_interval = 0; // native only; the web loop follows requestAnimationFrame
     desc.window_title = "gsplat";
     desc.logger.func = slog_func;
     desc.html5.canvas_selector = "#canvas";
