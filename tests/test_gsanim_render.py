@@ -22,6 +22,8 @@ import codec
 def main():
     output = Path(sys.argv[1]).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if '--modes' in sys.argv:
+        return layers_render_modes(output)
     if '--layers' in sys.argv:
         return layers_conformance(output)
     source = ROOT / 'animation_poc/tv_loop.gsanim'
@@ -88,6 +90,43 @@ def main():
                     # CPU/GPU multiply-add rounding may change a few edge pixels.
                     assert delta.max() <= 2 and delta.mean() < .01, result
                     assert images[0].std() > 10, 'Empty/constant view is not a valid comparison'
+    (output / 'comparison.json').write_text(json.dumps(results, indent=2))
+
+
+def layers_render_modes(output):
+    """All modes retain HDR and display-transform the final linear composite."""
+    source = ROOT / 'animation_poc/coastal_layers_pilot.gsanim'
+    asset = codec.load(source)
+    results = []
+    with tempfile.TemporaryDirectory() as temporary:
+        capture = Path(temporary) / 'capture.ppm'
+        raw = Path(temporary) / 'linear.f32'
+        for mode in ['alpha', 'stochastic', 'gps']:
+            cases = [('on', 'off'), ('off', 'off')]
+            if mode == 'stochastic':
+                cases.append(('on', 'on'))
+            for accumulation, taa in cases:
+                name = f'{mode}-{accumulation}' + ('-taa' if taa == 'on' else '')
+                command = ['bash', 'tests/render_gsanim.sh', f'ply={source}',
+                           'baked_views=animation_poc/layers_validation.json',
+                           'fixed_time=2.1', 'view=0', 'frames=64', 'width=640', 'height=360',
+                           f'render_mode={mode}', f'gps_accumulation={accumulation}', f'taa={taa}',
+                           'exercise_modes=1', f'capture={capture}', f'linear_capture={raw}']
+                with (output / f'{name}.log').open('w') as log:
+                    subprocess.run(command, cwd=ROOT, stdout=log, stderr=log, check=True, timeout=90)
+                image = Image.open(capture)
+                image.save(output / f'{name}.png')
+                actual = np.asarray(image).astype(float) / 255
+                linear = np.fromfile(raw, dtype='f4').reshape(360, 640, 4)[..., :3]
+                assert np.isfinite(linear).all() and linear.max() > 1, name
+                expected = codec.display_transform(asset, linear)
+                error = float(np.max(np.abs(actual - expected)) * 255)
+                assert error <= 1.1, (name, error)
+                assert actual.std() > .05, 'Empty view is not a valid comparison'
+                result = dict(mode=mode, accumulation=accumulation, taa=taa,
+                              peak_linear_radiance=float(linear.max()), max_display_error_bytes=error)
+                results.append(result)
+                print(result, flush=True)
     (output / 'comparison.json').write_text(json.dumps(results, indent=2))
 
 

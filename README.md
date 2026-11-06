@@ -125,8 +125,11 @@ backend-specific RGB16 texture filtering. Output is already display encoded;
 framebuffer sRGB encoding stays disabled. `first_layer_only=1` is a diagnostic
 timing baseline: all data stays resident but only the first layer is evaluated.
 
-0.3 uses sorted alpha exclusively; GPS/stochastic remain experimental options
-for older assets and static scenes. 0.2 uses each key's required outgoing
+0.3 defaults to sorted alpha (the reference mode), but the Render Mode selector
+and `render_mode=alpha|stochastic|gps` also allow experimental alternatives.
+All three preserve linear HDR colour and apply the LUT after compositing or
+accumulation; playback time changes reset temporal history. GPS/stochastic
+are not reference-equivalent renderers. 0.2 uses each key's required outgoing
 step/linear mode, including the wrap; 0.1 keeps its global mode unchanged.
 0.3 limits include 256 layers, 256 MiB total layer coefficients and a LUT size
 of 2–256. Existing archive, Gaussian, metadata and GPU-memory caps also apply.

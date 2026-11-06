@@ -74,6 +74,7 @@ layout(binding = 0) uniform GpsExpandUBO {
     int max_work_items;
     float supersample_factor;
     float clip_z_01;
+    int linear_color;
 };
 
 layout(binding = 0) readonly buffer GpsExpandProjectedSplatBuffer {
@@ -160,6 +161,9 @@ void main() {
     vec3 clamped_color = clamp(color_opacity.rgb, vec3(0.0), vec3(1.0));
     uvec3 rgb = uvec3(round(clamped_color * 255.0));
     uint packed_color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u) | 0xFF000000u;
+    // HDR assets carry original row identity instead of quantized RGB. Resolve
+    // fetches the unclamped radiance from the resident projected-splat buffer.
+    if (linear_color != 0) packed_color = splat_id;
     prepared_splats[idx].mean_basis = vec4(mean, l00, l10);
     prepared_splats[idx].sampling = vec4(l11, alpha, dilog_alpha, 0.0);
     prepared_splats[idx].packed = uvec4(depth_key, packed_color, splat_id, 0u);
@@ -303,7 +307,7 @@ layout(binding = 0) uniform GpsResolveUBO {
     vec2 gps_viewport;
     int supersample_factor;
     float background;
-    float resolve_pad1;
+    int linear_color;
     float resolve_pad2;
 };
 
@@ -313,6 +317,16 @@ layout(binding = 0) readonly buffer GpsResolveDepthKeys {
 
 layout(binding = 1) readonly buffer GpsResolveColors {
     GpsResolveUIntData gps_colors[];
+};
+
+struct GpsResolveProjectedData {
+    vec4 color_opacity;
+    vec4 center_radius;
+    vec4 conic_depth;
+    vec4 covariance_det;
+};
+layout(binding = 2) readonly buffer GpsResolveProjectedSplats {
+    GpsResolveProjectedData projected_splats[];
 };
 
 in vec2 uv;
@@ -346,7 +360,12 @@ void main() {
             uint idx = uint(sp.y * gps_extent.x + sp.x);
             uint depth_key = gps_depth_keys[idx].count;
             if (depth_key != 0xFFFFFFFFu) {
-                premul_color_sum += unpack_rgb8(gps_colors[idx].count);
+                uint payload = gps_colors[idx].count;
+                if (linear_color != 0) {
+                    premul_color_sum += projected_splats[payload].color_opacity.rgb;
+                } else {
+                    premul_color_sum += unpack_rgb8(payload);
+                }
                 coverage_count += 1.0;
                 min_depth_key = min(min_depth_key, depth_key);
             }

@@ -135,6 +135,7 @@ struct Renderer {
     sg_view         scene_depth_view;
     int             scene_target_width, scene_target_height;
     sg_pipeline     splat_stochastic_pipeline;
+    sg_pipeline     splat_stochastic_float_pipeline;
     sg_pipeline     cull_pipeline;
     sg_pipeline     cull_reset_pipeline;
     sg_pipeline     radix_hist_pipeline;
@@ -169,6 +170,7 @@ struct Renderer {
     int             animation_state_a;
     int             animation_state_b;
     float           animation_weight;
+    double          animation_time;
     bool            black_background;
     size_t          gpu_budget_bytes;       // 0: automatic budget, otherwise explicit cap
     bool            gps_work_budget_resize_failed;

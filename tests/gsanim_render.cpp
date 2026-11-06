@@ -43,6 +43,7 @@ static void measure_init() {
     warmup = sargs_exists("warmup") ? atof(sargs_value("warmup")) : 3;
     interval = sargs_exists("interval") ? atof(sargs_value("interval")) : 10;
     capture_frames = sargs_exists("frames") ? atoi(sargs_value("frames")) : 0;
+    if (sargs_exists("taa")) g_state->renderer.stochastic_taa_enabled = !strcmp(sargs_value("taa"), "on");
     if (!sargs_exists("ui")) ImGui::GetStyle().Alpha = 0;
     ImGui::GetIO().IniFilename = nullptr;
     g_state->baked_views.selected = float(atof(sargs_value("view")));
@@ -92,7 +93,24 @@ static void measure_frame() {
         if (g_state->scene.animation && g_state->scene.animation->state_count)
             g_state->scene.animation->selected_state = last ? -1 : frame_number % int(g_state->scene.animation->state_count);
     }
+    if (sargs_exists("exercise_modes")) {
+        auto& r = g_state->renderer;
+        SplatRenderMode mode = frame_number < 3 ? SplatRenderMode(frame_number) :
+            !strcmp(sargs_value("render_mode"), "gps") ? SplatRenderMode::GaussianPointSplatting :
+            !strcmp(sargs_value("render_mode"), "stochastic") ? SplatRenderMode::StochasticSplats : SplatRenderMode::AlphaBlendSorted;
+        if (r.splat_render_mode != mode) {
+            r.splat_render_mode = mode;
+            renderer_reset_stochastic_accumulation(&r);
+        }
+        if (g_state->scene.animation && frame_number < 4)
+            g_state->scene.animation->playback_time += frame_number * .5;
+    }
+    const double prior_time = g_state->renderer.animation_time;
     app_frame();
+    if (g_state->scene.animation && g_state->scene.animation->version == 3 &&
+        prior_time != g_state->scene.animation->playback_time &&
+        g_state->renderer.splat_render_mode != SplatRenderMode::AlphaBlendSorted)
+        assert(g_state->renderer.stochastic_sample_count <= g_state->renderer.stochastic_samples_per_frame);
     double submitted = now_seconds();
     if (record) {
         glEndQuery(GL_TIME_ELAPSED);
@@ -107,6 +125,11 @@ static void measure_frame() {
     glFinish();
     assert(glGetError() == GL_NO_ERROR);
     assert(!glIsEnabled(GL_FRAMEBUFFER_SRGB)); // these values are already display encoded
+    if (sargs_exists("render_mode")) {
+        const char* mode = sargs_value("render_mode");
+        assert(g_state->renderer.splat_render_mode == (!strcmp(mode, "gps") ? SplatRenderMode::GaussianPointSplatting :
+            !strcmp(mode, "stochastic") ? SplatRenderMode::StochasticSplats : SplatRenderMode::AlphaBlendSorted));
+    }
     const char* capture = sargs_value("capture");
     if (capture[0]) {
         int w = sapp_width(), h = sapp_height();
@@ -122,7 +145,16 @@ static void measure_frame() {
     if (linear_capture[0]) {
         int w = sapp_width(), h = sapp_height();
         std::vector<float> pixels(size_t(w)*h*4);
-        sg_gl_image_info image = sg_gl_query_image_info(g_state->renderer.appearance_image);
+        const auto& r = g_state->renderer;
+        sg_image target = r.appearance_image;
+        if (r.splat_render_mode != SplatRenderMode::AlphaBlendSorted) {
+            target = r.stochastic_accumulation_enabled ||
+                (r.splat_render_mode == SplatRenderMode::StochasticSplats && r.stochastic_taa_enabled)
+                ? r.stochastic_accum_images[(r.stochastic_accum_write_index + 1u) & 1u]
+                : r.splat_render_mode == SplatRenderMode::GaussianPointSplatting
+                    ? r.gps_gpu.resolved_color_image : r.stochastic_sample_image;
+        }
+        sg_gl_image_info image = sg_gl_query_image_info(target);
         glBindTexture(GL_TEXTURE_2D, image.tex[image.active_slot]);
         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, pixels.data());
         FILE* f = fopen(linear_capture, "wb"); assert(f);

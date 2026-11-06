@@ -403,7 +403,6 @@ static void app_init(void) {
                 state->colmap_dir = NULL;
                 GSAnim& a = *state->scene.animation;
                 if (a.version == 3) {
-                    state->renderer.splat_render_mode = SplatRenderMode::AlphaBlendSorted;
                     state->renderer.first_layer_only = sargs_exists("first_layer_only");
                     if (sargs_exists("exposure_ev")) {
                         float ev = float(atof(sargs_value("exposure_ev")));
@@ -1346,12 +1345,10 @@ static void app_frame(void) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
         int render_mode = (int)state->renderer.splat_render_mode;
         const char* render_mode_labels[] = { "Alpha Blend / Sorted", "StochasticSplats", "GPS Prototype" };
-        ImGui::BeginDisabled(state->scene.animation && state->scene.animation->version == 3);
         if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 3)) {
             state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
-        ImGui::EndDisabled();
         const GpsCapabilities& gps_caps = state->renderer.gps_capabilities;
         ImGui::TextDisabled("GPS backend: %s", gps_caps.compute ? "prototype available" : "unavailable");
         if (!gps_caps.supported && ImGui::IsItemHovered()) {

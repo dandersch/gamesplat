@@ -52,6 +52,7 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->splat_pipeline);
     renderer_destroy_shader_pipeline(&r->splat_float_pipeline);
     renderer_destroy_shader_pipeline(&r->splat_stochastic_pipeline);
+    renderer_destroy_shader_pipeline(&r->splat_stochastic_float_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_pipeline);
     renderer_destroy_shader_pipeline(&r->cull_reset_pipeline);
     renderer_destroy_shader_pipeline(&r->radix_hist_pipeline);
@@ -312,6 +313,10 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "splat-stochastic-pipeline";
         r->splat_stochastic_pipeline = sg_make_pipeline(&pd);
+        pd.shader = sg_make_shader(splat_stochastic_shader_desc(sg_query_backend()));
+        pd.colors[0].pixel_format = SG_PIXELFORMAT_RGBA16F;
+        pd.label = "splat-stochastic-linear-pipeline";
+        r->splat_stochastic_float_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Gaussian cull/depth-key compute pipeline -----------------------
@@ -557,6 +562,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
     }
 
     bool ok = r->splat_pipeline.id && r->splat_float_pipeline.id && r->splat_stochastic_pipeline.id &&
+              r->splat_stochastic_float_pipeline.id &&
               r->cull_pipeline.id && r->cull_reset_pipeline.id &&
               r->gps_clear_pipeline.id && r->gps_expand_pipeline.id &&
               r->gps_splat_pipeline.id &&
@@ -1523,10 +1529,12 @@ static bool renderer_ensure_gps_targets(Renderer* r, int width, int height) {
            gps->resolved_depth_view.id && gps->resolved_depth_texture_view.id;
 }
 
-static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int height) {
+static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int height, bool linear_color) {
     if (width <= 0 || height <= 0) return false;
+    const sg_pixel_format sample_format = linear_color ? SG_PIXELFORMAT_RGBA16F : renderer_default_color_format();
     if (r->stochastic_width == (uint32_t)width && r->stochastic_height == (uint32_t)height &&
         r->stochastic_sample_image.id && r->stochastic_depth_image.id &&
+        sg_query_image_desc(r->stochastic_sample_image).pixel_format == sample_format &&
         r->stochastic_accum_images[0].id && r->stochastic_accum_images[1].id &&
         r->stochastic_taa_xyz_images[0].id && r->stochastic_taa_xyz_images[1].id &&
         r->stochastic_frame_avg_images[0].id && r->stochastic_frame_avg_images[1].id) {
@@ -1542,7 +1550,7 @@ static bool renderer_ensure_stochastic_targets(Renderer* r, int width, int heigh
     color_desc.height = height;
     color_desc.num_slices = 1;
     color_desc.num_mipmaps = 1;
-    color_desc.pixel_format = renderer_default_color_format();
+    color_desc.pixel_format = sample_format;
     color_desc.sample_count = 1;
 
     color_desc.label = "stochastic-sample-color";
@@ -1682,7 +1690,7 @@ static void draw_world(Renderer* r, const GaussianScene* scene, const CameraUnif
         PROFILE("render splat pass") {
         PROFILE_GPU("splat pass") {
         sg_apply_pipeline(splat_mode == SplatRenderMode::StochasticSplats
-            ? r->splat_stochastic_pipeline
+            ? (appearance_only ? r->splat_stochastic_float_pipeline : r->splat_stochastic_pipeline)
             : appearance_only ? r->splat_float_pipeline : r->splat_pipeline);
 
         sg_bindings bnd = {};
@@ -2019,6 +2027,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
             u.max_work_items = (int)max_work_items;
             u.supersample_factor = (float)supersample;
             u.clip_z_01 = cam->clip_z_01;
+            u.linear_color = scene->animation && scene->animation->version == 3;
             sg_apply_uniforms(UB_GpsExpandUBO, SG_RANGE_REF(u));
             sg_dispatch((int)((scene->gaussian_count + 255u) / 256u), 1, 1);
             sg_end_pass();
@@ -2089,6 +2098,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     sg_bindings bnd = {};
     bnd.views[VIEW_GpsResolveDepthKeys] = gps->depth_key_buffer_view;
     bnd.views[VIEW_GpsResolveColors] = gps->color_buffer_view;
+    bnd.views[VIEW_GpsResolveProjectedSplats] = r->projected_splat_buffer_view;
     sg_apply_bindings(&bnd);
     GpsResolveUBO_t u = {};
     u.viewport[0] = cam->viewport[0];
@@ -2097,6 +2107,7 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     u.gps_viewport[1] = (float)gps_height;
     u.supersample_factor = (int)supersample;
     u.background = r->black_background || scene->animation ? 0.0f : 0.1f;
+    u.linear_color = scene->animation && scene->animation->version == 3;
     sg_apply_uniforms(UB_GpsResolveUBO, SG_RANGE_REF(u));
     sg_draw(0, 3, 1);
     sg_end_pass();
@@ -2104,6 +2115,25 @@ static bool renderer_draw_gps_sample(Renderer* r, const GaussianScene* scene, co
     }
 
     return true;
+}
+
+static void renderer_display_appearance(Renderer* r, const GaussianScene* scene, sg_view texture) {
+    const bool layers = scene->animation && scene->animation->version == 3;
+    sg_apply_pipeline(layers ? r->layers_display_pipeline : r->blit_pipeline);
+    sg_bindings bnd = {};
+    bnd.views[layers ? VIEW_linear_tex : VIEW_display_tex] = texture;
+    bnd.samplers[layers ? SMP_linear_smp : SMP_display_smp] = r->accum_sampler;
+    if (layers) bnd.views[VIEW_DisplayLut] = r->display_lut_view;
+    sg_apply_bindings(&bnd);
+    if (layers) {
+        DisplayUBO_t display = {};
+        display.lut_size = scene->animation->lut_size;
+        display.log2_min = scene->animation->log2_min;
+        display.log2_max = scene->animation->log2_max;
+        display.exposure_ev = r->exposure_ev;
+        sg_apply_uniforms(UB_DisplayUBO, SG_RANGE_REF(display));
+    }
+    sg_draw(0, 3, 1);
 }
 
 void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms* cam,
@@ -2121,16 +2151,18 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         if (animation.selected_state >= 0 && uint32_t(animation.selected_state) < animation.state_count)
             sample = {animation.selected_state, animation.selected_state, 0};
         if (sample.state_a != r->animation_state_a || sample.state_b != r->animation_state_b ||
-            sample.weight != r->animation_weight)
+            sample.weight != r->animation_weight ||
+            (animation.version == 3 && animation.playback_time != r->animation_time))
             renderer_reset_stochastic_accumulation(r);
         r->animation_state_a = sample.state_a;
         r->animation_state_b = sample.state_b;
         r->animation_weight = sample.weight;
+        r->animation_time = animation.playback_time;
     }
 
     const bool linear_layers = scene->animation && scene->animation->version == 3;
-    const bool stochastic = !linear_layers && (r->splat_render_mode == SplatRenderMode::StochasticSplats);
-    const bool gps = !linear_layers && (r->splat_render_mode == SplatRenderMode::GaussianPointSplatting);
+    const bool stochastic = r->splat_render_mode == SplatRenderMode::StochasticSplats;
+    const bool gps = r->splat_render_mode == SplatRenderMode::GaussianPointSplatting;
 
     if (scene->gaussian_count > 0) {
         PROFILE("gaussian gpu cull/project") {
@@ -2165,7 +2197,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     const bool scene_matches_display = win_w == sapp_width() && win_h == sapp_height();
 
     if (gps) {
-        if (!r->gps_capabilities.compute || !renderer_ensure_stochastic_targets(r, win_w, win_h) ||
+        if (!r->gps_capabilities.compute || !renderer_ensure_stochastic_targets(r, win_w, win_h, linear_layers) ||
             !renderer_ensure_gps_targets(r, win_w, win_h)) {
             LOG(ERROR|RENDERER|RESOURCE, "Failed to create GPS prototype targets");
             return;
@@ -2193,12 +2225,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             pass.swapchain = sglue_swapchain();
 
             sg_begin_pass(&pass);
-            sg_apply_pipeline(r->blit_pipeline);
-            sg_bindings blit_bnd = {};
-            blit_bnd.views[VIEW_display_tex] = r->gps_gpu.resolved_color_texture_view;
-            blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
-            sg_apply_bindings(&blit_bnd);
-            sg_draw(0, 3, 1);
+            renderer_display_appearance(r, scene, r->gps_gpu.resolved_color_texture_view);
             PROFILE("render imgui pass") {
             PROFILE_GPU("imgui pass") {
             simgui_render();
@@ -2247,12 +2274,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         pass.swapchain = sglue_swapchain();
 
         sg_begin_pass(&pass);
-        sg_apply_pipeline(r->blit_pipeline);
-        sg_bindings blit_bnd = {};
-        blit_bnd.views[VIEW_display_tex] = r->stochastic_accum_texture_views[write_index];
-        blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
-        sg_apply_bindings(&blit_bnd);
-        sg_draw(0, 3, 1);
+        renderer_display_appearance(r, scene, r->stochastic_accum_texture_views[write_index]);
         PROFILE("render imgui pass") {
         PROFILE_GPU("imgui pass") {
         simgui_render();
@@ -2267,7 +2289,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
     }
 
     if (stochastic) {
-        if (!renderer_ensure_stochastic_targets(r, win_w, win_h)) {
+        if (!renderer_ensure_stochastic_targets(r, win_w, win_h, linear_layers)) {
             LOG(ERROR|RENDERER|RESOURCE, "Failed to create stochastic render targets");
             return;
         }
@@ -2331,7 +2353,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
             sample_pass.attachments.depth_stencil = r->stochastic_depth_view;
 
             sg_begin_pass(&sample_pass);
-            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticSplats, splat_jitter_px);
+            draw_world(r, scene, cam, overlay, nodes, splat_effect, SplatRenderMode::StochasticSplats, splat_jitter_px, linear_layers);
             sg_end_pass();
 
             StochasticSampleViews current_sample = {
@@ -2475,14 +2497,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         pass.swapchain = sglue_swapchain();
 
         sg_begin_pass(&pass);
-        sg_apply_pipeline(r->blit_pipeline);
-        sg_bindings blit_bnd = {};
-        blit_bnd.views[VIEW_display_tex] = display_accum_texture
+        renderer_display_appearance(r, scene, display_accum_texture
             ? r->stochastic_accum_texture_views[write_index]
-            : r->stochastic_sample_texture_view;
-        blit_bnd.samplers[SMP_display_smp] = r->accum_sampler;
-        sg_apply_bindings(&blit_bnd);
-        sg_draw(0, 3, 1);
+            : r->stochastic_sample_texture_view);
         PROFILE("render imgui pass") {
         PROFILE_GPU("imgui pass") {
         simgui_render();
@@ -2559,22 +2576,7 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
     sg_begin_pass(&pass);
     if (baked) {
-        const bool layers = scene->animation && scene->animation->version == 3;
-        sg_apply_pipeline(layers ? r->layers_display_pipeline : r->blit_pipeline);
-        sg_bindings bnd = {};
-        bnd.views[layers ? VIEW_linear_tex : VIEW_display_tex] = r->appearance_texture_view;
-        bnd.samplers[layers ? SMP_linear_smp : SMP_display_smp] = r->accum_sampler;
-        if (layers) bnd.views[VIEW_DisplayLut] = r->display_lut_view;
-        sg_apply_bindings(&bnd);
-        if (layers) {
-            DisplayUBO_t display = {};
-            display.lut_size = scene->animation->lut_size;
-            display.log2_min = scene->animation->log2_min;
-            display.log2_max = scene->animation->log2_max;
-            display.exposure_ev = r->exposure_ev;
-            sg_apply_uniforms(UB_DisplayUBO, SG_RANGE_REF(display));
-        }
-        sg_draw(0, 3, 1);
+        renderer_display_appearance(r, scene, r->appearance_texture_view);
     } else if (!scene_matches_display) {
         sg_apply_pipeline(r->blit_pipeline);
         sg_bindings bnd = {};
