@@ -70,6 +70,10 @@ layout(binding = 5) buffer SplatDiagnostics {
 layout(binding = 6) readonly buffer AnimationDeltas {
     UIntData animation_deltas[];
 };
+struct LayerWeight { float value; };
+layout(binding = 7) readonly buffer LayerWeights {
+    LayerWeight layer_weights[];
+};
 
 layout(binding = 2) uniform AnimationUBO {
     int animation_count;
@@ -77,7 +81,10 @@ layout(binding = 2) uniform AnimationUBO {
     int animation_state_b;
     float animation_weight;
     vec4 animation_scales[12];
+    int layer_count;
 };
+
+int current_layer = -1;
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -138,6 +145,13 @@ vec4 fetch_vec4(uint splat_id, int k) {
             int slot = base + c;
             if (slot == 15 || slot >= 61) continue; // GPU padding, not SH
             int j = slot < 15 ? slot - 12 : 3 + ((slot - 16) % 3) * 15 + (slot - 16) / 3;
+            if (layer_count > 0) {
+                if (current_layer < 0) { value[c] = 0.0; continue; }
+                uint offset = (uint(current_layer) * uint(animation_count) + splat_id) * 48u + uint(j);
+                vec2 pair = unpackHalf2x16(animation_deltas[offset / 2u].count);
+                value[c] = pair[int(offset % 2u)];
+                continue;
+            }
             float a = animation_coefficient(value[c], splat_id, j, animation_state_a);
             if (animation_weight > 0.0) {
                 float b = animation_coefficient(value[c], splat_id, j, animation_state_b);
@@ -336,60 +350,71 @@ void main() {
         eff_degree = 0;
     }
 
-    vec3 result = SH_C0 * dc;
-    if (eff_degree >= 1) {
-        float x = dir.x, y = dir.y, z = dir.z;
-        // SH0..2 (3 vec4s -> sh_flat[0..11])
-        for (int i = 0; i < 3; ++i) {
-            vec4 tt = fetch_vec4(idx, 4 + i);
-            sh_flat[i*4 + 0] = tt.x;
-            sh_flat[i*4 + 1] = tt.y;
-            sh_flat[i*4 + 2] = tt.z;
-            sh_flat[i*4 + 3] = tt.w;
-        }
-        result += -SH_C1 * y * SH(0);
-        result +=  SH_C1 * z * SH(1);
-        result += -SH_C1 * x * SH(2);
-
-        if (eff_degree >= 2) {
-            float xx = x*x, yy = y*y, zz = z*z;
-            float xy = x*y, yz = y*z, xz = z*x;
-            // SH3..7 (vec4s 3..5 -> sh_flat[12..23])
-            for (int i = 3; i < 6; ++i) {
+    vec3 color = vec3(0.0);
+    for (int layer = 0; layer < max(layer_count, 1); ++layer) {
+        current_layer = layer;
+        if (layer_count > 0)
+            dc = fetch_vec4(idx, 3).xyz;
+        vec3 result = SH_C0 * dc;
+        if (eff_degree >= 1) {
+            float x = dir.x, y = dir.y, z = dir.z;
+            // SH0..2 (3 vec4s -> sh_flat[0..11])
+            for (int i = 0; i < 3; ++i) {
                 vec4 tt = fetch_vec4(idx, 4 + i);
-                sh_flat[i*4 + 0] = tt.x;
-                sh_flat[i*4 + 1] = tt.y;
-                sh_flat[i*4 + 2] = tt.z;
-                sh_flat[i*4 + 3] = tt.w;
+                sh_flat[i * 4 + 0] = tt.x;
+                sh_flat[i * 4 + 1] = tt.y;
+                sh_flat[i * 4 + 2] = tt.z;
+                sh_flat[i * 4 + 3] = tt.w;
             }
-            result += SH_C2_0 * xy            * SH(3);
-            result += SH_C2_1 * yz            * SH(4);
-            result += SH_C2_2 * (2.0*zz - xx - yy) * SH(5);
-            result += SH_C2_3 * xz            * SH(6);
-            result += SH_C2_4 * (xx - yy)     * SH(7);
+            result += -SH_C1 * y * SH(0);
+            result += SH_C1 * z * SH(1);
+            result += -SH_C1 * x * SH(2);
 
-            if (eff_degree >= 3) {
-                // SH8..14 (vec4s 6..11 -> sh_flat[24..47])
-                for (int i = 6; i < 12; ++i) {
+            if (eff_degree >= 2) {
+                float xx = x * x, yy = y * y, zz = z * z;
+                float xy = x * y, yz = y * z, xz = z * x;
+                // SH3..7 (vec4s 3..5 -> sh_flat[12..23])
+                for (int i = 3; i < 6; ++i) {
                     vec4 tt = fetch_vec4(idx, 4 + i);
-                    sh_flat[i*4 + 0] = tt.x;
-                    sh_flat[i*4 + 1] = tt.y;
-                    sh_flat[i*4 + 2] = tt.z;
-                    sh_flat[i*4 + 3] = tt.w;
+                    sh_flat[i * 4 + 0] = tt.x;
+                    sh_flat[i * 4 + 1] = tt.y;
+                    sh_flat[i * 4 + 2] = tt.z;
+                    sh_flat[i * 4 + 3] = tt.w;
                 }
-                result += SH_C3_0 * y * (3.0*xx - yy)               * SH(8);
-                result += SH_C3_1 * xy * z                          * SH(9);
-                result += SH_C3_2 * y * (4.0*zz - xx - yy)          * SH(10);
-                result += SH_C3_3 * z * (2.0*zz - 3.0*xx - 3.0*yy)  * SH(11);
-                result += SH_C3_4 * x * (4.0*zz - xx - yy)          * SH(12);
-                result += SH_C3_5 * z * (xx - yy)                   * SH(13);
-                result += SH_C3_6 * x * (xx - 3.0*yy)               * SH(14);
+                result += SH_C2_0 * xy * SH(3);
+                result += SH_C2_1 * yz * SH(4);
+                result += SH_C2_2 * (2.0 * zz - xx - yy) * SH(5);
+                result += SH_C2_3 * xz * SH(6);
+                result += SH_C2_4 * (xx - yy) * SH(7);
+
+                if (eff_degree >= 3) {
+                    // SH8..14 (vec4s 6..11 -> sh_flat[24..47])
+                    for (int i = 6; i < 12; ++i) {
+                        vec4 tt = fetch_vec4(idx, 4 + i);
+                        sh_flat[i * 4 + 0] = tt.x;
+                        sh_flat[i * 4 + 1] = tt.y;
+                        sh_flat[i * 4 + 2] = tt.z;
+                        sh_flat[i * 4 + 3] = tt.w;
+                    }
+                    result += SH_C3_0 * y * (3.0 * xx - yy) * SH(8);
+                    result += SH_C3_1 * xy * z * SH(9);
+                    result += SH_C3_2 * y * (4.0 * zz - xx - yy) * SH(10);
+                    result += SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * SH(11);
+                    result += SH_C3_4 * x * (4.0 * zz - xx - yy) * SH(12);
+                    result += SH_C3_5 * z * (xx - yy) * SH(13);
+                    result += SH_C3_6 * x * (xx - 3.0 * yy) * SH(14);
+                }
             }
         }
-    }
 
-    result += 0.5;
-    vec3 color = max(result, vec3(0.0));
+        if (layer_count == 0)
+            result += 0.5;
+        vec3 weight = vec3(1.0);
+        if (layer_count > 0)
+            weight = vec3(layer_weights[layer * 3].value, layer_weights[layer * 3 + 1].value,
+                          layer_weights[layer * 3 + 2].value);
+        color += max(result, vec3(0.0)) * weight;
+    }
     color += effect_color.rgb * (effect_wave * effect_color.a);
 
     projected_splats[idx].color_opacity = vec4(color, opacity);

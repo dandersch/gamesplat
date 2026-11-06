@@ -1,5 +1,5 @@
 A real-time 3D Gaussian splatting renderer that runs natively or on the web.
-Supports `.ply`, `.sog`, and experimental `.gsanim` 0.1 files.
+Supports `.ply`, `.sog`, and experimental `.gsanim` 0.1, 0.2 and 0.3 files.
 
 Startup defaults to **GPS Prototype** with a **16M work budget** (128 MiB).
 Override with `render_mode=alpha`, `render_mode=stochastic`, or `gps_budget_m=N`.
@@ -100,3 +100,52 @@ other desktop processes; use per-process `nvidia-smi` memory alongside the logge
 logical scene-buffer allocation. Shader compilation/startup and scene loading
 are logged separately. The rendered tests compare every state and two asymmetric
 linear samples against `codec.py` at three cameras after camera/state changes.
+
+## GSAnim 0.3 linear light layers
+
+```sh
+./build.sh
+./gsplat ply=animation_poc/coastal_layers_pilot.gsanim \
+  baked_views=animation_poc/layers_validation.json
+```
+
+The pilot is an 8-second, four-layer loop. Play/pause and scrubbing remain in
+Info; **Exposure (EV)** is an optional offset, default 0 (`exposure_ev=1` at
+startup). The reference-camera slider and A-B transition use the per-view focal
+lengths in `layers_validation.json`. Camera files are optional, external to the
+archive; ordinary fly-camera navigation remains available.
+
+Half-float layers stay resident in original Gaussian row order. Only the G×3
+RGB weights upload per frame (48 bytes for the pilot). Each layer's SH sum is
+clamped to zero before weighting, without a 0.5 offset or upper clamp. Sorted
+alpha composites linear radiance onto black in RGBA16F; one fullscreen pass
+applies the log2 shaper and exact trilinear uint16 LUT lookup, including the
+background. The red-fastest LUT uses packed storage-buffer fetches rather than
+backend-specific RGB16 texture filtering. Output is already display encoded;
+framebuffer sRGB encoding stays disabled. `first_layer_only=1` is a diagnostic
+timing baseline: all data stays resident but only the first layer is evaluated.
+
+0.3 uses sorted alpha exclusively; GPS/stochastic remain experimental options
+for older assets and static scenes. 0.2 uses each key's required outgoing
+step/linear mode, including the wrap; 0.1 keeps its global mode unchanged.
+0.3 limits include 256 layers, 256 MiB total layer coefficients and a LUT size
+of 2–256. Existing archive, Gaussian, metadata and GPU-memory caps also apply.
+Malformed layers, weights, timelines, LUTs and nonzero base SH are rejected.
+
+```sh
+python -m unittest discover -s tests -p test_gsanim.py
+python -m unittest discover -s animation_poc -p test_codec.py
+# Requires NumPy, Pillow, OpenCV and the untracked 16-bit reference PNGs:
+python tests/test_gsanim_render.py .amp/in/artifacts/layers --layers
+# 0.1/0.2 versus decoded static PLY, including camera/state changes:
+python tests/test_gsanim_render.py .amp/in/artifacts/legacy
+bash tests/render_gsanim.sh ply=animation_poc/coastal_layers_pilot.gsanim \
+  baked_views=animation_poc/layers_validation.json warmup=3 interval=10
+```
+
+The capture harness fixes its own Xft DPI at 96 without changing the desktop,
+so framebuffer dimensions and reference pixel centres are reproducible.
+`linear_capture=PATH.f32` additionally writes the pre-LUT RGBA float32 readback
+(top row first, reshape to height×width×4); it runs after measurement only.
+This pilot was trained from only 30 views: grain, blur and floaters also appear
+in the reference images and are not corrected by changing the renderer.

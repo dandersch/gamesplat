@@ -147,6 +147,7 @@ struct Renderer {
     sg_pipeline     accum_pipeline;
     sg_pipeline     taa_accum_pipeline;
     sg_pipeline     blit_pipeline;
+    sg_pipeline     layers_display_pipeline;
     sg_pipeline     overlay_pipeline;
     sg_pipeline     darken_pipeline;     // fullscreen dim of FPS view behind map overlay
     sg_pipeline     wireframe_pipeline;
@@ -159,6 +160,12 @@ struct Renderer {
     sg_buffer       animation_buffer;
     sg_view         animation_view;
     size_t          animation_bytes;
+    sg_buffer       display_lut_buffer;
+    sg_view         display_lut_view;
+    sg_buffer       layer_weights_buffer;
+    sg_view         layer_weights_view;
+    float           exposure_ev;
+    bool            first_layer_only; // diagnostic baseline, no asset modification
     int             animation_state_a;
     int             animation_state_b;
     float           animation_weight;

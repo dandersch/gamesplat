@@ -63,6 +63,7 @@ static void renderer_destroy_shader_pipelines(Renderer* r) {
     renderer_destroy_shader_pipeline(&r->gps_resolve_pipeline);
     renderer_destroy_shader_pipeline(&r->accum_pipeline);
     renderer_destroy_shader_pipeline(&r->taa_accum_pipeline);
+    renderer_destroy_shader_pipeline(&r->layers_display_pipeline);
     renderer_destroy_shader_pipeline(&r->blit_pipeline);
     renderer_destroy_shader_pipeline(&r->overlay_pipeline);
     renderer_destroy_shader_pipeline(&r->darken_pipeline);
@@ -431,6 +432,9 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
         pd.colors[0].write_mask = SG_COLORMASK_RGBA;
         pd.label = "stochastic-blit-pipeline";
         r->blit_pipeline = sg_make_pipeline(&pd);
+        pd.shader = sg_make_shader(layers_display_shader_desc(sg_query_backend()));
+        pd.label = "gsanim-linear-display-pipeline";
+        r->layers_display_pipeline = sg_make_pipeline(&pd);
     }
 
     // --- Overlay pipeline -----------------------------------------------
@@ -558,7 +562,7 @@ static bool renderer_create_shader_pipelines(Renderer* r) {
               r->gps_splat_pipeline.id &&
               r->gps_resolve_pipeline.id &&
               r->accum_pipeline.id && r->taa_accum_pipeline.id &&
-              r->blit_pipeline.id && r->overlay_pipeline.id &&
+              r->blit_pipeline.id && r->layers_display_pipeline.id && r->overlay_pipeline.id &&
               r->darken_pipeline.id && r->wireframe_pipeline.id &&
               r->mesh_pipeline.id;
     if (!ok) {
@@ -674,6 +678,14 @@ bool renderer_init(Renderer* r) {
 }
 
 static void renderer_release_gaussian_chunks(Renderer* r) {
+    if (r->layer_weights_view.id) sg_destroy_view(r->layer_weights_view);
+    if (r->layer_weights_buffer.id) sg_destroy_buffer(r->layer_weights_buffer);
+    r->layer_weights_view = {};
+    r->layer_weights_buffer = {};
+    if (r->display_lut_view.id) sg_destroy_view(r->display_lut_view);
+    if (r->display_lut_buffer.id) sg_destroy_buffer(r->display_lut_buffer);
+    r->display_lut_view = {};
+    r->display_lut_buffer = {};
     if (r->animation_view.id) sg_destroy_view(r->animation_view);
     if (r->animation_buffer.id) sg_destroy_buffer(r->animation_buffer);
     r->animation_view = {};
@@ -730,13 +742,16 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     const size_t count = scene->gaussian_count;
     const size_t groups = (count + 255u) / 256u;
     const size_t work_bytes = (size_t)std::max(r->gps_max_work_items, 1u) * 8u;
-    const size_t animation_bytes = scene->animation ? scene->animation->deltas.size() : 4u;
-    const size_t required = renderer_scene_buffer_bytes(scene->gaussian_count, std::max(r->gps_max_work_items, 1u)) + animation_bytes;
+    const bool layers = scene->animation && scene->animation->version == 3;
+    const size_t animation_bytes = layers ? scene->animation->layer_data.size() * 2u : scene->animation ? scene->animation->deltas.size() : 4u;
+    const size_t lut_bytes = layers ? (scene->animation->display_lut.size() * 2u + 3u) / 4u * 4u : 0u;
+    const size_t weight_bytes = layers ? scene->animation->layers.size() * 3u * sizeof(float) : sizeof(float);
+    const size_t required = renderer_scene_buffer_bytes(scene->gaussian_count, std::max(r->gps_max_work_items, 1u)) + animation_bytes + lut_bytes + weight_bytes;
     LOG(INFO|GAUSSIAN|GPU, "Scene buffers need %.1f MiB; budget %.1f MiB; storage block limit %.1f MiB",
         required / 1048576.0, budget / 1048576.0, storage_limit / 1048576.0);
     if (!count || groups > max_groups || count * 64u > storage_limit ||
         groups * 1024u > storage_limit || work_bytes > storage_limit ||
-        animation_bytes > storage_limit || required > budget) {
+        animation_bytes > storage_limit || lut_bytes > storage_limit || required > budget) {
         LOG(ERROR|GAUSSIAN|GPU, "Scene exceeds GPU memory or compute limits; refusing allocation. gpu_budget_mb can set a memory cap (automatic on NVIDIA, otherwise 1024 MiB).");
         return false;
     }
@@ -825,13 +840,16 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
     // Byte order is explicit so packed signed-byte fetches also work on hosts
     // whose native uint32 representation differs from the archive.
     std::vector<uint32_t> packed(animation_bytes / 4u, 0u);
-    if (scene->animation) {
+    if (layers) {
+        for (size_t i = 0; i < scene->animation->layer_data.size(); ++i)
+            packed[i / 2u] |= uint32_t(scene->animation->layer_data[i]) << ((i % 2u) * 16u);
+    } else if (scene->animation) {
         for (size_t i = 0; i < animation_bytes; ++i)
             packed[i / 4u] |= uint32_t(uint8_t(scene->animation->deltas[i])) << ((i % 4u) * 8u);
     }
     bd.usage.storage_buffer = true;
     bd.data = {packed.data(), animation_bytes};
-    bd.label = "gsanim-resident-int8-deltas";
+    bd.label = "gsanim-resident-appearance";
     r->animation_buffer = sg_make_buffer(&bd);
     if (sg_query_buffer_state(r->animation_buffer) != SG_RESOURCESTATE_VALID) {
         free(gpu_data);
@@ -843,7 +861,30 @@ bool renderer_upload_gaussians(Renderer* r, const GaussianScene* scene) {
         free(gpu_data);
         return false;
     }
-    r->animation_bytes = animation_bytes;
+    r->animation_bytes = animation_bytes + lut_bytes + weight_bytes;
+    if (layers) {
+        packed.assign(lut_bytes / 4u, 0u);
+        for (size_t i = 0; i < scene->animation->display_lut.size(); ++i)
+            packed[i / 2u] |= uint32_t(scene->animation->display_lut[i]) << ((i % 2u) * 16u);
+        bd.data = {packed.data(), lut_bytes};
+        bd.label = "gsanim-display-lut";
+        r->display_lut_buffer = sg_make_buffer(&bd);
+        if (sg_query_buffer_state(r->display_lut_buffer) != SG_RESOURCESTATE_VALID) { free(gpu_data); return false; }
+        vd.storage_buffer.buffer = r->display_lut_buffer;
+        r->display_lut_view = sg_make_view(&vd);
+        if (sg_query_view_state(r->display_lut_view) != SG_RESOURCESTATE_VALID) { free(gpu_data); return false; }
+    }
+    bd = {};
+    bd.usage.storage_buffer = true;
+    bd.usage.dynamic_update = true;
+    bd.size = weight_bytes;
+    bd.label = "gsanim-layer-weights";
+    r->layer_weights_buffer = sg_make_buffer(&bd);
+    if (sg_query_buffer_state(r->layer_weights_buffer) != SG_RESOURCESTATE_VALID) { free(gpu_data); return false; }
+    vd = {};
+    vd.storage_buffer.buffer = r->layer_weights_buffer;
+    r->layer_weights_view = sg_make_view(&vd);
+    if (sg_query_view_state(r->layer_weights_view) != SG_RESOURCESTATE_VALID) { free(gpu_data); return false; }
     bd = {};
     vd = {};
     for (uint32_t i = 0; i < chunk_count; ++i) {
@@ -1770,6 +1811,7 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
     bnd.views[VIEW_VisibleCount] = r->visible_count_buffer_view;
     bnd.views[VIEW_SplatDiagnostics] = r->splat_diagnostics_buffer_view;
     bnd.views[VIEW_AnimationDeltas] = r->animation_view;
+    bnd.views[VIEW_LayerWeights] = r->layer_weights_view;
     AnimationUBO_t animation_ubo = {};
     if (scene->animation) {
         animation_ubo.animation_count = scene->gaussian_count;
@@ -1777,6 +1819,12 @@ static void renderer_cull_gaussians_gpu(Renderer* r, GaussianScene* scene, const
         animation_ubo.animation_state_b = r->animation_state_b;
         animation_ubo.animation_weight = r->animation_weight;
         memcpy(animation_ubo.animation_scales, scene->animation->scales, sizeof(animation_ubo.animation_scales));
+        if (scene->animation->version == 3) {
+            auto weights = gsanim_layer_weights(*scene->animation, scene->animation->playback_time);
+            animation_ubo.layer_count = r->first_layer_only ? 1 : int(weights.size());
+            sg_range data = {weights.data(), weights.size() * 3 * sizeof(float)};
+            sg_update_buffer(r->layer_weights_buffer, &data);
+        }
     }
     CullUBO_t u = {};
     memcpy(u.view, cam->view, sizeof(u.view));
@@ -2080,8 +2128,9 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
         r->animation_weight = sample.weight;
     }
 
-    const bool stochastic = (r->splat_render_mode == SplatRenderMode::StochasticSplats);
-    const bool gps = (r->splat_render_mode == SplatRenderMode::GaussianPointSplatting);
+    const bool linear_layers = scene->animation && scene->animation->version == 3;
+    const bool stochastic = !linear_layers && (r->splat_render_mode == SplatRenderMode::StochasticSplats);
+    const bool gps = !linear_layers && (r->splat_render_mode == SplatRenderMode::GaussianPointSplatting);
 
     if (scene->gaussian_count > 0) {
         PROFILE("gaussian gpu cull/project") {
@@ -2510,11 +2559,21 @@ void renderer_draw_frame(Renderer* r, GaussianScene* scene, const CameraUniforms
 
     sg_begin_pass(&pass);
     if (baked) {
-        sg_apply_pipeline(r->blit_pipeline);
+        const bool layers = scene->animation && scene->animation->version == 3;
+        sg_apply_pipeline(layers ? r->layers_display_pipeline : r->blit_pipeline);
         sg_bindings bnd = {};
-        bnd.views[VIEW_display_tex] = r->appearance_texture_view;
-        bnd.samplers[SMP_display_smp] = r->accum_sampler;
+        bnd.views[layers ? VIEW_linear_tex : VIEW_display_tex] = r->appearance_texture_view;
+        bnd.samplers[layers ? SMP_linear_smp : SMP_display_smp] = r->accum_sampler;
+        if (layers) bnd.views[VIEW_DisplayLut] = r->display_lut_view;
         sg_apply_bindings(&bnd);
+        if (layers) {
+            DisplayUBO_t display = {};
+            display.lut_size = scene->animation->lut_size;
+            display.log2_min = scene->animation->log2_min;
+            display.log2_max = scene->animation->log2_max;
+            display.exposure_ev = r->exposure_ev;
+            sg_apply_uniforms(UB_DisplayUBO, SG_RANGE_REF(display));
+        }
         sg_draw(0, 3, 1);
     } else if (!scene_matches_display) {
         sg_apply_pipeline(r->blit_pipeline);

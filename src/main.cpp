@@ -70,6 +70,7 @@ static const uint32_t MAX_NEIGHBORS = 64;
 // projection convention. The square view expands horizontally at 16:9.
 struct BakedCameraViews {
     std::vector<std::array<float, 16>> poses;
+    std::vector<float> view_focals;
     float focal_over_height = 0;
     float selected = 0;
     bool transition = false;
@@ -101,25 +102,36 @@ static bool load_baked_views(const char* path, BakedCameraViews* out) {
             sj_Value entry;
             while (sj_iter_array(&r, value, &entry)) {
                 sj_Value k, v;
-                while (sj_iter_object(&r, entry, &k, &v)) if (sjp_eq(k, "camera_to_world")) {
-                    std::array<float, 16> pose{};
-                    sj_Value row;
-                    int n = 0;
-                    while (sj_iter_array(&r, v, &row)) {
-                        if (n >= 4 || !sjp_parse_float_array(&r, row, pose.data() + 4*n, 4)) { sjp_set_error(&r, "invalid camera matrix"); break; }
-                        ++n;
+                float height = 0, focal = 0;
+                while (sj_iter_object(&r, entry, &k, &v)) {
+                    if (sjp_eq(k, "height")) sjp_parse_float(&r, v, &height);
+                    else if (sjp_eq(k, "intrinsics")) {
+                        sj_Value ik, iv;
+                        while (sj_iter_object(&r, v, &ik, &iv))
+                            if (sjp_eq(ik, "fy")) sjp_parse_float(&r, iv, &focal);
+                    } else if (sjp_eq(k, "camera_to_world")) {
+                        std::array<float, 16> pose{};
+                        sj_Value row;
+                        int n = 0;
+                        while (sj_iter_array(&r, v, &row)) {
+                            if (n >= 4 || !sjp_parse_float_array(&r, row, pose.data() + 4*n, 4)) { sjp_set_error(&r, "invalid camera matrix"); break; }
+                            ++n;
+                        }
+                        if (n != 4) sjp_set_error(&r, "invalid camera matrix");
+                        for (float x : pose) if (!std::isfinite(x)) sjp_set_error(&r, "nonfinite camera");
+                        result.poses.push_back(pose);
                     }
-                    if (n != 4) sjp_set_error(&r, "invalid camera matrix");
-                    for (float x : pose) if (!std::isfinite(x)) sjp_set_error(&r, "nonfinite camera");
-                    result.poses.push_back(pose);
                 }
+                result.view_focals.push_back(height > 0 && focal > 0 ? focal/height : 0);
             }
         }
     }
-    bool ok = !r.error && !result.poses.empty() && fx > 0 && std::isfinite(fx) && fx == fy &&
-        resolution[1] > 0 && cx == resolution[0]/2 && cy == resolution[1]/2;
+    bool per_view = result.view_focals.size() == result.poses.size() && !result.view_focals.empty();
+    for (float f : result.view_focals) per_view = per_view && std::isfinite(f) && f > 0;
+    bool ok = !r.error && !result.poses.empty() && (per_view || (fx > 0 && std::isfinite(fx) && fx == fy &&
+        resolution[1] > 0 && cx == resolution[0]/2 && cy == resolution[1]/2));
     SDL_free(bytes);
-    if (ok) { result.focal_over_height = fy/resolution[1]; *out = std::move(result); }
+    if (ok) { result.focal_over_height = per_view ? result.view_focals[0] : fy/resolution[1]; *out = std::move(result); }
     return ok;
 }
 
@@ -167,11 +179,17 @@ static void baked_camera_uniforms(const BakedCameraViews& views, CameraUniforms*
         cam->view[14] -= back[k]*p[k*4+3];
     }
     cam->view[15] = 1;
+    float focal = views.focal_over_height;
+    if (!views.view_focals.empty() && views.view_focals[0] > 0) {
+        float index = std::clamp(views.selected, 0.0f, float(views.poses.size()-1));
+        size_t i = size_t(index), j = std::min(i+1, views.poses.size()-1);
+        focal = math_lerp(views.view_focals[i], views.view_focals[j], index-float(i));
+    }
     Camera projection; camera_init(&projection);
-    projection.fov_y = 2*atanf(0.5f/views.focal_over_height);
+    projection.fov_y = 2*atanf(0.5f/focal);
     camera_get_proj_matrix(&projection, cam->viewport[0]/cam->viewport[1], cam->proj);
     cam->orthographic = 0;
-    cam->persp_focal = views.focal_over_height*cam->viewport[1];
+    cam->persp_focal = focal*cam->viewport[1];
 }
 
 struct AppState {
@@ -384,6 +402,14 @@ static void app_init(void) {
                 if (!render_mode[0]) state->renderer.splat_render_mode = SplatRenderMode::AlphaBlendSorted;
                 state->colmap_dir = NULL;
                 GSAnim& a = *state->scene.animation;
+                if (a.version == 3) {
+                    state->renderer.splat_render_mode = SplatRenderMode::AlphaBlendSorted;
+                    state->renderer.first_layer_only = sargs_exists("first_layer_only");
+                    if (sargs_exists("exposure_ev")) {
+                        float ev = float(atof(sargs_value("exposure_ev")));
+                        if (std::isfinite(ev)) state->renderer.exposure_ev = ev;
+                    }
+                }
                 if (sargs_exists("anim_time")) {
                     double time = strtod(sargs_value("anim_time"), nullptr);
                     if (std::isfinite(time)) a.playback_time = time;
@@ -1282,17 +1308,23 @@ static void app_frame(void) {
                 ImGui::GetIO().Framerate, win_w, win_h, scene_w, scene_h);
     if (state->scene.animation) {
         GSAnim& a = *state->scene.animation;
-        ImGui::Text("GSAnim 0.1: %.3g-second %s loop", a.duration, a.linear ? "linear" : "step");
-        ImGui::TextWrapped("Synthetic snapshot loop, not the original Blender timeline. Baked appearance; no runtime lights.");
-        if (a.linear) ImGui::TextWrapped("Coefficient crossfade test, not physical intermediate TV animation.");
+        ImGui::Text("GSAnim 0.%d: %.3g-second loop", a.version, a.duration);
+        ImGui::TextWrapped(a.version == 3 ? "Scene-linear light layers; per-pixel display transform." :
+            "Synthetic snapshot loop, not the original Blender timeline. Baked appearance; no runtime lights.");
+        if (a.version < 3 && a.linear) ImGui::TextWrapped("Coefficient crossfade test, not physical intermediate TV animation.");
         if (ImGui::Checkbox("Play", &a.playing)) a.selected_state = -1;
         double min_time = 0, max_time = a.duration;
         if (ImGui::SliderScalar("Time (seconds)", ImGuiDataType_Double, &a.playback_time, &min_time, &max_time, "%.4f")) {
             a.playing = false; a.selected_state = -1;
         }
-        if (ImGui::SliderInt("State", &a.selected_state, -1, int(a.state_count)-1)) a.playing = false;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("-1 follows the timeline; selecting a state pauses playback.");
-        ImGui::Text("Resident int8 deltas: %.2f MiB", a.deltas.size()/1048576.0);
+        if (a.version == 3) {
+            ImGui::SliderFloat("Exposure (EV)", &state->renderer.exposure_ev, -8, 8);
+            ImGui::Text("Resident SH layers: %.2f MiB", a.layer_data.size()*2/1048576.0);
+        } else {
+            if (ImGui::SliderInt("State", &a.selected_state, -1, int(a.state_count)-1)) a.playing = false;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("-1 follows the timeline; selecting a state pauses playback.");
+            ImGui::Text("Resident int8 deltas: %.2f MiB", a.deltas.size()/1048576.0);
+        }
     }
     if (!state->baked_views.poses.empty()) {
         if (ImGui::Checkbox("Reference camera##enable", &state->baked_views.follow_reference)) {
@@ -1314,10 +1346,12 @@ static void app_frame(void) {
         ImGui::Text("Visible: %u / %u", state->scene.visible_count, state->scene.gaussian_count);
         int render_mode = (int)state->renderer.splat_render_mode;
         const char* render_mode_labels[] = { "Alpha Blend / Sorted", "StochasticSplats", "GPS Prototype" };
+        ImGui::BeginDisabled(state->scene.animation && state->scene.animation->version == 3);
         if (ImGui::Combo("Render Mode", &render_mode, render_mode_labels, 3)) {
             state->renderer.splat_render_mode = (SplatRenderMode)render_mode;
             renderer_reset_stochastic_accumulation(&state->renderer);
         }
+        ImGui::EndDisabled();
         const GpsCapabilities& gps_caps = state->renderer.gps_capabilities;
         ImGui::TextDisabled("GPS backend: %s", gps_caps.compute ? "prototype available" : "unavailable");
         if (!gps_caps.supported && ImGui::IsItemHovered()) {
@@ -1617,7 +1651,9 @@ static void app_frame(void) {
     // Suppressed during examine: the object fills the view, so a hover
     // icon would just signal "you can examine what you're already
     // examining". The camera is also locked, so picks are meaningless.
-    if (state->cam.camera_mode && !examine_active) {
+    // Locked reference views likewise have no picking cursor; keep their
+    // comparison images free of a screen-space crosshair.
+    if (state->cam.camera_mode && !examine_active && !state->baked_views.follow_reference) {
         bool crosshair_hover = false;
         bool hotspot_hover = false;
 

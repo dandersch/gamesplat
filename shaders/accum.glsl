@@ -195,3 +195,46 @@ void main() {
 @program accum accum_vs accum_fs
 @program taa_accum accum_vs taa_accum_fs
 @program blit accum_vs blit_fs
+
+// Exact trilinear lookup of the uint16 RGB lattice. Storage-buffer fetches
+// avoid backend-dependent RGB16 filtering/3D texture format support.
+@fs layers_display_fs
+@image_sample_type linear_tex unfilterable_float
+layout(binding = 0) uniform texture2D linear_tex;
+@sampler_type linear_smp nonfiltering
+layout(binding = 0) uniform sampler linear_smp;
+struct LutWord { uint bits; };
+layout(binding = 1) readonly buffer DisplayLut { LutWord display_lut[]; };
+layout(binding = 0) uniform DisplayUBO {
+    int lut_size;
+    float log2_min;
+    float log2_max;
+    float exposure_ev;
+};
+in vec2 uv;
+out vec4 out_color;
+
+vec3 lut_entry(ivec3 p) {
+    int offset = ((p.z * lut_size + p.y) * lut_size + p.x) * 3;
+    vec3 value;
+    for (int c = 0; c < 3; ++c) {
+        int i = offset + c;
+        value[c] = float((display_lut[i / 2].bits >> uint((i % 2) * 16)) & 65535u) / 65535.0;
+    }
+    return value;
+}
+void main() {
+    vec3 radiance = texture(sampler2D(linear_tex, linear_smp), uv).rgb * exp2(exposure_ev);
+    vec3 s = clamp((log2(max(radiance, vec3(exp2(log2_min)))) - log2_min) / (log2_max - log2_min), 0.0, 1.0);
+    vec3 p = s * float(lut_size - 1);
+    ivec3 lo = ivec3(floor(p));
+    ivec3 hi = min(lo + ivec3(1), ivec3(lut_size - 1));
+    vec3 f = fract(p);
+    vec3 a = mix(mix(lut_entry(lo), lut_entry(ivec3(hi.x, lo.y, lo.z)), f.x),
+                 mix(lut_entry(ivec3(lo.x, hi.y, lo.z)), lut_entry(ivec3(hi.xy, lo.z)), f.x), f.y);
+    vec3 b = mix(mix(lut_entry(ivec3(lo.xy, hi.z)), lut_entry(ivec3(hi.x, lo.y, hi.z)), f.x),
+                 mix(lut_entry(ivec3(lo.x, hi.yz)), lut_entry(hi), f.x), f.y);
+    out_color = vec4(mix(a, b, f.z), 1.0);
+}
+@end
+@program layers_display accum_vs layers_display_fs
