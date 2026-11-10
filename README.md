@@ -1,6 +1,17 @@
 A real-time 3D Gaussian splatting renderer that runs natively or on the web.
 Supports `.ply`, `.sog`, and experimental `.gsanim` 0.1, 0.2 and 0.3 files.
 
+## Amp orbs
+
+`.agents/setup` installs the Linux build dependencies, SDL3 and Emscripten,
+and restores the demo scene from the checked-in `docs/index.data` pack if it
+is missing. It does not overwrite an existing scene. Run `./build.sh` for the
+native renderer or `./build_web.sh` for WebGPU; the optional `res/priest.glb`
+is included in the web build only when present. `amp orb services ensure`
+builds the web demo if needed and serves it through a portal. Rebuild manually
+after changing source files. The web demo requires WebGPU support; native
+software rendering can use `render_mode=alpha` when GPS is unavailable.
+
 Startup defaults to **GPS Prototype** with a **16M work budget** (128 MiB).
 Override with `render_mode=alpha`, `render_mode=stochastic`, or `gps_budget_m=N`.
 

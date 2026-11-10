@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+repo_root="$PWD"
+emsdk="$HOME/emsdk"
+emsdk_version=4.0.23
+sdl_version=3.2.28
+
+echo 'Checking Linux build dependencies...'
+packages=(build-essential cmake curl git python3 pkg-config libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libsqlite3-dev libwebp-dev xvfb xauth mesa-utils)
+missing=()
+for package in "${packages[@]}"; do
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -qx 'install ok installed' || missing+=("$package")
+done
+if ((${#missing[@]})); then
+    sudo apt-get update
+    sudo apt-get install -y "${missing[@]}"
+fi
+
+if ! pkg-config --atleast-version="$sdl_version" sdl3 2>/dev/null; then
+    echo "Building SDL $sdl_version..."
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$sdl_version/SDL3-$sdl_version.tar.gz" | tar xz -C "$tmp"
+    cmake -S "$tmp/SDL3-$sdl_version" -B "$tmp/build" -DCMAKE_BUILD_TYPE=Release -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF
+    cmake --build "$tmp/build" --parallel 2
+    sudo cmake --install "$tmp/build"
+    sudo ldconfig
+    rm -rf "$tmp"
+    trap - EXIT
+fi
+
+echo "Checking Emscripten $emsdk_version..."
+if [ ! -d "$emsdk/.git" ]; then
+    git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$emsdk"
+fi
+if ! "$emsdk/upstream/emscripten/emcc" --version 2>/dev/null | head -1 | grep -Fq "$emsdk_version"; then
+    "$emsdk/emsdk" install "$emsdk_version"
+    "$emsdk/emsdk" activate "$emsdk_version"
+fi
+
+# Login shells used by agents and supervised services need the complete SDK environment.
+marker="# gamesplat orb Emscripten environment"
+profile="$HOME/.bash_profile"
+if ! grep -Fqx "$marker" "$profile" 2>/dev/null; then
+    cat >> "$profile" <<EOF
+
+$marker
+if [[ -z "\${EMSDK:-}" && ( "\$PWD" == "$repo_root" || "\$PWD" == "$repo_root/"* ) ]]; then
+    source "$emsdk/emsdk_env.sh" >/dev/null 2>&1
+fi
+EOF
+fi
+source "$emsdk/emsdk_env.sh" >/dev/null 2>&1
+
+echo 'Checking Emscripten ports...'
+time embuilder build sdl3 emdawnwebgpu
+
+if [ ! -f res/export_n01.sog ]; then
+    echo 'Restoring the demo scene from the checked-in web data pack...'
+    python3 - <<'PY'
+from pathlib import Path
+import re
+
+metadata = Path('docs/index.js').read_text()
+match = re.search(r'filename:"/test/export_n01\.sog",start:(\d+),end:(\d+)', metadata)
+if not match:
+    raise SystemExit('Demo scene metadata not found in docs/index.js')
+start, end = map(int, match.groups())
+with Path('docs/index.data').open('rb') as pack:
+    pack.seek(start)
+    data = pack.read(end - start)
+if len(data) != end - start or not data.startswith(b'PK\x03\x04'):
+    raise SystemExit('Invalid demo scene in docs/index.data')
+Path('res/export_n01.sog').write_bytes(data)
+PY
+fi
+echo 'Orb toolchains ready.'

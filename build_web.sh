@@ -97,8 +97,10 @@ EM_FLAGS_BASE=(
 
 PRELOAD_FLAGS=(
     --preload-file res/export_n01.sog@res/export_n01.sog
-    --preload-file res/priest.glb@res/priest.glb
 )
+if [ -f res/priest.glb ]; then
+    PRELOAD_FLAGS+=(--preload-file res/priest.glb@res/priest.glb)
+fi
 
 if [ "$USE_PRELOAD_CACHE" = "1" ]; then
     PRELOAD_FLAGS+=(--use-preload-cache)

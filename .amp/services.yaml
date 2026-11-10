@@ -1,0 +1,7 @@
+services:
+  web:
+    command: (test -f build/web/webgpu/index.html || ./build_web.sh) && exec python3 -m http.server "$PORT" --bind 0.0.0.0 --directory build/web/webgpu
+    health: /
+    portal:
+      title: Gamesplat WebGPU
+      description: Requires a browser and graphics adapter with WebGPU support.
